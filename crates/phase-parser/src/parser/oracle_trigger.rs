@@ -21,11 +21,12 @@ use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain_ir_ability_root, parse_player_relative_clause,
     parse_where_x_is, rebind_event_context_amount_counts_in_ability, target_filter_controller_ref,
     try_parse_reanimator_aura_etb_effect_ir, try_parse_reanimator_aura_grant_etb_effect_ir,
+    try_parse_trigger_source_owner_shuffle,
 };
 use super::oracle_ir::ast::{parsed_clause, ParsedEffectClause};
 use super::oracle_ir::context::{
-    ConditionObjectAntecedent, ParseContext, ResolvedChainRoot, TriggerConditionObjects,
-    TriggerConditionScope, TriggerZoneChangeProvenance,
+    ConditionObjectAntecedent, DeclaredSlotRegistry, ParseContext, ResolvedChainRoot,
+    TriggerConditionObjects, TriggerConditionScope, TriggerZoneChangeProvenance,
 };
 use super::oracle_ir::doc::PrintedTriggerIndex;
 use super::oracle_ir::effect_chain::{
@@ -42,6 +43,7 @@ use super::oracle_nom::condition::{
 };
 use super::oracle_nom::condition::{
     parse_inner_condition, parse_spell_history_filter, parse_there_are_battlefield_count_clause,
+    source_attacked_or_blocked_this_turn_filter,
 };
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::duration::parse_self_reference_subject;
@@ -670,11 +672,18 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
             count,
             power,
             toughness,
+            additional_members,
             ..
         } => {
             rewrite_variable_x_to_cost_x_paid(count);
             rewrite_trigger_pt_variable_x(power);
             rewrite_trigger_pt_variable_x(toughness);
+            for member in additional_members {
+                let (count, power, toughness) = member.count_and_pt_mut();
+                rewrite_variable_x_to_cost_x_paid(count);
+                rewrite_trigger_pt_variable_x(power);
+                rewrite_trigger_pt_variable_x(toughness);
+            }
         }
         Effect::Pump {
             power, toughness, ..
@@ -2350,6 +2359,58 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 // bodies resolves to the damaged player (CR 120.3).
                 if let Some(modal) = try_parse_inline_modal_ir(&effect_for_parse, &effect_ctx) {
                     return Some(TriggerBody::Modal(Box::new(modal)));
+                }
+                // CR 603.6c + CR 603.4 + CR 608.2k: the self-departure
+                // head or the source-scoped end-step guard establishes the antecedent.
+                // The fresh effect context starts with Known(empty) declared slots
+                // and no pending tracked set. Only the chain parser can accumulate
+                // earlier-clause authority, so the shortcut consumes the whole body.
+                let source_departed = trigger_subject == TargetFilter::SelfRef
+                    && partial_def.origin == Some(Zone::Battlefield)
+                    && partial_def.destination == Some(Zone::Graveyard)
+                    && trigger_head_dies_zone_change(&cond_lower).is_some();
+                let source_participated = condition == TriggerMode::Phase
+                    && partial_def.phase == Some(Phase::End)
+                    && matches!(
+                        &if_condition,
+                        Some(TriggerCondition::SourceMatchesFilter { filter })
+                            if *filter == source_attacked_or_blocked_this_turn_filter()
+                    );
+                let source_owner_shuffle = if (source_departed || source_participated)
+                    && !leading_guard_refused
+                    && (if_condition.is_none() || after_structural_if.is_some())
+                    && !optional
+                    && unless_pay.is_none()
+                    && constraint.is_none()
+                    && matches!(&effect_ctx.chain_declared_slots, DeclaredSlotRegistry::Known(slots) if slots.is_empty())
+                    && effect_ctx.pending_tracked_set.is_none()
+                    && effect_ctx.object_pronoun_ref.is_none()
+                    && effect_ctx.condition_object_antecedent.is_none()
+                    && effect_ctx.demonstrative_object_ref.is_none()
+                    && effect_ctx.plural_object_pronoun_ref.is_none()
+                {
+                    try_parse_trigger_source_owner_shuffle(&effect_without_if)
+                } else {
+                    None
+                };
+                if let Some(clause) = source_owner_shuffle {
+                    let ir = EffectChainIr::single_clause(
+                        &effect_without_if,
+                        AbilityKind::Spell,
+                        clause,
+                        None,
+                        effect_ctx.actor.clone(),
+                        effect_ctx.in_trigger,
+                    );
+                    return Some(TriggerBody::EffectChain(
+                        fail_closed_on_dropped_intervening_if(
+                            ir,
+                            &effect_without_if,
+                            if_condition.as_ref(),
+                            &effect_ctx,
+                            leading_guard_refused,
+                        ),
+                    ));
                 }
                 let (stripped_text, disposition) =
                     extract_illegal_targets_disposition(&effect_for_parse);
@@ -9262,25 +9323,6 @@ fn extract_if_condition_with_card_name(
                     filter: TargetFilter::Typed(
                         TypedFilter::creature()
                             .properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
-                    ),
-                },
-            ),
-            // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
-            // blocked this turn" — the sibling of the attacked-only arm above,
-            // gating on the source creature having attacked OR blocked this turn
-            // (Inferno Hellion). Reuses the existing, already-evaluated
-            // `FilterProp::AttackedOrBlockedThisTurn` (checked against
-            // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
-            // via `SourceMatchesFilter`, so no new `TriggerCondition` variant is
-            // needed. The turn-scoped "this turn" form only; the "this combat"
-            // form (Clockwork cycle, Kjeldoran Home Guard) needs combat-scoped
-            // tracking the engine does not yet keep and is intentionally excluded.
-            (
-                "if ~ attacked or blocked this turn",
-                TriggerCondition::SourceMatchesFilter {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::creature()
-                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
                     ),
                 },
             ),

@@ -8510,6 +8510,7 @@ mod tests {
                         position: crate::types::ability::LibraryPosition::Top,
                     })],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             ),
         ];

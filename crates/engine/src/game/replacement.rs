@@ -8,13 +8,14 @@ use crate::game::filter::ReplacementDefinitionFilterExt;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
-    CombatDamageScope, ControllerRef, CopyTargetPurpose, DamageModification, DamageRedirectTarget,
-    DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect,
-    EffectScope, EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PlayerFilter,
-    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
-    QuantityModification, QuantityRef, RedirectionLifetime, ReplacementChoiceAuthority,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode,
-    ShieldKind, SplitDamagePortion, TapStateChange, TargetFilter, TargetRef,
+    CombatDamageScope, ContinuousModification, ControllerRef, CopyTargetPurpose,
+    DamageModification, DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Duration, Effect, EffectScope, EntryAttackDestination,
+    ManaSpendPermission, PermissionGrantee, PlayerFilter, PostReplacementContinuation,
+    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, QuantityRef,
+    RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind, SplitDamagePortion, TapStateChange,
+    TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -6559,11 +6560,59 @@ fn create_token_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameS
     matches!(event, ProposedEvent::CreateToken { count, .. } if *count > 0)
 }
 
+fn token_specs_share_subtype(first: &TokenSpec, second: &TokenSpec) -> bool {
+    first.characteristics.subtypes.iter().any(|subtype| {
+        second
+            .characteristics
+            .subtypes
+            .iter()
+            .any(|other| subtype.eq_ignore_ascii_case(other))
+    })
+}
+
+fn token_append_definition(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<(&crate::types::ability::AdditionalTokenSpec, PlayerId)> {
+    let definition = stored_replacement_definition(state, rid)?;
+    let controller = replacement_ability_controller(state, rid, definition);
+    Some((definition.additional_token_spec.as_deref()?, controller))
+}
+
+fn resolve_token_append_count(
+    state: &GameState,
+    rid: ReplacementId,
+    controller: PlayerId,
+    quantity: &QuantityExpr,
+    admitted_count: u32,
+) -> u32 {
+    let mut context = crate::game::quantity::QuantityContext::new(rid.source);
+    context.event_amount = Some(u32_to_i32_saturating(admitted_count));
+    u32::try_from(crate::game::quantity::resolve_quantity_with_ctx(
+        state, quantity, controller, context,
+    ))
+    .unwrap_or_default()
+}
+
 fn create_token_applier(
     event: ProposedEvent,
     rid: ReplacementId,
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    apply_create_token_replacement(event, rid, state, None)
+}
+
+struct CompoundTokenAdjustment {
+    append_count: Option<u32>,
+    reduced_count: Option<u32>,
+}
+
+fn apply_create_token_replacement(
+    event: ProposedEvent,
+    rid: ReplacementId,
+    state: &GameState,
+    compound_adjustment: Option<CompoundTokenAdjustment>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
     // Extract the six fields the applier reads, given a def and the controller
@@ -6659,7 +6708,10 @@ fn create_token_applier(
         // CR 614.1a: Modify token count per replacement effect.
         let new_count = match modification {
             Some(QuantityModification::Times { factor }) => count.saturating_mul(factor),
-            Some(QuantityModification::Half) => count / 2,
+            Some(QuantityModification::Half) => compound_adjustment
+                .as_ref()
+                .and_then(|adjustment| adjustment.reduced_count)
+                .unwrap_or(count / 2),
             Some(QuantityModification::Plus { value }) => count.saturating_add(value),
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
             // CR 614.6 + CR 614.7 + CR 111.1: No printed token-creation
@@ -6731,14 +6783,20 @@ fn create_token_applier(
         // CR 614.1a + CR 616.1f + CR 616.2: "those tokens plus ..." (Chatterfang
         // Squirrels, Donatello Mutagen) — "instead" yields ONE modified event, so
         // the added batch joins this event rather than becoming a separate event.
-        // It is sized at the already-modified `new_count`, so a replacement the
-        // affected player ordered earlier (CR 616.1) reaches it; every replacement
-        // applied afterwards applies to it too, to each batch it matches, under
+        // Its count reads the event at the moment this replacement is chosen.
+        // Every replacement applied afterwards applies to it too, under
         // the same ordering (CR 616.1f), and one the added batch newly makes
         // applicable is offered then (CR 616.2). It shares the event's applied set
         // (CR 614.5), which already holds this replacement, so it cannot re-fire
         // on its own batch.
-        if let Some(mut extra) = additional_spec {
+        if let Some(payload) = additional_spec {
+            let append_count = compound_adjustment
+                .as_ref()
+                .and_then(|adjustment| adjustment.append_count)
+                .unwrap_or_else(|| {
+                    resolve_token_append_count(state, rid, source_controller, &payload.count, count)
+                });
+            let mut extra = Box::new(payload.spec);
             // Fill in the replacement source's runtime identity. The parser
             // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
             // be known until the replacement fires.
@@ -6757,6 +6815,16 @@ fn create_token_applier(
             // rulings) — and a later ETB-tap replacement that matches it still
             // applies to it as part of the event.
             extra.tapped |= spec.tapped;
+            // CR 614.6 + CR 508.4: the creating instruction still governs
+            // whether it enters attacking and any destination named for the
+            // whole batch. Per-entrant destinations only seat the original tokens.
+            if spec.enters_attacking {
+                extra.enters_attacking = true;
+                extra.attack_request = copy.as_deref().map_or_else(
+                    || spec.attack_request.for_added_token(),
+                    |batch_copy| batch_copy.attack_request.for_added_token(),
+                );
+            }
             // CR 614.6 + the Chatterfang ruling ("... applies to both
             // the original tokens and the Squirrels"): the appended
             // batch is part of the one modified event, so it inherits
@@ -6766,19 +6834,21 @@ fn create_token_applier(
             if spec.blocking_attacker.is_some() {
                 extra.set_blocking_attacker_ref(spec.blocking_attacker_ref());
             }
-            push_appended_token_batch(
-                &mut appended,
-                &applied,
-                TokenBatch {
-                    owner,
-                    spec: extra,
-                    copy: None,
-                    enter_tapped: EtbTapState::Unspecified,
-                    count: new_count,
-                    redirected_to: None,
-                    applied: HashSet::new(),
-                },
-            );
+            if append_count > 0 {
+                push_appended_token_batch(
+                    &mut appended,
+                    &applied,
+                    TokenBatch {
+                        owner,
+                        spec: extra,
+                        copy: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        count: append_count,
+                        redirected_to: None,
+                        applied: HashSet::new(),
+                    },
+                );
+            }
         }
 
         // CR 614.1a + CR 616.1f: Manufactor's "instead create one of each" — add
@@ -6795,13 +6865,7 @@ fn create_token_applier(
                 .map(|o| o.controller)
                 .unwrap_or(owner);
             for mut extra in specs {
-                let already_present = extra.characteristics.subtypes.iter().any(|s| {
-                    spec.characteristics
-                        .subtypes
-                        .iter()
-                        .any(|already| already.eq_ignore_ascii_case(s))
-                });
-                if already_present {
+                if token_specs_share_subtype(&extra, &spec) {
                     continue;
                 }
                 extra.source_id = rid.source;
@@ -13639,6 +13703,7 @@ fn apply_single_replacement(
     mut proposed: ProposedEvent,
     rid: ReplacementId,
     branch: ReplacementBranch,
+    compound_adjustment: Option<CompoundTokenAdjustment>,
     registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ProposedEvent, ApplyResult> {
@@ -14353,6 +14418,8 @@ fn apply_single_replacement(
             && !matches!(proposed, ProposedEvent::Discard { .. })
         {
             ApplyResult::Modified(proposed)
+        } else if compound_adjustment.is_some() {
+            apply_create_token_replacement(proposed, rid, state, compound_adjustment)
         } else {
             (handler.applier)(proposed, rid, state, events)
         };
@@ -14882,7 +14949,7 @@ pub(crate) fn compound_token_choice_plan(
         .collect();
     let chosen = per_owner
         .iter()
-        .find(|(_, reaching)| owner_demands_choice(state, proposed, reaching))
+        .find(|(owner, reaching)| owner_demands_choice(state, proposed, *owner, reaching, registry))
         .or_else(|| per_owner.first());
     match chosen {
         Some((actor, offered)) => CompoundChoicePlan {
@@ -14899,12 +14966,14 @@ pub(crate) fn compound_token_choice_plan(
 fn owner_demands_choice(
     state: &GameState,
     proposed: &ProposedEvent,
+    owner: PlayerId,
     subset: &[ReplacementId],
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
 ) -> bool {
     match subset {
         [] => false,
         [only] => replacement_is_optional(state, *only),
-        _ => replacement_ordering_is_material(state, subset, proposed),
+        _ => token_replacement_ordering_is_material(state, subset, proposed, owner, registry, 0),
     }
 }
 
@@ -14932,6 +15001,79 @@ pub(crate) fn compound_optional_decider(
         };
     }
     replacement_choice_player(state, proposed, rid)
+}
+
+/// CR 614.1a + CR 111.1: Halving Season rounds down once per kind.
+fn halved_token_batch_counts(
+    state: &GameState,
+    views: &[ProposedEvent],
+    admits: &[bool],
+) -> Vec<Option<u32>> {
+    let mut remainders = Vec::new();
+    views
+        .iter()
+        .zip(admits)
+        .map(|(view, admitted)| {
+            let ProposedEvent::CreateToken {
+                spec, copy, count, ..
+            } = view
+            else {
+                unreachable!("a token batch view is a CreateToken event");
+            };
+            if !admitted {
+                return None;
+            }
+            let carry = if count.is_multiple_of(2) {
+                0
+            } else if let Some(index) = remainders.iter().position(|&(other_spec, other_copy)| {
+                same_token_kind(state, spec, copy.as_deref(), other_spec, other_copy)
+            }) {
+                remainders.swap_remove(index);
+                1
+            } else {
+                remainders.push((spec.as_ref(), copy.as_deref()));
+                0
+            };
+            Some(count / 2 + carry)
+        })
+        .collect()
+}
+
+// CR 707.2: compare the copiable bodies using the same materialization as
+// entry. Keep the other face and any deferred exceptions in the comparison.
+fn same_token_kind<'a>(
+    state: &GameState,
+    spec: &TokenSpec,
+    copy: Option<&'a CopyTokenSpec>,
+    other_spec: &TokenSpec,
+    other_copy: Option<&'a CopyTokenSpec>,
+) -> bool {
+    let copied_face =
+        |copy: Option<&'a CopyTokenSpec>| copy.and_then(|copy| copy.double_faced.as_ref());
+    let deferred = |copy: Option<&'a CopyTokenSpec>| {
+        copy.into_iter().flat_map(|copy| {
+            copy.additional_modifications.iter().filter_map(
+                move |modification| match modification {
+                    ContinuousModification::SetPowerDynamic { .. }
+                    | ContinuousModification::SetToughnessDynamic { .. } => {
+                        Some((modification, copy.donor))
+                    }
+                    _ => None,
+                },
+            )
+        })
+    };
+    if copied_face(copy) != copied_face(other_copy) || !deferred(copy).eq(deferred(other_copy)) {
+        return false;
+    }
+    if spec == other_spec && copy == other_copy {
+        return true;
+    }
+    let values = |spec: &TokenSpec, copy: Option<&CopyTokenSpec>| match copy {
+        Some(copy) => crate::game::effects::token::copy_token_copiable_values(state, copy),
+        None => crate::game::effects::token::token_spec_copiable_values(state, spec),
+    };
+    values(spec, copy) == values(other_spec, other_copy)
 }
 
 /// CR 614.1a + CR 616.1 + CR 101.4 + CR 614.5 + CR 616.1f: apply one chosen
@@ -14987,13 +15129,43 @@ fn apply_replacement_to_token_batches(
         return Ok(ProposedEvent::from_token_batch_views(views)
             .expect("a compound token event's views reassemble"));
     }
+    // CR 614.5 + CR 616.1f: the chosen appender acts once on the owner's
+    // current admitted batches. Its output stays in the same pending event.
+    let mut append_count = token_append_definition(state, rid).map(|(definition, controller)| {
+        let admitted_count = views
+            .iter()
+            .zip(&admits)
+            .filter(|(_, admitted)| **admitted)
+            .filter_map(|(view, _)| view.create_token_count())
+            .fold(0u32, u32::saturating_add);
+        resolve_token_append_count(state, rid, controller, &definition.count, admitted_count)
+    });
+    let reduced_counts = stored_replacement_definition(state, rid)
+        .filter(|def| def.quantity_modification == Some(QuantityModification::Half))
+        .map(|_| halved_token_batch_counts(state, &views, &admits));
     let mut survivors = Vec::with_capacity(views.len());
-    for (view, admitted) in views.into_iter().zip(admits) {
+    for (index, (view, admitted)) in views.into_iter().zip(admits).enumerate() {
         if !admitted {
             survivors.push(view);
             continue;
         }
-        match apply_single_replacement(state, view, rid, work.branch(), registry, events) {
+        let reduced_count = reduced_counts.as_ref().and_then(|counts| counts[index]);
+        let adjustment = (append_count.is_some() || reduced_count.is_some()).then_some(
+            CompoundTokenAdjustment {
+                append_count,
+                reduced_count,
+            },
+        );
+        append_count = append_count.map(|_| 0);
+        match apply_single_replacement(
+            state,
+            view,
+            rid,
+            work.branch(),
+            adjustment,
+            registry,
+            events,
+        ) {
             Ok(applied) => match &work {
                 ChosenReplacementWork::Branch(_) => survivors.push(applied),
                 ChosenReplacementWork::TokenSubstitute(sub) => {
@@ -15295,13 +15467,21 @@ fn apply_chosen_replacement(
             {
                 Ok(proposed)
             } else {
-                apply_single_replacement(state, proposed, rid, work.branch(), registry, events)
-                    .and_then(|event| match &work {
-                        ChosenReplacementWork::Branch(_) => Ok(event),
-                        ChosenReplacementWork::TokenSubstitute(sub) => {
-                            substitute_token_batch(event, sub)
-                        }
-                    })
+                apply_single_replacement(
+                    state,
+                    proposed,
+                    rid,
+                    work.branch(),
+                    None,
+                    registry,
+                    events,
+                )
+                .and_then(|event| match &work {
+                    ChosenReplacementWork::Branch(_) => Ok(event),
+                    ChosenReplacementWork::TokenSubstitute(sub) => {
+                        substitute_token_batch(event, sub)
+                    }
+                })
             }
         }
         // `apply_replacement_to_token_batches` marks `owner`'s batches itself,
@@ -15412,6 +15592,525 @@ pub(crate) fn replacement_last_applied_decides(
     saw_overwrite
 }
 
+/// CR 616.1e + CR 616.1f: compare completed sequences of the offered token
+/// replacements, rediscovering applicability after each application. Pairwise
+/// agreement at the initial count can disappear after another effect acts.
+fn token_replacement_ordering_is_material(
+    state: &GameState,
+    candidates: &[ReplacementId],
+    proposed: &ProposedEvent,
+    owner: PlayerId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    depth: u16,
+) -> bool {
+    const MAX_PROBE_STEPS: usize = 128;
+    const MAX_PROBE_CANDIDATES: usize = MAX_REPLACEMENT_DEPTH as usize;
+    let candidates: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|rid| {
+            token_batch_owners_admitting(state, proposed, *rid, registry).contains(&owner)
+        })
+        .collect();
+    if candidates.len() < 2 {
+        return false;
+    }
+    // Each candidate spends a live pass. If the pipeline can stop before
+    // they all apply, neither the prune nor the full probe models the cutoff.
+    // Let the player choose which effects apply first.
+    let passes_left = replacement_depth_limit(proposed).saturating_sub(depth);
+    if candidates.len() > usize::from(passes_left) {
+        return true;
+    }
+    let _probe = super::engine::SimulationProbeGuard::enter();
+    let _recorder =
+        ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
+    let pruned = fixed_token_entry_prefix(state, proposed, owner, registry, &candidates);
+    let (probe_state, proposed, interacting) = match &pruned {
+        Some((scratch, event, interacting)) => (scratch, event, interacting.as_slice()),
+        None => (state, proposed, candidates.as_slice()),
+    };
+    if interacting.is_empty() {
+        return false;
+    }
+    if interacting.len() > MAX_PROBE_CANDIDATES
+        || interacting
+            .iter()
+            .filter(|&&rid| replacement_is_optional(state, rid))
+            .take(2)
+            .count()
+            == 2
+    {
+        return true;
+    }
+
+    let Some(work_options) = interacting
+        .iter()
+        .map(|&rid| token_replacement_probe_work(state, rid))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return true;
+    };
+    // Compare orders with the same work choices. Different choices of token
+    // substitute or optional branch are independent of the ordering prompt.
+    let Some(assignments) = work_options.iter().try_fold(1usize, |total, works| {
+        total
+            .checked_mul(works.len())
+            .filter(|&count| (1..=MAX_PROBE_STEPS).contains(&count))
+    }) else {
+        return true;
+    };
+
+    let mut equivalent_effects = Vec::new();
+    let groups: Vec<_> = interacting
+        .iter()
+        .enumerate()
+        .map(|(index, &rid)| {
+            let Some(effect) = source_independent_token_order_effect(state, rid) else {
+                return index;
+            };
+            if let Some((_, representative)) = equivalent_effects
+                .iter()
+                .find(|(other, _)| *other == effect)
+            {
+                return *representative;
+            }
+            equivalent_effects.push((effect, index));
+            index
+        })
+        .collect();
+
+    let mut probe = TokenReplacementOrderProbe {
+        original_state: state,
+        candidates: interacting,
+        known_candidates: &candidates,
+        groups: &groups,
+        owner,
+        registry,
+        steps_left: MAX_PROBE_STEPS,
+    };
+    let remaining = (1 << interacting.len()) - 1;
+    (0..assignments).any(|mut assignment| {
+        let work: Vec<_> = work_options
+            .iter()
+            .map(|options| {
+                let choice = &options[assignment % options.len()];
+                assignment /= options.len();
+                choice
+            })
+            .collect();
+        !probe.all_orders_agree(probe_state, Some(proposed), remaining, &work, &mut None)
+    })
+}
+
+// On a single ordinary token batch, identical tap writes stamp the same field.
+// Keep the proof narrow: another entry modifier may only append a fixed
+// counter payload, and there may be at most one such append. In particular,
+// substitution, copy, prevention, and competing tap states stay in the probe.
+fn fixed_token_entry_prefix(
+    state: &GameState,
+    proposed: &ProposedEvent,
+    owner: PlayerId,
+    registry: &IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    candidates: &[ReplacementId],
+) -> Option<(GameState, ProposedEvent, Vec<ReplacementId>)> {
+    if !matches!(proposed, ProposedEvent::CreateToken { copy: None, .. })
+        || proposed.has_appended_token_batches()
+    {
+        return None;
+    }
+
+    let mut taps = Vec::new();
+    let mut tap_class = None;
+    let mut counter = None;
+    for &rid in candidates {
+        let def = replacement_definition_for_id(state, rid)?;
+        if state.replacement_rider(def).is_some() {
+            return None;
+        }
+        let effect = pure_token_entry_modifier(def)?;
+        match candidate_materiality(state, rid, proposed) {
+            CandidateMateriality::Writes {
+                field: EventField::EnterTapped,
+                commute,
+            } if enter_tapped_commute_class(effect) == Some(commute)
+                && tap_class.is_none_or(|previous| commute.commutes_with(previous)) =>
+            {
+                tap_class = Some(commute);
+                taps.push(rid);
+            }
+            CandidateMateriality::Disjoint
+                if matches!(
+                    effect,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        count: QuantityExpr::Fixed { .. },
+                        ..
+                    }
+                ) && counter.is_none() =>
+            {
+                counter = Some(rid);
+            }
+            _ => return None,
+        }
+    }
+    let [first, rest @ ..] = taps.as_slice() else {
+        return None;
+    };
+    if rest.is_empty() {
+        return None;
+    }
+
+    let apply = |scratch: &mut GameState, event, rid| {
+        apply_chosen_replacement(
+            scratch,
+            event,
+            rid,
+            owner,
+            ChosenReplacementWork::Branch(ReplacementBranch::Execute),
+            registry,
+            &mut Vec::new(),
+        )
+        .ok()
+    };
+    let same_remaining = |scratch: &GameState, event: &ProposedEvent| {
+        let found = choosable_replacement_candidates(
+            scratch,
+            event,
+            find_applicable_replacements(scratch, event, registry),
+        );
+        found.iter().all(|rid| candidates.contains(rid))
+            && candidates
+                .iter()
+                .all(|rid| found.contains(rid) != event.already_applied(rid))
+    };
+
+    // The first tap is the only tap that can change the projection. Check that
+    // neither it nor a counter changes the remaining choices, including when
+    // both have applied. A fixed counter append and the tap stamp then produce
+    // the same event in either order. Subsequent taps only mark themselves applied.
+    if let Some(rid) = counter {
+        let mut scratch = state.clone();
+        let event = apply(&mut scratch, proposed.clone(), rid)?;
+        if !same_remaining(&scratch, &event) {
+            return None;
+        }
+        let event = apply(&mut scratch, event, *first)?;
+        if !same_remaining(&scratch, &event) {
+            return None;
+        }
+    }
+    let mut scratch = state.clone();
+    let mut event = apply(&mut scratch, proposed.clone(), *first)?;
+    if !same_remaining(&scratch, &event) {
+        return None;
+    }
+    for &rid in rest {
+        event = apply(&mut scratch, event, rid)?;
+    }
+    Some((scratch, event, counter.into_iter().collect()))
+}
+
+fn pure_token_entry_modifier(def: &ReplacementDefinition) -> Option<&Effect> {
+    if def.event != ReplacementEvent::ChangeZone {
+        return None;
+    }
+    let execute = def.execute.as_deref()?;
+    let mut modifier = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .destination_zone(Zone::Battlefield)
+        .execute(AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            execute.effect.as_ref().clone(),
+        ));
+    modifier.valid_card = def.valid_card.clone();
+    modifier.description = def.description.clone();
+    (def == &modifier).then_some(execute.effect.as_ref())
+}
+
+// Only merge sibling search branches for definitions whose behavior is
+// independent of source identity. Each copy still has its own application.
+fn source_independent_token_order_effect(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<(&ReplacementDefinition, PlayerId)> {
+    let def = replacement_definition_for_id(state, rid)?;
+    if !matches!(
+        def.token_owner_scope,
+        None | Some(ControllerRef::You | ControllerRef::Opponent)
+    ) {
+        return None;
+    }
+    let mut modifier_only = ReplacementDefinition::new(def.event.clone());
+    modifier_only.description = def.description.clone();
+    match def.event {
+        ReplacementEvent::CreateToken => {
+            modifier_only.quantity_modification = Some(def.quantity_modification.clone()?);
+            modifier_only.token_owner_scope = def.token_owner_scope.clone();
+            if matches!(
+                def.condition,
+                Some(ReplacementCondition::TokenCoreTypeMatches { .. })
+            ) {
+                modifier_only.condition = def.condition.clone();
+            }
+        }
+        ReplacementEvent::ChangeZone => {
+            enter_tapped_commute_class(pure_token_entry_modifier(def)?)?;
+            if let Some(filter) = def.valid_card.as_ref() {
+                let TargetFilter::Typed(filter) = filter else {
+                    return None;
+                };
+                if !filter.properties.is_empty()
+                    || !matches!(
+                        filter.controller,
+                        None | Some(ControllerRef::You | ControllerRef::Opponent)
+                    )
+                {
+                    return None;
+                }
+            }
+            return Some((def, replacement_ability_controller(state, rid, def)));
+        }
+        _ => return None,
+    }
+    (def == &modifier_only).then(|| (def, replacement_ability_controller(state, rid, def)))
+}
+
+struct TokenReplacementOrderProbe<'a> {
+    original_state: &'a GameState,
+    candidates: &'a [ReplacementId],
+    known_candidates: &'a [ReplacementId],
+    groups: &'a [usize],
+    owner: PlayerId,
+    registry: &'a IndexMap<ReplacementEvent, ReplacementHandlerEntry>,
+    steps_left: usize,
+}
+
+impl TokenReplacementOrderProbe<'_> {
+    fn all_orders_agree(
+        &mut self,
+        state: &GameState,
+        event: Option<&ProposedEvent>,
+        remaining: u64,
+        work: &[&ChosenReplacementWork],
+        expected: &mut Option<Vec<TokenBatch>>,
+    ) -> bool {
+        if let Some(event) = event.filter(|_| remaining != 0) {
+            let scope = token_batch_scope(event, self.owner);
+            let applicable = choosable_replacement_candidates(
+                state,
+                event,
+                find_applicable_replacements(state, event, self.registry),
+            );
+            let reaches_owner = |rid| {
+                scope == TokenBatchScope::WholeEvent
+                    || token_batch_owners_admitting(state, event, rid, self.registry)
+                        .contains(&self.owner)
+            };
+            let applicable: Vec<_> = applicable
+                .into_iter()
+                .filter(|&rid| reaches_owner(rid))
+                .collect();
+            // A newly eligible effect can interrupt this sequence. A proof
+            // over the original set cannot account for that interaction.
+            if applicable
+                .iter()
+                .any(|rid| !self.known_candidates.contains(rid))
+            {
+                return false;
+            }
+            let mut seen_groups = 0;
+            for (index, &rid) in self.candidates.iter().enumerate() {
+                let bit = 1 << index;
+                let group = 1 << self.groups[index];
+                if remaining & bit == 0 || seen_groups & group != 0 || !applicable.contains(&rid) {
+                    continue;
+                }
+
+                seen_groups |= group;
+                let Some(steps_left) = self.steps_left.checked_sub(1) else {
+                    return false;
+                };
+                self.steps_left = steps_left;
+                let mut scratch = state.clone();
+                let next = match apply_chosen_replacement(
+                    &mut scratch,
+                    event.clone(),
+                    rid,
+                    self.owner,
+                    work[index].clone(),
+                    self.registry,
+                    &mut Vec::new(),
+                ) {
+                    Ok(event) => Some(event),
+                    Err(ApplyResult::Prevented) => None,
+                    Err(ApplyResult::Modified(_)) => return false,
+                };
+                if !self.all_orders_agree(&scratch, next.as_ref(), remaining & !bit, work, expected)
+                {
+                    return false;
+                }
+            }
+            if seen_groups != 0 {
+                return true;
+            }
+        }
+
+        let outcome = match event {
+            Some(event) => {
+                let Some(batches) = event.clone().into_token_batches() else {
+                    return false;
+                };
+                batches
+            }
+            None => Vec::new(),
+        };
+        match expected {
+            Some(first) => token_batch_outcomes_equal(self.original_state, first, outcome),
+            None => {
+                *expected = Some(outcome);
+                true
+            }
+        }
+    }
+}
+
+/// The possible works for this candidate. A large or unrecognized choice
+/// remains a real ordering choice instead of spending unbounded probe work.
+fn token_replacement_probe_work(
+    state: &GameState,
+    rid: ReplacementId,
+) -> Option<Vec<ChosenReplacementWork>> {
+    const MAX_PROBE_CHOICES: usize = 16;
+    let def = replacement_definition_for_id(state, rid)?;
+    if matches!(def.mode, ReplacementMode::MayCost { .. })
+        || replacement_mode_decline(&def.mode).is_some()
+    {
+        return None;
+    }
+    let controller = replacement_ability_controller(state, rid, def);
+    let execute = ChosenReplacementWork::Branch(ReplacementBranch::Execute);
+    let one = |sub| Some(vec![ChosenReplacementWork::TokenSubstitute(sub)]);
+    let mut works = match token_substitute_shape(def) {
+        Some(TokenSubstituteShape::Fixed(work)) => {
+            one(fixed_copy_substitute(state, rid, &work, controller))
+        }
+        Some(TokenSubstituteShape::Branch { branches }) if branches.len() <= MAX_PROBE_CHOICES => {
+            branches
+                .iter()
+                .map(|branch| {
+                    let work = EventModifiers::first_non_modifier_ability(Some(branch))?;
+                    let resolved = build_resolved_from_def(work, rid.source, controller);
+                    let (spec, _, _, _) =
+                        crate::game::effects::token::resolve_token_spec(state, &resolved)?;
+                    Some(ChosenReplacementWork::TokenSubstitute(
+                        TokenSubstitute::Token(Box::new(spec)),
+                    ))
+                })
+                .collect()
+        }
+        Some(TokenSubstituteShape::CopySource { filter, tail }) => {
+            let mut donors = super::engine_replacement::find_copy_targets(
+                state, &filter, rid.source, controller, None,
+            );
+            if donors.len() > MAX_PROBE_CHOICES {
+                return None;
+            }
+            donors.sort_unstable();
+            if donors.is_empty() {
+                one(TokenSubstitute::Nothing)
+            } else {
+                Some(
+                    donors
+                        .into_iter()
+                        .map(|id| {
+                            let sub =
+                                chosen_copy_substitute(state, rid.source, controller, &tail, id)
+                                    .unwrap_or(TokenSubstitute::Nothing);
+                            ChosenReplacementWork::TokenSubstitute(sub)
+                        })
+                        .collect(),
+                )
+            }
+        }
+        Some(TokenSubstituteShape::Branch { .. }) => None,
+        None => {
+            let execute_ability =
+                EventModifiers::first_non_modifier_ability(def.execute.as_deref());
+            if state.replacement_rider(def).is_some()
+                || execute_ability.is_some_and(|ability| {
+                    !matches!(ability.effect.as_ref(), Effect::Token { .. })
+                        || ability.sub_ability.is_some()
+                        || ability.else_ability.is_some()
+                })
+            {
+                return None;
+            }
+            Some(vec![execute])
+        }
+    }?;
+    if replacement_mode_is_optional(&def.mode) {
+        works.push(ChosenReplacementWork::Branch(ReplacementBranch::Decline));
+    }
+    Some(works)
+}
+
+fn copy_token_entry_counters(
+    copy: Option<&CopyTokenSpec>,
+) -> impl Iterator<Item = &ContinuousModification> {
+    copy.into_iter()
+        .flat_map(|copy| &copy.additional_modifications)
+        .filter(|modification| {
+            matches!(
+                modification,
+                ContinuousModification::AddCounterOnEnter { .. }
+            )
+        })
+}
+
+fn token_batch_outcomes_equal(
+    state: &GameState,
+    left: &[crate::types::proposed_event::TokenBatch],
+    mut right: Vec<crate::types::proposed_event::TokenBatch>,
+) -> bool {
+    for batch in left {
+        let mut remaining = batch.count;
+        for other in &mut right {
+            if remaining == 0 {
+                break;
+            }
+            if other.count == 0
+                || batch.owner != other.owner
+                || batch.redirected_to != other.redirected_to
+                || batch.enter_tapped.resolve(batch.spec.tapped)
+                    != other.enter_tapped.resolve(other.spec.tapped)
+                || batch.spec.enter_with_counters != other.spec.enter_with_counters
+                || !copy_token_entry_counters(batch.copy.as_deref())
+                    .eq(copy_token_entry_counters(other.copy.as_deref()))
+                || batch.spec.enters_attacking != other.spec.enters_attacking
+                || batch.spec.attack_request != other.spec.attack_request
+                || batch.spec.attach_to != other.spec.attach_to
+                || batch.spec.sacrifice_at != other.spec.sacrifice_at
+                || !same_token_kind(
+                    state,
+                    &batch.spec,
+                    batch.copy.as_deref(),
+                    &other.spec,
+                    other.copy.as_deref(),
+                )
+            {
+                continue;
+            }
+            let matched = remaining.min(other.count);
+            remaining -= matched;
+            other.count -= matched;
+        }
+        if remaining != 0 {
+            return false;
+        }
+    }
+    right.iter().all(|batch| batch.count == 0)
+}
+
 pub(crate) fn replacement_ordering_is_material(
     state: &GameState,
     candidates: &[ReplacementId],
@@ -15421,6 +16120,14 @@ pub(crate) fn replacement_ordering_is_material(
     // competitor reads makes the order the affected player's choice.
     if as_enters_choice_changes_applicability(state, candidates, proposed) {
         return true;
+    }
+    if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+        let registry = replacement_registry();
+        let views = proposed.clone().into_token_batch_views();
+        return views.iter().any(|view| {
+            let owner = view.affected_player(state);
+            token_replacement_ordering_is_material(state, candidates, proposed, owner, registry, 0)
+        });
     }
     let mut seen_writes: Vec<(EventField, CommuteClass)> = Vec::new();
     for rid in candidates {
@@ -17868,7 +18575,18 @@ fn pipeline_loop(
                 }
             }
         } else if state.replacement_auto_choice_tail.is_some()
-            || replacement_ordering_is_material(state, &candidates, &proposed)
+            || if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                token_replacement_ordering_is_material(
+                    state,
+                    &candidates,
+                    &proposed,
+                    actor,
+                    registry,
+                    depth,
+                )
+            } else {
+                replacement_ordering_is_material(state, &candidates, &proposed)
+            }
         {
             // CR 616.1: If multiple replacement effects apply, the affected player
             // or controller of the affected object chooses which one to apply first,
@@ -17925,13 +18643,18 @@ fn pipeline_loop(
             });
             return replay_pending_replacement(state, actor, events);
         } else {
-            // CR 616.1: the choice is degenerate here — every candidate ordering
-            // yields an observationally identical outcome — so the prompt is
-            // skipped. Auto-resolve: apply candidates[0] and re-loop, which
-            // preserves the CR 616.1f repeat semantics (apply one, then repeat
-            // over the still-applicable effects). All candidates still apply
-            // exactly once.
-            let rid = candidates[0];
+            // CR 616.1f: every complete ordering yields the same outcome.
+            // Auto-apply one candidate, then rediscover what still applies.
+            // CR 614.5: each replacement still gets only one opportunity.
+            let rid = if matches!(proposed, ProposedEvent::CreateToken { .. }) {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|rid| !replacement_is_optional(state, *rid))
+                    .unwrap_or(candidates[0])
+            } else {
+                candidates[0]
+            };
             // CR 614.12a: an as-enters choice is made before the permanent enters.
             if let Some(choice) = as_enters_named_choice(state, &proposed, rid) {
                 return park_as_enters_named_choice(state, proposed, depth, rid, choice, events);
@@ -18988,6 +19711,28 @@ fn accept_token_substitute(
     }
 }
 
+fn chosen_copy_substitute(
+    state: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    tail: &AbilityDefinition,
+    donor: ObjectId,
+) -> Option<TokenSubstitute> {
+    let resolved = build_resolved_from_def_with_targets(
+        tail,
+        source,
+        controller,
+        vec![TargetRef::Object(donor)],
+    );
+    let (_, entry) = crate::game::effects::token_copy::CopyEntryState::resolve(state, &resolved)?;
+    let spec = crate::game::effects::token_copy::resolve_copy_token_specs(state, &resolved, entry)
+        .ok()
+        .and_then(|specs| specs.into_iter().next());
+    Some(spec.map_or(TokenSubstitute::Nothing, |spec| {
+        TokenSubstitute::Copy(Box::new(spec))
+    }))
+}
+
 /// CR 614.6 + CR 616.1f: answer a parked token substitute: build it from the
 /// decider's answer, rewrite the decider's batches, mark, and resume the
 /// pipeline. The drain stack is untouched, as at the accept. A record or
@@ -19059,29 +19804,12 @@ fn continue_token_substitute(
                     return ReplacementResult::NeedsChoice(decider);
                 }
             };
-            let resolved = build_resolved_from_def_with_targets(
-                &tail,
-                rec.replacement.source,
-                decider,
-                vec![TargetRef::Object(id)],
-            );
-            let entry =
-                match crate::game::effects::token_copy::CopyEntryState::resolve(state, &resolved) {
-                    Some((_, entry)) => entry,
-                    None => {
-                        state.pending_replacement = Some(pending);
-                        return ReplacementResult::NeedsChoice(decider);
-                    }
-                };
-            match crate::game::effects::token_copy::resolve_copy_token_specs(
-                state, &resolved, entry,
-            ) {
-                Ok(specs) => match specs.into_iter().next() {
-                    Some(spec) => TokenSubstitute::Copy(Box::new(spec)),
-                    // CR 609.3: the answered source supplies nothing to copy.
-                    None => TokenSubstitute::Nothing,
-                },
-                Err(_) => TokenSubstitute::Nothing,
+            match chosen_copy_substitute(state, rec.replacement.source, decider, &tail, id) {
+                Some(sub) => sub,
+                None => {
+                    state.pending_replacement = Some(pending);
+                    return ReplacementResult::NeedsChoice(decider);
+                }
             }
         }
         _ => {
@@ -21004,6 +21732,7 @@ mod tests {
             entry,
             rid,
             ReplacementBranch::Execute,
+            None,
             registry,
             &mut events,
         )
@@ -29041,6 +29770,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29081,6 +29811,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29098,6 +29829,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -29115,6 +29847,7 @@ mod tests {
                 index: 0,
             },
             ReplacementBranch::Execute,
+            None,
             &registry,
             &mut events,
         )
@@ -32189,7 +32922,10 @@ mod tests {
         };
         let repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(squirrel_spec);
+            .additional_token_spec(
+                squirrel_spec,
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            );
         let mut state = test_state_with_object(chatterfang, Zone::Battlefield, vec![repl]);
         let mut events = Vec::new();
 
@@ -32763,6 +33499,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             )
         }
@@ -33079,6 +33816,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             ));
 
@@ -35093,6 +35831,7 @@ mod tests {
             event,
             ReplacementId { source, index: 0 },
             ReplacementBranch::Decline,
+            None,
             &registry,
             &mut events,
         );
@@ -35137,6 +35876,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             )
         }

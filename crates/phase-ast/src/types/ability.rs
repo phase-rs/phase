@@ -5027,7 +5027,7 @@ pub enum RestrictionScope {
 
 /// Identifies which players are affected by a temporary game restriction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", content = "data", from = "RestrictionPlayerScopeRepr")]
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
@@ -5039,19 +5039,11 @@ pub enum RestrictionPlayerScope {
     /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
-    /// CR 109.4 + CR 608.2c + CR 608.2h: The controller of the parent effect's
-    /// object target — "its controller" where "it" is the object countered/
-    /// destroyed/tapped by the parent instruction (Render Silent: "Counter target
-    /// spell. Its controller can't cast spells this turn."). Resolved to
-    /// `SpecificPlayer` by `add_restriction::fill_runtime_fields` at restriction-
-    /// creation time via `ability_utils::parent_target_controller`, capturing the
-    /// referent's controller from last-known information (the object has left the
-    /// stack by the time the chained restriction resolves). Distinct from
-    /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
-    /// this derives a player from an *object* target's controller (CR 109.4).
-    /// Mirrors `PlayerFilter::ParentObjectTargetController` /
-    /// `PlayerScope::ParentObjectTarget` on the sibling enums.
-    ParentObjectTargetController,
+    /// CR 108.3 + CR 109.4 + CR 608.2h: The parent object target's owner or
+    /// controller, captured as a specific player when the restriction is created.
+    ParentObjectTarget {
+        possession: PossessionAxis,
+    },
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —
@@ -5081,9 +5073,58 @@ pub enum RestrictionPlayerScope {
     /// creation — locking the activator so the ban survives the source changing
     /// controller or leaving play — exactly like the other affected-player scopes
     /// (`TargetedPlayer`, `DefendingPlayer`, `ScopedPlayer`,
-    /// `ParentObjectTargetController`). This parser-facing scope is never stored:
+    /// `ParentObjectTarget`). This parser-facing scope is never stored:
     /// enforcement and display only ever see the lowered `SpecificPlayer`.
     SourceController,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum RestrictionPlayerScopeRepr {
+    AllPlayers,
+    SpecificPlayer(PlayerId),
+    TargetedPlayer,
+    ParentTargetedPlayer,
+    // The legacy controller tag is a unit payload with no `data` key.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget(Option<ParentObjectTargetPossession>),
+    #[serde(rename = "ParentObjectTargetOwner")]
+    LegacyParentOwner,
+    OpponentsOfSourceController,
+    DefendingPlayer,
+    ScopedPlayer,
+    SourceController,
+}
+
+#[derive(Deserialize)]
+struct ParentObjectTargetPossession {
+    #[serde(default = "default_parent_object_target_possession")]
+    possession: PossessionAxis,
+}
+
+impl From<RestrictionPlayerScopeRepr> for RestrictionPlayerScope {
+    fn from(repr: RestrictionPlayerScopeRepr) -> Self {
+        match repr {
+            RestrictionPlayerScopeRepr::AllPlayers => Self::AllPlayers,
+            RestrictionPlayerScopeRepr::SpecificPlayer(player) => Self::SpecificPlayer(player),
+            RestrictionPlayerScopeRepr::TargetedPlayer => Self::TargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentTargetedPlayer => Self::ParentTargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentObjectTarget(data) => Self::ParentObjectTarget {
+                possession: data.map_or_else(default_parent_object_target_possession, |data| {
+                    data.possession
+                }),
+            },
+            RestrictionPlayerScopeRepr::LegacyParentOwner => Self::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            },
+            RestrictionPlayerScopeRepr::OpponentsOfSourceController => {
+                Self::OpponentsOfSourceController
+            }
+            RestrictionPlayerScopeRepr::DefendingPlayer => Self::DefendingPlayer,
+            RestrictionPlayerScopeRepr::ScopedPlayer => Self::ScopedPlayer,
+            RestrictionPlayerScopeRepr::SourceController => Self::SourceController,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -23650,6 +23691,100 @@ where
     })
 }
 
+/// An additional token noun phrase in a single creation instruction (CR 701.7a).
+/// Its characteristics and quantity remain unresolved until the instruction runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TokenCreationMember {
+    #[serde(flatten)]
+    effect: Box<Effect>,
+    /// CR 115.10a + CR 608.2d: A described host is chosen during creation.
+    #[serde(skip_serializing_if = "TargetChoiceTiming::is_stack")]
+    host_choice_timing: TargetChoiceTiming,
+}
+
+impl TokenCreationMember {
+    pub fn new(effect: Effect) -> Option<Self> {
+        Self::with_host_choice_timing(effect, TargetChoiceTiming::Stack)
+    }
+
+    pub fn with_host_choice_timing(
+        effect: Effect,
+        host_choice_timing: TargetChoiceTiming,
+    ) -> Option<Self> {
+        match &effect {
+            Effect::Token {
+                additional_members, ..
+            } if additional_members.is_empty() => Some(Self {
+                effect: Box::new(effect),
+                host_choice_timing,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn effect(&self) -> &Effect {
+        &self.effect
+    }
+
+    pub fn resolution_host_filter(&self) -> Option<&TargetFilter> {
+        match self.effect() {
+            Effect::Token { attach_to, .. }
+                if self.host_choice_timing == TargetChoiceTiming::Resolution =>
+            {
+                attach_to.as_ref()
+            }
+            _ => None,
+        }
+    }
+    pub fn count_and_pt_mut(&mut self) -> (&mut QuantityExpr, &mut PtValue, &mut PtValue) {
+        let Effect::Token {
+            count,
+            power,
+            toughness,
+            ..
+        } = self.effect.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        (count, power, toughness)
+    }
+
+    pub(crate) fn static_abilities_mut(&mut self) -> &mut [StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.effect.as_mut()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+
+    pub(crate) fn static_abilities(&self) -> &[StaticDefinition] {
+        let Effect::Token {
+            static_abilities, ..
+        } = self.effect()
+        else {
+            unreachable!("a token creation member carries a token effect");
+        };
+        static_abilities
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenCreationMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Member {
+            #[serde(flatten)]
+            effect: Effect,
+            #[serde(default)]
+            host_choice_timing: TargetChoiceTiming,
+        }
+        let member = Member::deserialize(deserializer)?;
+        Self::with_host_choice_timing(member.effect, member.host_choice_timing)
+            .ok_or_else(|| de::Error::custom("expected a single token creation member"))
+    }
+}
+
 /// CR 701.21a + CR 608.2c: How a sacrifice instruction selects permanents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SacrificeSelection {
@@ -23962,6 +24097,9 @@ pub enum Effect {
         /// X +1/+1 counters on it" patterns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, QuantityExpr)>,
+        /// Further noun phrases governed by this instruction's creation verb and owner.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        additional_members: Vec<TokenCreationMember>,
     },
     GainLife {
         #[serde(default = "default_quantity_one")]
@@ -30255,7 +30393,7 @@ fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
 }
 
-/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Backward-compat default for the legacy `ParentObjectTargetController` unit tag.
 /// Old saves carried no `possession` field; the tag itself meant the controller.
 fn default_parent_object_target_possession() -> PossessionAxis {
     PossessionAxis::Controller
@@ -32144,6 +32282,22 @@ impl Effect {
             Effect::RuntimeHandled {
                 handler: RuntimeHandler::RepeatProcess
             }
+        )
+    }
+
+    /// The token batches governed by this creation instruction, in Oracle order.
+    pub fn token_creation_members(&self) -> impl Iterator<Item = &Effect> {
+        let members = match self {
+            Effect::Token {
+                additional_members, ..
+            } => Some(additional_members.as_slice()),
+            _ => None,
+        };
+        members.map(|_| self).into_iter().chain(
+            members
+                .into_iter()
+                .flatten()
+                .map(TokenCreationMember::effect),
         )
     }
 
@@ -35019,6 +35173,7 @@ macro_rules! define_effect_quantity_walk {
                 toughness,
                 count,
                 enter_with_counters,
+                additional_members,
                 ..
             } => {
                 visit_pt(power, f);
@@ -35026,6 +35181,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 for (_, q) in enter_with_counters {
                     f(q);
+                }
+                for member in additional_members {
+                    member.effect.$name(f);
                 }
             }
             Effect::GainLife { amount, .. } => {
@@ -44630,6 +44788,26 @@ impl DefinitionOrigin {
     }
 }
 
+/// CR 614.1a + CR 616.1f: Token characteristics and quantity appended to
+/// the same creation event by a replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdditionalTokenSpec {
+    #[serde(flatten)]
+    pub spec: crate::types::token_spec::TokenSpec,
+    /// "That many" reads the count admitted when the replacement applies.
+    #[serde(default = "AdditionalTokenSpec::proportional_count")]
+    pub count: QuantityExpr,
+}
+
+impl AdditionalTokenSpec {
+    /// Legacy records appended proportionally to the admitted token count.
+    pub const fn proportional_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }
+    }
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -44832,11 +45010,8 @@ pub struct ReplacementDefinition {
     /// pattern class (Chatterfang, Squirrel General; Donatello, Sol Invictus).
     /// The stored spec carries static characteristics only; `source_id` and
     /// `controller` are filled from the replacement source at apply time.
-    /// Count equals the primary event's `count` at apply time, so additional
-    /// replacements (e.g., Doubling Season) ordered before Chatterfang are
-    /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_token_spec: Option<Box<crate::types::token_spec::TokenSpec>>,
+    pub additional_token_spec: Option<Box<AdditionalTokenSpec>>,
     /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
     /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
     /// token, instead create one of each"). Each listed spec whose subtype
@@ -45372,8 +45547,12 @@ impl ReplacementDefinition {
     /// the primary `CreateToken` event (Chatterfang Squirrels, Donatello
     /// Mutagen). The stored spec's `source_id` / `controller` are placeholders
     /// overwritten with the replacement source at apply time.
-    pub fn additional_token_spec(mut self, spec: crate::types::token_spec::TokenSpec) -> Self {
-        self.additional_token_spec = Some(Box::new(spec));
+    pub fn additional_token_spec(
+        mut self,
+        spec: crate::types::token_spec::TokenSpec,
+        count: QuantityExpr,
+    ) -> Self {
+        self.additional_token_spec = Some(Box::new(AdditionalTokenSpec { spec, count }));
         self
     }
 
@@ -46322,6 +46501,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 
@@ -49573,6 +49753,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         assert_eq!(token.count_expr(), Some(&fixed(4)));
 
@@ -50908,6 +51089,34 @@ mod tests {
     }
 
     #[test]
+    fn restriction_parent_object_target_decodes_legacy_controller_and_round_trips_owner() {
+        let legacy = r#"{"type":"ParentObjectTargetController"}"#;
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(legacy).unwrap(),
+            RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
+        );
+        let owner = RestrictionPlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Owner,
+        };
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(r#"{"type":"ParentObjectTargetOwner"}"#)
+                .unwrap(),
+            owner,
+        );
+        let json = serde_json::json!({
+            "type": "ParentObjectTarget",
+            "data": { "possession": "Owner" }
+        });
+        assert_eq!(serde_json::to_value(&owner).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<RestrictionPlayerScope>(json).unwrap(),
+            owner,
+        );
+    }
+
+    #[test]
     fn player_filter_any_of_and_target_player_round_trip() {
         let filter = PlayerFilter::AnyOf {
             filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
@@ -51653,6 +51862,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();

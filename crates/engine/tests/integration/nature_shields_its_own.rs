@@ -1142,23 +1142,13 @@ fn chatterfang_tokens_do_not_block_a_destroyed_attacker() {
     );
 }
 
-/// T6 (Seams A + B, compound): Visitation + Chatterfang on one event. The
-/// pipeline auto-resolves the order without prompting, deterministically
-/// Chatterfang-first, so Visitation substitutes BOTH batches: 2 Angels, 0
-/// Plants, 0 Squirrels. Both Angels block post-fix. Revert-fail: neither
-/// Angel blocks (Seam A drops the rider on the own batch; Seams B then A
-/// drop it on the appended batch).
-///
-/// NOTE (pre-existing, out of scope): the order IS material — Visitation
-/// first would yield Angel + Squirrel, not 2 Angels — so CR 616.1 requires
-/// an ordering prompt here. `candidate_materiality` classifies the
-/// `additional_token_spec` appender `Disjoint`, so
-/// `replacement_ordering_is_material` reports immaterial and `pipeline_loop`
-/// auto-resolves. `drain_triggers` below pins the current no-prompt
-/// behavior (it panics on any prompt); a materiality fix must re-drive this
-/// test through the new prompt.
-#[test]
-fn visitation_and_chatterfang_compound_blocks_with_both_batches() {
+/// T6 (Seams A + B, compound): Visitation + Chatterfang on one event. CR
+/// 616.1: the order is material, so P0 chooses it. Chatterfang first lets
+/// Visitation substitute BOTH batches (2 Angels); Visitation first leaves an
+/// Angel plus Chatterfang's Squirrel. Either way every created token blocks.
+/// Revert-fail: a token that doesn't block (Seam A drops the rider on the own
+/// batch; Seams B then A drop it on the appended batch).
+fn visitation_and_chatterfang_compound_blocks(first: &str, angels: usize, squirrels: usize) {
     let (mut scenario, raiders) = archenemy_scenario(1);
     scenario.add_enchantment_from_oracle(P0, "Divine Visitation", DIVINE_VISITATION);
     scenario.add_creature_from_oracle(P0, "Chatterfang, Squirrel General", 3, 3, CHATTERFANG);
@@ -1168,20 +1158,50 @@ fn visitation_and_chatterfang_compound_blocks_with_both_batches() {
     let p0_life = life_of(&runner, P0);
 
     attack_unblocked(&mut runner, &[(bears, AttackTarget::Player(P0))]);
+    let mut ordered = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(player, P0, "the affected player orders the replacements");
+                assert_eq!(candidates.len(), 2);
+                let index = candidates
+                    .iter()
+                    .position(|candidate| candidate.source_name == first)
+                    .expect("both replacements are offered");
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("choose the first replacement");
+                ordered = true;
+                break;
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt before the ordering choice: {other:?}"),
+        }
+    }
+    assert!(
+        ordered,
+        "the Plant's creation asks for the replacement order"
+    );
     drain_triggers(&mut runner);
 
-    // Reach guards: exact batch composition — 2 Angels, 0 Plants, 0 Squirrels.
-    let angels = tokens_of_subtype(&runner, "Angel");
-    assert_eq!(angels.len(), 2, "substitution applied to both batches");
+    // Reach guards: exact batch composition for the chosen order.
+    let created = [
+        tokens_of_subtype(&runner, "Angel"),
+        tokens_of_subtype(&runner, "Squirrel"),
+    ];
+    assert_eq!(created[0].len(), angels, "Angels");
+    assert_eq!(created[1].len(), squirrels, "Squirrels");
     assert_eq!(
         plants_on_battlefield(&runner),
         0,
         "no original Plant token remains"
-    );
-    assert_eq!(
-        tokens_of_subtype(&runner, "Squirrel").len(),
-        0,
-        "the appended Squirrel batch was substituted, not kept"
     );
     let combat = runner.state().combat.as_ref().expect("combat is live");
     let blockers = combat
@@ -1189,23 +1209,36 @@ fn visitation_and_chatterfang_compound_blocks_with_both_batches() {
         .get(&bears)
         .cloned()
         .unwrap_or_default();
-    assert_eq!(blockers.len(), 2, "both Angels block");
+    assert_eq!(blockers.len(), angels + squirrels, "every token blocks");
     assert!(
-        blockers.contains(&angels[0]) && blockers.contains(&angels[1]),
-        "the blockers are both Angels"
+        created
+            .iter()
+            .flatten()
+            .all(|token| blockers.contains(token)),
+        "the blockers are the created tokens"
     );
 
     settle_combat_damage(&mut runner);
     assert_eq!(
         life_of(&runner, P0),
         p0_life,
-        "the Angels block all incoming damage"
+        "the blockers stop all incoming damage"
     );
     assert!(runner.state().stack.is_empty());
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "settled at priority"
     );
+}
+
+#[test]
+fn visitation_and_chatterfang_compound_blocks_with_both_batches() {
+    visitation_and_chatterfang_compound_blocks("Chatterfang, Squirrel General", 2, 0);
+}
+
+#[test]
+fn visitation_first_blocks_with_an_angel_and_a_squirrel() {
+    visitation_and_chatterfang_compound_blocks("Divine Visitation", 1, 1);
 }
 
 #[test]

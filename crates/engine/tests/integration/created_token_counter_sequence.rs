@@ -779,6 +779,7 @@ fn creature_token(name: &str, size: i32) -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 

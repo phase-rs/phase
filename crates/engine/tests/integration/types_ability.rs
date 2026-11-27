@@ -249,6 +249,7 @@ fn target_filter_mut_is_target_filters_twin() {
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     };
     let apply_perpetual = |target: TargetFilter| Effect::ApplyPerpetual {
         target,
