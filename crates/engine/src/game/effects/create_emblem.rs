@@ -162,6 +162,7 @@ mod tests {
 
     fn ninja_pump_static() -> StaticDefinition {
         StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![crate::types::ability::TypeFilter::Subtype(
@@ -424,7 +425,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],

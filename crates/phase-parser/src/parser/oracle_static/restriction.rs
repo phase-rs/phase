@@ -3509,6 +3509,22 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     text: &str,
     lower: &str,
 ) -> Option<StaticDefinition> {
+    // CR 611.3a: A trailing "as long as <condition>" clause gates the
+    // standing permission rather than belonging to the exile-pool reference.
+    // Reuse the shared body-preserving splitter so the static classifier and
+    // this permission parser agree on the condition boundary.
+    let text_pair = TextPair::new(text, lower);
+    let trailing_split = text_pair
+        .split_around(" as long as ")
+        .and_then(|_| split_trailing_gate_condition_with_body(&text_pair))
+        .and_then(|(body, condition_text)| {
+            parse_static_condition(condition_text).map(|condition| (body, condition))
+        });
+    let (permission_text, trailing_condition) =
+        trailing_split.map_or((text, None), |(body, condition)| (body, Some(condition)));
+    let permission_lower = permission_text.to_lowercase();
+    let lower = permission_lower.as_str();
+
     // Optional leading timing qualifier. CR 117.1c: "during your turn, " gates
     // the permission to the source controller's turn.
     let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
@@ -3516,10 +3532,11 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
         None => (lower, ExileCastTiming::AnyTime),
     };
 
-    let (rest, condition) = match strip_leading_permission_condition(rest) {
+    let (rest, leading_condition) = match strip_leading_permission_condition(rest) {
         Some((rest, condition)) => (rest, Some(condition)),
         None => (rest, None),
     };
+    let condition = super::evasion::combine_conditions(leading_condition, trailing_condition);
 
     // Optional "you may look at cards exiled with <self>, and " preamble
     // (CR 601.3f). When present, the play clause uses the "those cards" anaphor
@@ -3638,6 +3655,251 @@ pub(crate) fn try_parse_persistent_exile_play_permission(
     }
 
     Some(definition)
+}
+
+/// CR 406.2 + CR 122.1 + CR 611.3a: Parse the counter-linked exile-play
+/// permission — "[During your turn, ]you may play|cast cards you don't own with
+/// stash counters on them from exile[, and mana of any type can be spent to
+/// cast those spells]" (Tinybones, Bauble Burglar). Lowers to
+/// `ExileCastPermission { pool: CounterLinked }`: the affected filter's
+/// `Counters` prop doubles as the pool key (kept on the filter — pool and
+/// affected gates agree), so the permission covers exactly the exiled cards
+/// carrying that counter, whoever put it there.
+///
+/// Distinguished from `try_parse_persistent_exile_play_permission` by the
+/// counter-keyed pool (no "exiled with ~" source anchor); from Evelyn's
+/// collection line by the absence of both the "once each turn, " prefix and
+/// the "if it was exiled by an ability you controlled" provenance clause —
+/// this grammar deliberately parses NEITHER, so a provenance-gated printing
+/// declines honestly instead of widening to the source-agnostic pool. Every
+/// unrecognized remainder declines to `None` (fail-closed into an honest
+/// `Unimplemented` gap, never a widened permission).
+pub(crate) fn try_parse_counter_linked_exile_play_permission(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    // Optional leading timing qualifier. CR 604.1 + CR 611.3a: "during your
+    // turn, " gates the permission to the source controller's turn.
+    let (rest, timing) = match nom_tag_lower(lower, lower, "during your turn, ") {
+        Some(r) => (r, ExileCastTiming::YourTurnOnly),
+        None => (lower, ExileCastTiming::AnyTime),
+    };
+
+    // CR 406.6 + CR 607.1: the counter class is a "you" shape only — the
+    // source's controller is the grantee. No "each player" evidence exists, so
+    // that subject declines.
+    let rest = nom_tag_lower(rest, rest, "you may ")?;
+
+    // Core permission phrase. CR 305.1: "play" lowers to Play mode (lands are
+    // played, non-land cards are cast). CR 601.2a: "cast" lowers to Cast —
+    // spell-cast only. No "play lands and cast spells" long form: no printed
+    // counter-keyed permission uses it.
+    let (rest, play_mode) = alt((
+        value(CardPlayMode::Play, tag::<_, _, OracleError<'_>>("play ")),
+        value(CardPlayMode::Cast, tag("cast ")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    // CR 406.2: split the affected filter text from the zone anchor riders.
+    let (_, (filter_text, trailing)) = nom_primitives::split_once_on(rest, " from exile").ok()?;
+
+    // CR 108.3 + CR 109.5 + CR 122.1: one call builds the complete affected
+    // filter — "cards you don't own with stash counters on them" lowers to
+    // `Typed{Card, [Owned{Opponent}, Counters{stash}]}`. A non-blank remainder
+    // proves an unmodeled filter shape and declines.
+    let (filter, rem) = parse_type_phrase_folding(filter_text);
+    if !rem.trim().is_empty() {
+        return None;
+    }
+
+    // CR 122.1: the pool key — the filter must be `Typed` carrying exactly one
+    // `Counters` prop, whose matcher scopes the pool. No counter prop means no
+    // pool key, so the permission declines. The `Any` matcher ("a counter on
+    // it") is accepted through the same code path.
+    let TargetFilter::Typed(typed) = &filter else {
+        return None;
+    };
+    let mut counter_props = typed.properties.iter().filter_map(|prop| match prop {
+        FilterProp::Counters { counters, .. } => Some(counters),
+        // Every other prop carries no pool key. Exhaustive by construction —
+        // a new `FilterProp` variant fails to compile here rather than
+        // silently reading as "some other prop" (mirrors
+        // `FilterProp::references_tracked_set`). Grouped as there.
+        // Combat / status.
+        FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        // Keywords / abilities.
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        // Mana / value.
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        // Attachment.
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        // Identity / comparison.
+        | FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::AnyOf { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        // Zone / history.
+        | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::WasKicked
+        // Counter-adjacent near-misses: neither keys the pool. `Modified`
+        // (CR 700.9) is a three-leg disjunction (counters OR equipped OR
+        // enchanted) — its counters leg alone is insufficient to scope a
+        // counter-keyed pool. `CountersPutOnThisTurn` carries a `CounterMatch`
+        // but describes a historical action (CR 122.6: counters put on the
+        // object this turn), not current counters — the object stays matched
+        // even after those counters are removed.
+        | FilterProp::Modified
+        | FilterProp::CountersPutOnThisTurn { .. }
+        // Misc.
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::Other { .. } => None,
+    });
+    let matcher = counter_props.next()?.clone();
+    if counter_props.next().is_some() {
+        return None;
+    }
+
+    // CR 601.3b + CR 609.4b: optional payment/timing-concession riders riding
+    // alongside the permission (Tinybones's any-TYPE spend rider, joined by
+    // ", and "). Parsed in order off the tail so any leftover proves an
+    // unmodeled shape.
+    let (after_riders, grants_flash, mana_spend_permission) =
+        strip_exile_cast_concession_riders(trailing)?;
+
+    // CR 118.9: Optional trailing ALTERNATIVE-cost rider sentence (mirrors the
+    // persistent handler: empty-or-recognized, else decline).
+    let tail = after_riders.trim_start();
+    // allow-noncombinator: punctuation cleanup (drop the sentence terminator) on a pre-tokenized chunk, not parsing dispatch.
+    let tail = tail.strip_prefix('.').unwrap_or(tail).trim_start(); // allow-noncombinator: punctuation cleanup on a pre-tokenized chunk, not parsing dispatch.
+    let extra_cost = if tail.is_empty() {
+        None
+    } else {
+        // CR 113.6b: A non-empty tail must be the recognized alt-cost rider; an
+        // unmodeled remainder declines so it surfaces as a coverage gap rather
+        // than a silent misparse.
+        let cost = super::oracle_effect::try_parse_alt_cost_rider(tail)?;
+        Some(CastExtraCost {
+            cost,
+            mode: CastCostMode::Alternative,
+        })
+    };
+
+    Some(
+        StaticDefinition::new(StaticMode::ExileCastPermission {
+            // CR 601.2a: No once-per-turn cap on this class. Deliberately NO
+            // "once each turn, " prefix: Evelyn's once-per-turn shape carries
+            // a provenance clause this grammar must never swallow.
+            frequency: CastFrequency::Unlimited,
+            play_mode,
+            // CR 305.1 / CR 601.3: Cards are played/cast at their normal cost.
+            cost: ExileCastCost::PayNormalCost,
+            // CR 406.2 + CR 611.3a: the counter-keyed, source-agnostic pool.
+            pool: ExileCardPool::CounterLinked { matcher },
+            timing,
+            mana_spend_permission,
+            grants_flash,
+            extra_cost,
+            // CR 122.1: no printed counter-linked permission carries an
+            // enters-with counter rider. Left `None`.
+            enters_with_counter: None,
+            // CR 406.6: "you may …" — the source's controller is the grantee.
+            grantee: ExileCastGrantee::SourceController,
+        })
+        // The full filter — including the `Counters` prop — is kept, so the
+        // pool and affected gates agree; no filter surgery.
+        .affected(filter)
+        .description(text.to_string()),
+    )
 }
 
 /// CR 601.3b + CR 609.4b: Strip the optional flash-grant and mana-spend
@@ -3949,6 +4211,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     ) {
         let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Play,
             // CR 601.2a: inherit the once-per-turn cap stripped above (the
             // shipping Bolas's Citadel form has no prefix → Unlimited).
@@ -3999,6 +4263,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
         // types, so the gate would otherwise be silently lost.
         let (condition, alt_cost) = parse_top_of_library_object_form_trailing(after)?.into_parts();
         let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode,
             frequency,
             alt_cost,
@@ -4039,6 +4305,8 @@ pub(crate) fn try_parse_top_of_library_cast_permission(
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode,
         frequency,
         alt_cost,
@@ -4342,6 +4610,8 @@ fn try_parse_disjunctive_top_of_library_cast_permission(
     let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
 
     let mut def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+        library: crate::types::ability::ControllerRef::You,
+        mana_spend_permission: None,
         play_mode: CardPlayMode::Play,
         frequency,
         alt_cost,

@@ -9,12 +9,12 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
-    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
-    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
-    LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource,
-    PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr,
-    QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, AttackDefenderMatch, BlockPairDirection,
+    CardTypeSetSource, ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject,
+    Comparator, ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter,
+    FilterProp, LinkedExileReturn, NameStickerSet, ObjectProperty, ObjectScope, Parity,
+    ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter,
     TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
@@ -31,7 +31,7 @@ use super::oracle_effect::{
 use super::oracle_ir::ast::AnaphorNumber;
 use super::oracle_ir::context::{
     bind_controller_phrase, ChainPriorPublishers, ChosenColorQualifierScope, ParseContext,
-    SpellAnaphorBinding,
+    SpellAnaphorBinding, TriggerConditionObjects,
 };
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -54,7 +54,8 @@ use crate::types::text_grammar::{
     separator_stops_keyword_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
-    parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
+    parse_combat_status_prefix, parse_property_filter, parse_without_keyword_suffix,
+    starts_with_type_word,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -3417,7 +3418,8 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
-    let (mut filter, rest) = parse_type_phrase_folding_unbound(text, ctx);
+    let (mut filter, rest) =
+        parse_type_phrase_folding_unbound(text, ctx, AttackDefenderMatch::DefendingSide);
     exclude_parent_target_from_its_controllers_others(&mut filter);
     (filter, rest)
 }
@@ -3456,13 +3458,44 @@ fn rewrite_other_as_parent_target_exclusion(
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter_mut()
             .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
+        // CR 608.2c: the sweep's member filter nests inside the tracked-set
+        // wrapper ("all other cards revealed this way" — the Marionette
+        // sweep), so descend through it (and through negation) to reach the
+        // typed legs. The subject-led caller has no such nesting today, so it
+        // is unaffected; the contract ("every typed leg's other") reads the
+        // same from its side.
+        TargetFilter::TrackedSetFiltered { filter, .. } | TargetFilter::Not { filter } => {
+            rewrite_other_as_parent_target_exclusion(filter, applies)
+        }
         _ => {}
+    }
+}
+
+/// A targeted creature attacking the caster directly (CR 508.1b).
+pub(crate) fn parse_direct_attacker_target(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (phrase, _) = tag("target ").parse(input)?;
+    let (filter, rest) = parse_type_phrase_folding_unbound(
+        phrase,
+        &mut ParseContext::default(),
+        AttackDefenderMatch::DirectPlayer,
+    );
+    if matches!(&filter, TargetFilter::Typed(typed)
+    if typed.type_filters == [TypeFilter::Creature]
+        && typed.properties == [FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+            scope: AttackDefenderMatch::DirectPlayer,
+        }])
+    {
+        Ok((rest, filter))
+    } else {
+        Err(oracle_err(input))
     }
 }
 
 fn parse_type_phrase_folding_unbound<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
+    attack_defender_scope: AttackDefenderMatch,
 ) -> (TargetFilter, &'a str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
@@ -3970,7 +4003,7 @@ fn parse_type_phrase_folding_unbound<'a>(
                     // changed which downstream condition-builder claimed the
                     // clause and regressed that specialized parser (issue
                     // #6321 / PR #6533 review —
-                    // urzas_lands_share_delta_shape /
+                    // urzas_lands_share_conditional_mana_swap_shape /
                     // legacy_misparses_are_now_honest_gaps). Staying out of
                     // every noncreature category's way, not just this one
                     // land cycle, is why the check is by vocabulary
@@ -4423,7 +4456,7 @@ fn parse_type_phrase_folding_unbound<'a>(
     }
 
     // Check "with power N or less/greater" suffix
-    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx) {
+    if let Some((prop, consumed)) = parse_power_suffix(&lower[pos..], ctx, &mut properties) {
         properties.push(prop);
         pos += consumed;
     }
@@ -4478,14 +4511,24 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
-    // CR 113.1 + CR 113.3: "<type> with no abilities" — an object with none of the
-    // four ability categories. Narrow predicate combinator lives in oracle_nom/filter.rs;
-    // this arm supplies the "with " lead + offset handling, mirroring parse_counter_suffix.
+    // CR 605.1 + CR 113.1 + CR 113.3: "<type> with a mana ability" (Raggadragga
+    // clause 2: "a creature you control with a mana ability attacks"),
+    // "<type> with mana abilities" (Power Sink: "tap all lands with mana
+    // abilities they control"), and "<type> with no abilities" — the
+    // ability-category object predicates. The bare predicate combinators live
+    // in oracle_nom/filter.rs; this arm supplies the "with " lead + offset
+    // handling, mirroring parse_counter_suffix. The predicates have disjoint
+    // heads ("a ..."/"mana ..." vs "no ..."), so alt order is immaterial.
     {
         let after_ws = lower[pos..].trim_start();
         let ws = lower[pos..].len() - after_ws.len();
         if let Ok((with_rest, _)) = (tag::<_, _, OracleError<'_>>("with"), space1).parse(after_ws) {
-            if let Ok((rest, prop)) = nom_filter::parse_no_abilities(with_rest) {
+            if let Ok((rest, prop)) = alt((
+                nom_filter::parse_mana_ability,
+                nom_filter::parse_no_abilities,
+            ))
+            .parse(with_rest)
+            {
                 properties.push(prop);
                 pos += ws + (after_ws.len() - rest.len());
             }
@@ -4514,9 +4557,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_same_name_suffix(&lower[pos..]) {
+    if let Ok((rest, prop)) = parse_same_name_suffix(&lower[pos..]) {
         properties.push(prop);
-        pos += consumed;
+        pos = lower.len() - rest.len();
     }
 
     if controller.is_none()
@@ -4730,7 +4773,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_attacking_defender_suffix(&lower[pos..]) {
+    if let Some((prop, consumed)) =
+        parse_attacking_defender_suffix(&lower[pos..], attack_defender_scope)
+    {
         properties.push(prop);
         pos += consumed;
     }
@@ -5415,6 +5460,28 @@ fn classify_negation(negated: &str) -> NegationResult {
         .is_ok_and(|(rest, _)| rest.is_empty())
     {
         return NegationResult::Prop(FilterProp::NotHistoric);
+    }
+    // CR 205.4a + CR 314.1: "non-ongoing scheme" (My Laughter Echoes).
+    // CR 903.3: "noncommander" (You Will Know True Suffering, Subjugate the
+    // Hobbits, Shield Broker, Become the Pilot) — commander is a
+    // deck-construction designation, not a subtype, so it must not fall
+    // through to the vacuous `Non(Subtype("Commander"))` below (no object
+    // carries that subtype, so the exclusion would match everything).
+    if let Ok((_, result)) = all_consuming(alt((
+        map(tag::<_, _, OracleError<'_>>("ongoing"), |_| {
+            NegationResult::Prop(FilterProp::NotSupertype {
+                value: Supertype::Ongoing,
+            })
+        }),
+        map(tag("commander"), |_| {
+            NegationResult::Prop(FilterProp::Not {
+                prop: Box::new(FilterProp::IsCommander),
+            })
+        }),
+    )))
+    .parse(negated)
+    {
+        return result;
     }
 
     match negated {
@@ -6255,12 +6322,15 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::IsSaddled
             | FilterProp::ProtectorMatches { .. }
             // CR 509.1h: combat-status prefixes "attacking/blocking/unblocked".
-            | FilterProp::Attacking { defender: None }
+            | FilterProp::Attacking { defender: None , .. }
             | FilterProp::Blocking
             | FilterProp::BlockStatus { .. }
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::ColorCount { .. }
+            // CR 205.2a: "with <n> or more card types" suffix binds to the leg
+            // whose type phrase parsed it, never retroactively onto earlier legs.
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -6427,6 +6497,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -6514,6 +6585,8 @@ fn type_filter_guarantees_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme pins a noncreature card type.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -6545,7 +6618,9 @@ fn is_noncreature_core_type_pin(tf: &TypeFilter) -> bool {
         | TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Planeswalker
-        | TypeFilter::Battle => true,
+        | TypeFilter::Battle
+        // CR 205.2a: "scheme" is in the quoted card-type list above.
+        | TypeFilter::Scheme => true,
         // CR 208.3 names "noncreature" directly: a NONCREATURE permanent has no
         // power or toughness. A `Non(Creature)` pin is exactly that subject.
         TypeFilter::Non(inner) => **inner == TypeFilter::Creature,
@@ -6670,6 +6745,8 @@ fn type_filter_anchors_creature(tf: &TypeFilter) -> bool {
         // `Permanent`/`Card`/`Any` are type-open quantifiers.
         TypeFilter::Non(_)
         | TypeFilter::Kindred
+        // CR 314.1: Scheme alone names no creature.
+        | TypeFilter::Scheme
         | TypeFilter::Land
         | TypeFilter::Artifact
         | TypeFilter::Enchantment
@@ -7438,6 +7515,44 @@ pub(crate) fn parse_block_pairing_clause(
     Ok((rest, (form, subject)))
 }
 
+/// CR 509.1g: the prenominal-relative current block pairing "<creatures> it's
+/// blocking" / "<creatures> it is blocking" (Wall of Vapor's "creatures it's
+/// blocking") — the active voice of the passive "blocked by it" clause, so it is
+/// the same `SubjectIsBlocker` relation. Splits the clause off the end of a
+/// lowercase damage-source subject and returns the head noun phrase with the
+/// `CombatRelation` prop to add to it. The bare pronoun binds only to the
+/// ability's own source (`resolve_relation_subject`), so a caller whose context
+/// is not armed for the source gets `None`. Deliberately NOT a form of
+/// `parse_block_pairing_clause`: that clause is a postnominal suffix read by the
+/// swallow audit over whole Oracle lines, and "it's blocking" also heads
+/// conditions ("if it's blocking") that audit must not claim.
+pub(crate) fn split_source_is_blocking_relative<'a>(
+    subject: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, FilterProp)> {
+    let (_, (head, tail)) = nom_primitives::split_once_on(subject, " it's blocking")
+        .or_else(|_| nom_primitives::split_once_on(subject, " it is blocking"))
+        .ok()?;
+    all_consuming(terminated(
+        multispace0,
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .ok()?;
+    let relation_subject = resolve_relation_subject(
+        CombatRelationSubjectWord::Pronoun,
+        CombatClauseKind::Pairing,
+        ctx,
+    )?;
+    Some((
+        head,
+        FilterProp::CombatRelation {
+            relation: BlockPairingForm::BlockedBy.relation(),
+            subject: relation_subject,
+        },
+    ))
+}
+
 /// One block-history clause: who blocked whom, against which partner, in which window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BlockHistoryClause {
@@ -7859,7 +7974,10 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
 /// postnominal "creature attacking your opponents"; both resolve to the same
 /// `Attacking { defender }` property, so the intro is stripped here rather than
 /// forking a second attacking grammar in the `that's`-clause path.
-fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
+fn parse_attacking_defender_suffix(
+    text: &str,
+    scope: AttackDefenderMatch,
+) -> Option<(FilterProp, usize)> {
     let trimmed_outer = text.trim_start();
     let trimmed = opt(alt((
         tag::<_, _, OracleError<'_>>("that's "),
@@ -7886,24 +8004,37 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     // Each row is a printed defender head, then the controller phrase that must
     // follow it, if any (a marker: the row fixes the defender either way).
-    let rows: [(&str, Option<&'static [ControllerPhrase]>, ControllerRef); 6] = [
+    let rows: [(
+        &str,
+        Option<&'static [ControllerPhrase]>,
+        ControllerRef,
+        AttackDefenderMatch,
+    ); 6] = [
         (
             "attacking you or a planeswalker you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
         (
             "attacking you and/or planeswalkers you control",
             None,
             ControllerRef::You,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking you", None, ControllerRef::You),
+        ("attacking you", None, ControllerRef::You, scope),
         (
             "attacking your opponents and/or planeswalkers",
             Some(&[ControllerPhrase::THEY_CONTROL]),
             ControllerRef::Opponent,
+            AttackDefenderMatch::DefendingSide,
         ),
-        ("attacking your opponents", None, ControllerRef::Opponent),
+        (
+            "attacking your opponents",
+            None,
+            ControllerRef::Opponent,
+            scope,
+        ),
         // CR 508.1b: "attacking one of your opponents" — in a multiplayer
         // attack-multiple-players game each attacker is assigned one defending
         // player; "one of your opponents" scopes the defender to any of the
@@ -7914,9 +8045,10 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
             "attacking one of your opponents",
             None,
             ControllerRef::Opponent,
+            scope,
         ),
     ];
-    for (head, controller, defender) in rows {
+    for (head, controller, defender, scope) in rows {
         let matched = tag::<_, _, OracleError<'_>>(head)
             .parse(trimmed)
             .and_then(|(rest, _)| match controller {
@@ -7941,9 +8073,14 @@ fn parse_attacking_defender_suffix(text: &str) -> Option<(FilterProp, usize)> {
                 continue;
             }
             match rest.chars().next() {
-                None | Some('.') | Some(',') | Some(' ') if rest_trim.is_empty() => {
+                None | Some('.') | Some(',') | Some(' ')
+                    if rest_trim.is_empty()
+                        || (scope == AttackDefenderMatch::DirectPlayer
+                            && matches!(rest_trim.chars().next(), Some('.' | ','))) =>
+                {
                     return Some((
                         FilterProp::Attacking {
+                            scope,
                             defender: Some(defender),
                         },
                         text.len() - rest.len(),
@@ -8053,6 +8190,7 @@ fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp>
     Ok((
         rest,
         FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::DefendingPlayer),
         },
     ))
@@ -8094,8 +8232,61 @@ fn parse_attacking_status_clause_boundary(input: &str) -> OracleResult<'_, ()> {
 /// into the byte-offset return contract this call site expects. Used by Arnyn
 /// Deathbloom Botanist, Stern Scolding, Leonardo Sewer Samurai, Warping Wail,
 /// etc.
-fn parse_power_suffix(text: &str, ctx: &mut ParseContext) -> Option<(FilterProp, usize)> {
+fn parse_power_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+    properties: &mut [FilterProp],
+) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+
+    // CR 208.1 + CR 603.10a + CR 608.2h: an implicit lesser-power/toughness
+    // suffix is meaningful here only when the enclosing trigger supplies the
+    // event object whose current/LKI characteristic is the comparison value.
+    // Prior target/choice clauses are deliberately declined: ObjectScope::Target
+    // resolves the first object target, while this parser cannot prove that it
+    // is the particular choice named by the printed clause.
+    if let Ok((after, (stat, comparator))) = nom_filter::parse_relative_pt_comparison(trimmed) {
+        let has_prior_object = ctx.chain_declared_object_target.is_some();
+        let has_trigger_event_context = ctx.in_trigger
+            || !matches!(
+                ctx.trigger_condition_objects,
+                TriggerConditionObjects::Unestablished
+            );
+        if !has_trigger_event_context || has_prior_object {
+            return None;
+        }
+        // CR 115.1d: in a triggered ability, "another" in this target noun
+        // phrase excludes the object that caused the trigger, not the ability
+        // source. Preserve the typed exclusion marker used by the runtime
+        // trigger-object authority; leaving `Another` here would incorrectly
+        // exclude Colfenor when another creature dies.
+        if let Some(property) = properties
+            .iter_mut()
+            .find(|property| **property == FilterProp::Another)
+        {
+            *property = FilterProp::OtherThanTriggerObject;
+        }
+        let value = QuantityExpr::Ref {
+            qty: match stat {
+                PtStat::Power => QuantityRef::Power {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::Toughness => QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+                PtStat::TotalPowerToughness => return None,
+            },
+        };
+        return Some((
+            FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value,
+            },
+            text.len() - after.len(),
+        ));
+    }
 
     // CR 208.1 + CR 509.1b: "with greater power" — relative to the source
     // object. CR 208.1 is the authority for power being the characteristic
@@ -8289,6 +8480,8 @@ fn type_filter_includes_card(filter: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 109.2a: Scheme is a specific card type, not the generic `Card` leg.
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => false,
@@ -9452,13 +9645,9 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
 ///     Pulse, the Echoing cycle, Bile Blight, Homing Lightning, Detention Sphere.
 ///     Without it the secondary mass effect drops the name constraint and
 ///     degrades into an unconditional board wipe.
-fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-    let (rest, _) = tag::<_, _, OracleError<'_>>("with the same name as ")
-        .parse(trimmed)
-        .ok()?;
-    let (after, prop) = alt((
+pub(crate) fn parse_same_name_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, _) = (multispace0, tag("with the same name as ")).parse(input)?;
+    alt((
         value(FilterProp::SameName, tag("~")),
         value(
             FilterProp::SameName,
@@ -9470,8 +9659,6 @@ fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
         ),
     ))
     .parse(rest)
-    .ok()?;
-    Some((prop, leading_ws + (trimmed.len() - after.len())))
 }
 
 /// CR 205: The permanent-type noun naming the "same name" referent ("that
@@ -9932,7 +10119,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 ///
 /// CR 608.2c + CR 701.68c: the filter also names an object an earlier
 /// instruction of the same resolution bound, as "the blighted creature" does.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
@@ -10466,6 +10653,34 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         }
     }
 
+    // CR 701.26a: "that's|that is|that are|that isn't|that aren't <tapped state>"
+    // ("blocking creatures that are tapped", New Master of Arms) — the
+    // relative-clause form of the tapped/untapped adjectives; the shared
+    // `parse_property_filter` word grammar keeps this position and the prefix
+    // position from disagreeing about which adjectives exist. Only the tapped
+    // state is read here: the other status adjectives ("that's attacking") stay
+    // with the suffix arms and callers that already own them. The boundary after
+    // the adjective is deliberately strict (end of clause, a comma, or a period):
+    // a continuation ("that are tapped and attacking") belongs to the token-spec
+    // and battlefield-entry paths that absorb their own qualifier runs.
+    if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
+        if let Ok((rest, prop @ (FilterProp::Tapped | FilterProp::Untapped))) =
+            parse_property_filter(after_intro)
+        {
+            if rest.chars().next().is_none_or(|c| c == '.' || c == ',') {
+                let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+                let prop = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(prop),
+                    }
+                } else {
+                    prop
+                };
+                return Some((vec![prop], consumed));
+            }
+        }
+    }
+
     if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
         return Some(parsed);
     }
@@ -10549,10 +10764,17 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     }
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
-    // Must come AFTER "targets only" check above (longest match first).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets ").parse(after_that) {
-        let targets_verb_len = "targets ".len();
-        if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
+    // Must come AFTER "targets only" check above (longest match first). The
+    // verb agrees with its subject's number: "that targets" (singular) and
+    // "that target" (plural — "spells that target it", Bronze Horse) are one
+    // predicate in two agreement spellings, like the "was/were dealt damage"
+    // rows below, not two FilterProps.
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("targets "), tag("target "))).parse(after_that)
+    {
+        let targets_verb_len = after_that.len() - rest.len();
+        if let Some((props, consumed)) =
+            parse_targets_constraint(rest, that_len + targets_verb_len, ctx)
         {
             return Some((props, consumed));
         }
@@ -10975,6 +11197,14 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
     nom_primitives::parse_color(rest)
 }
 
+fn parse_except_for_head(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("except for")).parse(input)
+}
+
+fn parse_except_for_type_list_head(input: &str) -> OracleResult<'_, ()> {
+    terminated(parse_except_for_head, tag(" ")).parse(input)
+}
+
 /// CR 608.2c + CR 205.2b: "<type> except for <type-1>[, <type-2>]* and <type-N>"
 /// — a plain type-list exclusion suffix (Scourglass: "Destroy all permanents
 /// except for artifacts and lands"; Elspeth Tirel: "except for lands and
@@ -11025,9 +11255,7 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
 fn parse_except_for_type_list_suffix(
     text: &str,
 ) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, usize)> {
-    let (mut rest, _) = tag::<_, _, OracleError<'_>>("except for ")
-        .parse(text)
-        .ok()?;
+    let (mut rest, ()) = parse_except_for_type_list_head(text).ok()?;
     let mut consumed = text.len() - rest.len();
     let mut neg_types = Vec::new();
     let mut props = Vec::new();
@@ -11120,6 +11348,57 @@ fn parse_except_for_type_list_suffix(
     Some((neg_types, props, consumed))
 }
 
+/// Parse a controller-qualified exclusion and return its positive subset and
+/// original-case remainder. The caller applies the exclusion to its population.
+pub(crate) fn parse_except_for_qualified_subset<'a>(
+    remainder: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let lower = remainder.to_ascii_lowercase();
+    let ((), operand) = nom_on_lower(remainder, &lower, |input| {
+        preceded(space0, terminated(parse_except_for_head, space1)).parse(input)
+    })?;
+
+    // Check the first controller phrase before the type reader binds it, since
+    // a past or anaphoric phrase can also produce ControllerRef::You there.
+    let operand_lower = &lower[lower.len() - operand.len()..];
+    let (controller_text, phrase) =
+        nom_primitives::scan_at_word_boundaries(operand_lower, |input| {
+            let (rest, phrase) = nom_target::parse_controller_phrase(input)?;
+            Ok((rest, (input, phrase)))
+        })?;
+    if phrase != ControllerPhrase::YOU_CONTROL {
+        return None;
+    }
+    let noun = operand[..operand.len() - controller_text.len()].trim_end();
+    let (prefix, noun_remainder) =
+        parse_type_phrase_folding_with_ctx(noun, &mut ctx.clone_throwaway());
+    if !noun_remainder.is_empty()
+        || !matches!(prefix, TargetFilter::Typed(typed) if typed.controller.is_none() && typed.has_meaningful_type_constraint())
+    {
+        return None;
+    }
+
+    let mut trial = ctx.clone();
+    let (subset, after) = parse_type_phrase_folding_with_ctx(operand, &mut trial);
+    if !matches!(&subset, TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+        && typed.has_meaningful_type_constraint())
+    {
+        return None;
+    }
+    preceded(
+        space0,
+        peek(alt((
+            value((), eof),
+            value((), tag::<_, _, OracleError<'_>>(".")),
+        ))),
+    )
+    .parse(after)
+    .ok()?;
+    *ctx = trial;
+    Some((subset, after))
+}
+
 /// CR 205.3a + CR 608.2c: AND an "except for `<type-list>`" exclusion
 /// onto an already-parsed mass population, for callers whose exclusion is
 /// separated from the type phrase by an intervening destination clause ("return
@@ -11139,12 +11418,10 @@ fn parse_except_for_type_list_suffix(
 /// WHERE the decline happens decides whether it is honest, and the two sites
 /// differ. Declining HERE returns `None`, which propagates through `?` at the
 /// mass-return call sites, so no effect is built and the card is unsupported.
-/// Declining at the SUFFIX-POSITION site in `parse_type_phrase_folding_with_ctx` only
-/// drops the clause — that caller still builds its effect, and because
-/// `swallow_check` has no "except for" detector the card keeps reporting
-/// supported (measured: "mageta the lion", "flame sweep", both of which decline
-/// there and never reach this function). Making the suffix-position residue red
-/// is a separate issue and is NOT claimed here.
+/// The inline type reader leaves a declined suffix in its remainder.
+/// Damage lowering can consume that remainder with
+/// [`parse_except_for_qualified_subset`]. A caller that ignores it can still
+/// build a wider effect.
 ///
 /// The application is the `TargetFilter`-level form of the two lines the
 /// suffix-position call site in `parse_type_phrase_folding_with_ctx` already runs
@@ -11226,12 +11503,11 @@ pub(crate) fn apply_except_for_type_list_exclusion(
     // strictly wider than the parser, which is the safe direction — every tail the
     // parser could attempt is seen, plus the ones it structurally cannot.
     //
-    // `scan_contains` matches at word starts only, so it cannot fire on "except
-    // for" embedded inside another word. Measured: the corpus has three mass
-    // returns carrying an exclusion (Whelming Wave, Slinn Voda, Cyclone Summoner)
-    // and all three sit at offset 0, so no currently-supported card is declined by
-    // the widening.
-    if nom_primitives::scan_contains(&lowered, "except for ") {
+    // `scan_at_word_boundaries` matches at word starts only. The corpus has
+    // three mass returns carrying an exclusion (Whelming Wave, Slinn Voda,
+    // Cyclone Summoner), and all three place it at offset 0.
+    if nom_primitives::scan_at_word_boundaries(&lowered, parse_except_for_type_list_head).is_some()
+    {
         return None;
     }
     Some(filter)
@@ -11725,16 +12001,26 @@ fn parse_targets_only_constraint(
     None
 }
 
-/// CR 115.9b: Parse the constraint after "that targets ".
+/// CR 115.9b: Parse the constraint after "that targets " / "that target ".
 /// Returns `(properties_to_add, total_bytes_consumed)`.
 ///
 /// Handles:
 /// - "~" / "it" / "this creature" / "this permanent" → `Targets { SelfRef }`
 /// - "you" → `Targets { Controller }`
-/// - "you or a [type]" → `Targets { Or(Controller, Typed) }`
+/// - "you or a/an [type]" / "an opponent or a/an [type]" → a player filter OR a typed filter
 /// - "one or more [type phrase]" → strip prefix, then parse type phrase
 /// - "a/an [type phrase]" → `Targets { filter }`
-fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
+///
+/// A bare "it" is ANAPHORIC, unlike the deictic "~" / "this creature": CR 608.2c
+/// lets it name the ability's source only when the parse context binds it there
+/// (`bare_pronoun_names_ability_source`); any other antecedent leaves the
+/// constraint unconsumed so the caller fails closed instead of silently
+/// binding the host.
+fn parse_targets_constraint(
+    text: &str,
+    prefix_len: usize,
+    ctx: &ParseContext,
+) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
     let (text, extra_len) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more ").parse(text) {
@@ -11751,8 +12037,9 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }];
         return Some((props, prefix_len + 1));
     }
-    // "it" with word boundary
-    if parse_word_bounded(text, "it").is_ok() {
+    // "it" with word boundary — CR 608.2c: bound to the source only when the
+    // parse context says so; otherwise the clause stays unconsumed (fail closed).
+    if parse_word_bounded(text, "it").is_ok() && bare_pronoun_names_ability_source(ctx) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -11769,23 +12056,31 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }
     }
 
-    // "you or a [type]" / "you or an [type]" — compound controller + typed filter
+    // "you or a/an [type]" / "an opponent or a/an [type]" — compound player + typed filter
     let lower = text.to_lowercase();
-    let you_or_result =
-        nom::branch::alt((tag::<_, _, OracleError<'_>>("you or an "), tag("you or a ")))
-            .parse(lower.as_str());
-    if let Ok((_, matched)) = you_or_result {
-        let you_or_len = matched.len();
-        let after_you_or = &text[you_or_len..];
-        let (type_filter, remainder) = parse_type_phrase_folding(after_you_or);
-        let consumed = after_you_or.len() - remainder.len();
+    let player_or_type = nom_on_lower(text, lower.as_str(), |input| {
+        let (input, player_filter) = alt((
+            value(TargetFilter::Controller, tag("you")),
+            value(TargetFilter::Opponent, tag("an opponent")),
+        ))
+        .parse(input)?;
+        let (input, _) = tag(" or ").parse(input)?;
+        let (input, _) = nom_primitives::parse_article(input)?;
+        Ok((input, player_filter))
+    });
+    if let Some((player_filter, after_article)) = player_or_type {
+        let (type_filter, remainder) = parse_type_phrase_folding(after_article);
+        if remainder.len() == after_article.len() {
+            return None;
+        }
+        let consumed = text.len() - remainder.len();
         let combined = TargetFilter::Or {
-            filters: vec![TargetFilter::Controller, type_filter],
+            filters: vec![player_filter, type_filter],
         };
         let props = vec![FilterProp::Targets {
             filter: Box::new(combined),
         }];
-        return Some((props, prefix_len + you_or_len + consumed));
+        return Some((props, prefix_len + consumed));
     }
 
     // "you" — targets the controller (a player), with word boundary
@@ -12134,6 +12429,8 @@ pub(crate) fn scan_zone_phrase_span(
 /// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
 /// - Target player's: "from target player's graveyard" → `[Owned{TargetPlayer}, InZone]`
 ///   so the card selection is constrained by the companion player target.
+/// - Target opponent's: "from target opponent's graveyard" → `[Owned{TargetOpponent}, InZone]`
+///   (Hypnox, Into the Earthen Maw) — same companion-target scoping, opponent-restricted.
 /// - "Their": "from their graveyard" → `[Owned{ScopedPlayer}, InZone]` so in an
 ///   each-player iteration the candidate set is scoped to the iterated player's
 ///   own graveyard (CR 110.1/108.3: membership is owner-keyed).
@@ -12251,7 +12548,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
+        ZoneQual::OtherPoss
+        | ZoneQual::Owner(ControllerRef::TargetPlayer)
+        | ZoneQual::Owner(ControllerRef::TargetOpponent) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -12547,6 +12846,12 @@ fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQu
         value(
             ZoneQual::Owner(ControllerRef::TargetPlayer),
             tag("target player's "),
+        ),
+        // CR 115.1: "target opponent's" declares a stack target slot, unlike the
+        // untargeted "an opponent's".
+        value(
+            ZoneQual::Owner(ControllerRef::TargetOpponent),
+            tag("target opponent's "),
         ),
         value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
         // CR 508.5a: "defending player's" binds one specific defending player.
@@ -12983,9 +13288,10 @@ mod tests {
     fn attacking_defender_suffix_marker() {
         let text = "attacking your opponents and/or planeswalkers they control";
         assert_eq!(
-            parse_attacking_defender_suffix(text),
+            parse_attacking_defender_suffix(text, AttackDefenderMatch::DefendingSide),
             Some((
                 FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::Opponent),
                 },
                 text.len()
@@ -12998,9 +13304,10 @@ mod tests {
             "the chosen player controls",
         ] {
             assert_eq!(
-                parse_attacking_defender_suffix(&format!(
-                    "attacking your opponents and/or planeswalkers {declined}"
-                )),
+                parse_attacking_defender_suffix(
+                    &format!("attacking your opponents and/or planeswalkers {declined}"),
+                    AttackDefenderMatch::DefendingSide,
+                ),
                 None,
                 "{declined:?}"
             );
@@ -13112,8 +13419,9 @@ mod tests {
     fn superlative_least_toughness_suffix_emits_min_aggregate_pt_comparison() {
         let text = "with the least toughness among creatures you control";
         let mut ctx = ParseContext::default();
-        let (prop, consumed) =
-            parse_power_suffix(text, &mut ctx).expect("least-toughness suffix should parse");
+        let mut properties = Vec::new();
+        let (prop, consumed) = parse_power_suffix(text, &mut ctx, &mut properties)
+            .expect("least-toughness suffix should parse");
         assert_eq!(consumed, text.len(), "the whole suffix must be consumed");
         let FilterProp::PtComparison {
             stat,
@@ -14399,6 +14707,51 @@ mod tests {
         }
     }
 
+    /// CR 509.1g: "creatures it's blocking" splits into its head noun phrase and
+    /// the `SubjectIsBlocker` pairing relation only under a context that names the
+    /// ability's source; a blank context, another tail and a window decline.
+    #[test]
+    fn source_is_blocking_relative_binds_only_for_the_source() {
+        let armed = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let expected = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: None,
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        for text in [
+            "creatures it's blocking",
+            "creatures it is blocking",
+            "creatures it's blocking.",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                Some(("creatures", expected.clone())),
+                "{text:?}"
+            );
+            assert_eq!(
+                split_source_is_blocking_relative(text, &ParseContext::default()),
+                None,
+                "a blank context must not bind the bare pronoun: {text:?}"
+            );
+        }
+        for text in [
+            "creatures it's blocking this turn",
+            "creatures it's blocking and attacking",
+            "creatures blocking it",
+        ] {
+            assert_eq!(
+                split_source_is_blocking_relative(text, &armed),
+                None,
+                "{text:?}"
+            );
+        }
+    }
+
     fn pairing_creatures(relation: CombatRelation, subject: CombatRelationSubject) -> TargetFilter {
         TargetFilter::Typed(
             TypedFilter::creature()
@@ -15036,9 +15389,10 @@ mod tests {
             panic!("expected typed filter");
         };
         assert!(tf.properties.contains(&FilterProp::Another));
-        assert!(tf
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(tf.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::SharesQuality {
@@ -15057,7 +15411,10 @@ mod tests {
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Attacking { defender: None }])
+                    .properties(vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    }])
             )
         );
         assert_eq!(rest, "");
@@ -15074,6 +15431,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
     }
@@ -15117,6 +15475,7 @@ mod tests {
             panic!("expected typed filter, got {filter:?}");
         };
         assert!(!typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::You),
         }));
         assert_eq!(
@@ -15135,6 +15494,7 @@ mod tests {
         };
         assert!(typed.type_filters.contains(&TypeFilter::Creature));
         assert!(typed.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
             defender: Some(ControllerRef::Opponent),
         }));
     }
@@ -15902,6 +16262,70 @@ mod tests {
     }
 
     #[test]
+    fn mana_ability_suffix_folds_with_empty_rest() {
+        // CR 605.1: Raggadragga clause-2 subject shape — "creature you control
+        // with a mana ability" folds to Typed(Creature, You, [HasManaAbility])
+        // with nothing left over.
+        let (f, rest) = parse_type_phrase_folding("creature you control with a mana ability");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_passes_through_trailing_event() {
+        // Mid-phrase rest passthrough: the event verb after the qualifier stays
+        // in the remainder for try_parse_event's Attacks arm.
+        let (f, rest) =
+            parse_type_phrase_folding("creature you control with a mana ability attacks");
+        assert_eq!(rest.trim(), "attacks", "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf.properties.contains(&FilterProp::HasManaAbility));
+    }
+
+    #[test]
+    fn mana_ability_suffix_does_not_shadow_keyword_suffix() {
+        // Adjacent-suffix guard: "creature with flying" still lowers to a
+        // keyword prop, with NO HasManaAbility.
+        let (f, rest) = parse_type_phrase_folding("creature with flying");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(tf
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::WithKeyword { .. })));
+        assert!(
+            !tf.properties.contains(&FilterProp::HasManaAbility),
+            "keyword suffix must not gain HasManaAbility, got {:?}",
+            tf.properties
+        );
+    }
+
+    #[test]
+    fn mana_ability_suffix_accepts_plural_head() {
+        // CR 605.1: plural "mana abilities" (Power Sink: "tap all lands with
+        // mana abilities they control") folds to the same HasManaAbility
+        // predicate as the singular.
+        let (f, rest) = parse_type_phrase_folding("lands with mana abilities they control");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert!(
+            tf.properties.contains(&FilterProp::HasManaAbility),
+            "plural head must attach HasManaAbility, got {:?} (rest: '{rest}')",
+            tf.properties
+        );
+    }
+
+    #[test]
     fn colorless_adjective_does_not_distribute_across_or() {
         let (f, rest) = parse_type_phrase_folding("artifact or colorless creature");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -16565,8 +16989,10 @@ mod tests {
     fn creature_with_power_x_or_less() {
         // CR 107.3a + CR 601.2b: X is announced at cast; the filter retains the
         // `Variable("X")` marker so it can resolve against `chosen_x` at effect time.
-        let (prop, _) = parse_power_suffix("with power x or less", &mut ParseContext::default())
-            .expect("parses");
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) =
+            parse_power_suffix("with power x or less", &mut ctx, &mut properties).expect("parses");
         assert_eq!(
             prop,
             FilterProp::PtComparison {
@@ -16584,7 +17010,9 @@ mod tests {
 
     #[test]
     fn creature_with_power_x_or_greater() {
-        let (prop, _) = parse_power_suffix("with power x or greater", &mut ParseContext::default())
+        let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
+        let (prop, _) = parse_power_suffix("with power x or greater", &mut ctx, &mut properties)
             .expect("parses");
         assert_eq!(
             prop,
@@ -16599,6 +17027,49 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_requires_trigger_context() {
+        let mut ctx = ParseContext::default();
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_binds_cost_paid_object() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            ..ParseContext::default()
+        };
+        let mut properties = vec![FilterProp::Another];
+        let (prop, consumed) =
+            parse_power_suffix("with equal or lesser toughness.", &mut ctx, &mut properties)
+                .expect("trigger-relative toughness suffix should parse");
+        assert_eq!(consumed, "with equal or lesser toughness".len());
+        assert_eq!(properties, vec![FilterProp::OtherThanTriggerObject]);
+        assert_eq!(
+            prop,
+            FilterProp::PtComparison {
+                stat: PtStat::Toughness,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_power_suffix_relative_pt_declines_prior_choice_context() {
+        let mut ctx = ParseContext {
+            in_trigger: true,
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..ParseContext::default()
+        };
+        assert!(parse_power_suffix("with lesser power", &mut ctx, &mut Vec::new()).is_none());
     }
 
     #[test]
@@ -22387,7 +22858,13 @@ mod tests {
         let result2 = parse_combat_status_prefix("attacking creatures");
         assert_eq!(
             result2,
-            Some((FilterProp::Attacking { defender: None }, 10))
+            Some((
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
+                10
+            ))
         );
     }
 
@@ -22438,9 +22915,10 @@ mod tests {
             assert!(tf.properties.contains(&FilterProp::BlockStatus {
                 status: AttackerBlockStatus::Unblocked
             }));
-            assert!(tf
-                .properties
-                .contains(&FilterProp::Attacking { defender: None }));
+            assert!(tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }));
             assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -22459,9 +22937,10 @@ mod tests {
         let second = typed_leg(&filters[1]).expect("second branch should be typed");
         assert!(first.type_filters.contains(&TypeFilter::Creature));
         assert!(second.type_filters.contains(&TypeFilter::Creature));
-        assert!(first
-            .properties
-            .contains(&FilterProp::Attacking { defender: None }));
+        assert!(first.properties.contains(&FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None
+        }));
         assert!(second.properties.contains(&FilterProp::Blocking));
     }
 
@@ -22475,8 +22954,20 @@ mod tests {
         };
         assert_eq!(filters.len(), 4);
         let expected = [
-            (FilterProp::Attacking { defender: None }, Keyword::Flying),
-            (FilterProp::Attacking { defender: None }, Keyword::Vigilance),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Flying,
+            ),
+            (
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None,
+                },
+                Keyword::Vigilance,
+            ),
             (FilterProp::Blocking, Keyword::Flying),
             (FilterProp::Blocking, Keyword::Vigilance),
         ];
@@ -23912,6 +24403,47 @@ mod tests {
     }
 
     #[test]
+    fn targets_player_or_creature_preserves_oracle_remainder() {
+        for (text, expected_remainder, expected_player, expected_controller) in [
+            // Reparations
+            (
+                " that targets you or a creature you control, you may draw a card.",
+                ", you may draw a card.",
+                TargetFilter::Controller,
+                ControllerRef::You,
+            ),
+            // Danitha, Spear of Agony
+            (
+                " that targets an opponent or a creature an opponent controls, put a +1/+1 counter on Danitha.",
+                ", put a +1/+1 counter on Danitha.",
+                TargetFilter::Opponent,
+                ControllerRef::Opponent,
+            ),
+        ] {
+            let (props, consumed) =
+                parse_that_clause_suffix(text, None).expect("constraint parses");
+            assert_eq!(&text[consumed..], expected_remainder, "remainder for {text:?}");
+            let [FilterProp::Targets { filter }] = props.as_slice() else {
+                panic!("expected one Targets property, got {props:?}");
+            };
+            let TargetFilter::Or { filters } = filter.as_ref() else {
+                panic!("expected an Or target filter, got {filter:?}");
+            };
+            assert_eq!(filters.len(), 2, "branches for {text:?}");
+            assert_eq!(filters[0], expected_player, "player leg for {text:?}");
+            let TargetFilter::Typed(typed) = &filters[1] else {
+                panic!("expected a Typed object leg, got {:?}", filters[1]);
+            };
+            assert!(typed.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                typed.controller,
+                Some(expected_controller),
+                "object controller for {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn that_targets_one_or_more_creatures() {
         // "one or more" prefix is stripped (redundant with .any() semantics)
         let result =
@@ -23953,6 +24485,95 @@ mod tests {
         }
     }
 
+    /// CR 115.9b: the verb of a "that targets [filter]" clause agrees with its
+    /// subject's number — "that target" (plural, Bronze Horse's "spells that
+    /// target it") is the same predicate as "that targets". A bare "it" is
+    /// ANAPHORIC (CR 608.2c): it binds to the source only under a context armed
+    /// with the self-reference, and stays unbound otherwise, so the clause is
+    /// left unconsumed rather than silently naming the host.
+    #[test]
+    fn that_target_plural_agreement_and_ctx_gated_it() {
+        // Plural verb + deictic self-reference: parses under a blank context.
+        let result = parse_that_clause_suffix(" that target this creature,", None);
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target this creature".len());
+
+        // Plural verb + bare "it": binds only under an armed context.
+        let self_ref_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            ..ParseContext::default()
+        };
+        let (props, consumed) = parse_that_clause_suffix(" that target it.", Some(&self_ref_ctx))
+            .expect("an armed context binds the bare pronoun");
+        assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::Targets { filter } if **filter == TargetFilter::SelfRef
+        ));
+        assert_eq!(consumed, " that target it".len());
+
+        // Blank context: the bare "it" leaves the clause unconsumed (fail
+        // closed), for both agreement spellings.
+        for phrase in [" that target it.", " that targets it."] {
+            assert!(
+                parse_that_clause_suffix(phrase, None).is_none(),
+                "{phrase:?} must not bind a bare pronoun under a blank context"
+            );
+        }
+    }
+
+    /// CR 110.5 + CR 509.1a: "that are|that's|that is <status adjective>" — the
+    /// relative-clause form of the status adjectives the prefix position
+    /// accepts (New Master of Arms: "blocking creatures that are tapped"). The
+    /// boundary after the adjective is strict, so a conjunct continuation stays
+    /// unconsumed for the token-spec and attacking-defender arms to own.
+    #[test]
+    fn that_are_status_adjective_relative_clause() {
+        for (phrase, expected) in [
+            (" that are tapped", FilterProp::Tapped),
+            (" that's tapped.", FilterProp::Tapped),
+            (" that is tapped,", FilterProp::Tapped),
+            (" that are untapped.", FilterProp::Untapped),
+        ] {
+            let (props, consumed) = parse_that_clause_suffix(phrase, None)
+                .unwrap_or_else(|| panic!("{phrase:?} must parse"));
+            assert_eq!(props.len(), 1, "{phrase:?}");
+            assert_eq!(props[0], expected, "{phrase:?}");
+            assert_eq!(
+                consumed,
+                phrase.trim_end_matches(['.', ',']).len(),
+                "{phrase:?}"
+            );
+        }
+        // CR 110.5: the negated intro lowers to Not { <adjective> }.
+        let (props, _) = parse_that_clause_suffix(" that aren't tapped", None)
+            .expect("the negated status clause must parse");
+        assert_eq!(
+            props[0],
+            FilterProp::Not {
+                prop: Box::new(FilterProp::Tapped),
+            }
+        );
+        // Continuations belong to the token-spec and attacking-defender arms,
+        // not this one.
+        for declined in [
+            " that are tapped and attacking",
+            " that are attacking you",
+            " that are attacking",
+            " that are blocking",
+            " that are tapped this turn",
+        ] {
+            assert!(
+                parse_that_clause_suffix(declined, None).is_none(),
+                "{declined:?} must stay unconsumed"
+            );
+        }
+    }
     // ── VERB-01: Compound target type patterns ──
 
     #[test]
@@ -24235,7 +24856,7 @@ mod tests {
     /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
     /// remainder, which changes which downstream condition-builder claims the
     /// clause and regresses the dedicated Urza-lands
-    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_conditional_mana_swap_shape` /
     /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
     /// oracle_condition.rs — issue #6321 / PR #6533 review), which
     /// deliberately extracts only the discriminating second word ("Mine" —
@@ -25554,7 +26175,7 @@ mod tests {
                 assert!(
                     tf.properties
                         .iter()
-                        .any(|p| matches!(p, FilterProp::Attacking { defender: None })),
+                        .any(|p| matches!(p, FilterProp::Attacking { defender: None, .. })),
                     "expected Attacking property, got {:?}",
                     tf.properties
                 );
@@ -26073,9 +26694,10 @@ mod tests {
     #[test]
     fn superlative_power_suffix_emits_aggregate_pt_comparison() {
         let mut ctx = ParseContext::default();
+        let mut properties = Vec::new();
         let input = "with the greatest power among creatures they control";
-        let (prop, consumed) =
-            parse_power_suffix(input, &mut ctx).expect("superlative suffix should parse");
+        let (prop, consumed) = parse_power_suffix(input, &mut ctx, &mut properties)
+            .expect("superlative suffix should parse");
         assert_eq!(consumed, input.len(), "should consume the whole suffix");
         let FilterProp::PtComparison {
             stat,
@@ -26346,6 +26968,7 @@ mod tests {
         let tf = typed_leg(&filter).expect("typed filter");
         assert!(
             tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             }),
             "must carry Attacking{{defender: Opponent}}, got {:?}",

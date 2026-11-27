@@ -489,6 +489,7 @@ mod tests {
     #[test]
     fn detects_self_grant_haste_via_static() {
         let static_haste = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::SelfRef),
             modifications: vec![ContinuousModification::AddKeyword {
@@ -585,9 +586,13 @@ mod tests {
         let attacking_filter = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking { defender: None }],
+            properties: vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            }],
         });
         let static_anthem = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(attacking_filter),
             modifications: vec![ContinuousModification::AddPower { value: 1 }],

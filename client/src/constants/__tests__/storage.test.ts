@@ -38,6 +38,7 @@ import {
   writeSavedDeckData,
   STORAGE_KEY_PREFIX,
 } from "../storage";
+import { serializeSavedDeck } from "../../services/savedDeckProjection";
 import { expandParsedDeck } from "../../services/deckParser";
 import {
   installFifoWebLocks,
@@ -79,6 +80,17 @@ describe("profile-replacement generation", () => {
     bumpProfileReplacementGeneration(testSavedDeckTxn);
     expect(profileReplacementGeneration()).toBe(2);
   });
+});
+
+it("preserves all three Forest printings through save and reload", () => {
+  const main = [
+    { count: 4, name: "Forest", sourcePrinting: { setCode: "one", collectorNumber: "276" } },
+    { count: 3, name: "Forest", sourcePrinting: { setCode: "dmu", collectorNumber: "277" } },
+    { count: 5, name: "Forest", sourcePrinting: { setCode: "neo", collectorNumber: "292" } },
+  ];
+  const raw = serializeSavedDeck({ main, sideboard: [] }, "Modern", null, { kind: "undeclared" });
+  writeSavedDeckData(testSavedDeckTxn, "Split Forests", raw);
+  expect(loadSavedDeck("Split Forests")?.main).toEqual(main);
 });
 
 describe("saved-deck bracket sidecar", () => {

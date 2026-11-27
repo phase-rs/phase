@@ -14,7 +14,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_while_m_n};
 use nom::character::complete::{digit1, space1};
-use nom::combinator::{map, map_opt, not, opt, peek, recognize, value};
+use nom::combinator::{map, map_opt, map_res, not, opt, peek, recognize, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::{IResult, Parser};
@@ -493,6 +493,9 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         ("kindred", TypeFilter::Kindred),
         ("tribals", TypeFilter::Kindred),
         ("tribal", TypeFilter::Kindred),
+        // CR 314.1: Scheme card type (plural before singular, longest-match-first).
+        ("schemes", TypeFilter::Scheme),
+        ("scheme", TypeFilter::Scheme),
         ("permanents", TypeFilter::Permanent),
         ("permanent", TypeFilter::Permanent),
         ("cards", TypeFilter::Card),
@@ -596,7 +599,13 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Untapped, tag("untapped")),
         // CR 702.171b: "saddled Mount/creature" selector.
         value(FilterProp::IsSaddled, tag("saddled")),
-        value(FilterProp::Attacking { defender: None }, tag("attacking")),
+        value(
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            tag("attacking"),
+        ),
         value(FilterProp::Blocking, tag("blocking")),
         value(FilterProp::Token, tag("token")),
         value(FilterProp::NonToken, tag("nontoken")),
@@ -677,6 +686,28 @@ pub fn parse_color_property(input: &str) -> OracleResult<'_, FilterProp> {
             tag("multicolored"),
         ),
     ))
+    .parse(input)
+}
+
+/// CR 205.2a: "with <n> or more card types" object qualifier ("a card with two
+/// or more card types" — Rendmaw, Creaking Nest; "another spell with two or more
+/// card types" — Visitor from Planet Q). Lowers to `FilterProp::CardTypeCount`
+/// with `Comparator::GE`; the count reads distinct core card types at runtime.
+/// Only the printed plural threshold form is recognized: the threshold-shaped
+/// singular, "exactly N", and "or fewer" have zero printed occurrences.
+pub fn parse_card_type_count_property(input: &str) -> OracleResult<'_, FilterProp> {
+    preceded(
+        (tag("with"), space1),
+        map_res(
+            terminated(parse_number, tag(" or more card types")),
+            |n: u32| {
+                u8::try_from(n).map(|count| FilterProp::CardTypeCount {
+                    comparator: Comparator::GE,
+                    count,
+                })
+            },
+        ),
+    )
     .parse(input)
 }
 
@@ -912,7 +943,7 @@ pub fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
         if matches!(
             prop,
             FilterProp::BlockStatus { .. }
-                | FilterProp::Attacking { defender: None }
+                | FilterProp::Attacking { defender: None , .. }
                 | FilterProp::Blocking
                 | FilterProp::Tapped
                 | FilterProp::Untapped

@@ -596,7 +596,7 @@ pub(crate) fn equip_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefi
         AbilityKind::Activated,
         Effect::Attach {
             attachment: TargetFilter::SelfRef,
-            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            target: TargetFilter::equip_target(),
             // CR 702.6a: the keyword's "target" names the HOST (the equipped
             // creature); the attachment ("this permanent") is determined.
             selection: AttachSelection::AtResolution {
@@ -886,6 +886,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: true,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -899,7 +900,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::LastCreated,
-                    count: qty.clone(),
+                    count: crate::types::ability::SacrificeSelection::EntireReferent,
                     min_count: 0,
                 },
             )),
@@ -1046,6 +1047,7 @@ fn synthesize_etb_token_attach_keyword(
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -3393,7 +3395,7 @@ pub(crate) fn build_evoke_etb_sac_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -3893,6 +3895,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             attach_to: None,
             enters_attacking: false,
             attack_destination: TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -4533,6 +4536,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         attach_to: None,
         enters_attacking: false,
         attack_destination: TokenAttackDestination::ControllerChooses,
+        enters_blocking: None,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5228,7 +5232,7 @@ fn build_echo_trigger(cost: EchoCost) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5334,7 +5338,7 @@ pub(crate) fn build_cumulative_upkeep_trigger(base_cost: AbilityCost) -> Trigger
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -5391,7 +5395,7 @@ fn build_annihilator_trigger(n: u32) -> TriggerDefinition {
         target: TargetFilter::Typed(
             TypedFilter::permanent().controller(ControllerRef::DefendingPlayer),
         ),
-        count: QuantityExpr::Fixed { value: n as i32 },
+        count: QuantityExpr::Fixed { value: n as i32 }.into(),
         min_count: 0,
     };
 
@@ -5524,10 +5528,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
                     ]),
             ),
             TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                )),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    }],
+                ))),
             },
         ],
     }
@@ -5792,7 +5798,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
     tf.properties = vec![
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         FilterProp::Another,
     ];
     tf
@@ -5989,7 +5998,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
+                } if tf.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -6011,7 +6020,10 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -7070,7 +7082,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -7112,7 +7124,7 @@ fn build_vanishing_sacrifice_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     );
@@ -8155,7 +8167,9 @@ fn is_champion_self_sacrifice_ability(ability: &AbilityDefinition) -> bool {
         &*ability.effect,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                value: 1
+            }),
             ..
         }
     )
@@ -8234,7 +8248,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::Sacrifice {
             target: TargetFilter::SelfRef,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
     )
@@ -8832,6 +8846,7 @@ fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
         TypeFilter::Planeswalker => "planeswalker",
         TypeFilter::Battle => "battle",
         TypeFilter::Kindred => "kindred",
+        TypeFilter::Scheme => "scheme",
         TypeFilter::Permanent => "permanent",
         TypeFilter::Card => "card",
         TypeFilter::Any => "permanent",
@@ -8945,7 +8960,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
                             TypedFilter::new(quality.clone()).controller(ControllerRef::You),
                         ),
                     },
-                }),
+                })
+                .into(),
                 min_count: 0,
             },
         )
@@ -9204,19 +9220,19 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
+/// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///   1. **Hand-activated alt-cost** (not for Suspend X)
+///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
 ///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
+///      can counter the synthesized activation on the stack. Under CR 116.2f and
+///      CR 702.62a, suspending is a special action that skips the stack.
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9265,7 +9281,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                     if *counter_type == CounterType::Time
             )
     });
-    if !already_has_activation {
+    // CR 702.62a: no card prints suspend 0 ("X can't be 0", Aeon Chronicler); a count of 0 is
+    // the placeholder for an unread X, whose cost reads {0} too.
+    if time_counters > 0 && !already_has_activation {
         let composite_cost = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
@@ -14310,7 +14328,7 @@ mod annihilator_synthesis_tests {
         };
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -14391,12 +14409,14 @@ mod annihilator_synthesis_tests {
         // Both N=1 and N=3 must be present from the first pass.
         let ns: Vec<i32> = triggers
             .iter()
-            .filter_map(|t| match t.execute.as_deref().map(|a| &*a.effect) {
-                Some(Effect::Sacrifice {
-                    count: QuantityExpr::Fixed { value },
-                    ..
-                }) => Some(*value),
-                _ => None,
+            .filter_map(|t| {
+                let Effect::Sacrifice { count, .. } = t.execute.as_deref()?.effect.as_ref() else {
+                    return None;
+                };
+                let QuantityExpr::Fixed { value } = count.count_expr()? else {
+                    return None;
+                };
+                Some(*value)
             })
             .collect();
         assert!(ns.contains(&1) && ns.contains(&3));
@@ -14915,8 +14935,10 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties
-                .contains(&FilterProp::Attacking { defender: None }),
+            tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -15338,7 +15360,10 @@ mod battlecry_synthesis_tests {
         assert_eq!(
             tf.properties,
             vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
                 FilterProp::Another
             ]
         );
@@ -19046,7 +19071,7 @@ mod idempotency_tests {
                 match &*effect.effect {
                     Effect::Sacrifice {
                         target: TargetFilter::LastCreated,
-                        count: QuantityExpr::Fixed { value: 2 },
+                        count: crate::types::ability::SacrificeSelection::EntireReferent,
                         ..
                     } => {}
                     other => panic!("expected LastCreated Sacrifice, got {other:?}"),
@@ -23799,7 +23824,7 @@ mod devour_synthesis_tests {
         // Parent effect: ranged "sacrifice up to N of your creatures".
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -24785,7 +24810,9 @@ mod fading_vanishing_tests {
             &*sacrifice.effect,
             Effect::Sacrifice {
                 target: TargetFilter::SelfRef,
-                count: QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed {
+                    value: 1
+                }),
                 min_count: 0,
             }
         ));

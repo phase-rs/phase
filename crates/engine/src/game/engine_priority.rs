@@ -981,9 +981,9 @@ fn place_priority_batch(
         return None;
     }
     let outcome = match answer_delayed_events {
-        Some(delayed) => {
-            triggers::process_collected_triggers_with_delayed_events(state, batch, delayed, events)
-        }
+        Some(delayed) => triggers::process_collected_triggers_with_sba_answer_events(
+            state, batch, delayed, events,
+        ),
         None => triggers::process_collected_triggers_with_delayed_phase_events(
             state,
             batch,
@@ -1234,12 +1234,7 @@ fn ensure_terminal_cast_spell_triggers_collected(
     let Some(object) = state.objects.get(&object_id) else {
         return;
     };
-    let event = GameEvent::SpellCast {
-        card_id: object.card_id,
-        controller: object.controller,
-        object_id,
-        cast_mana_value: Some(object.spell_mana_value()),
-    };
+    let event = GameEvent::spell_cast(object, object.controller);
     triggers::collect_triggers_into_deferred(state, &[event]);
 }
 

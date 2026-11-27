@@ -75,7 +75,7 @@ fn drive_to_optional_prompt(runner: &mut GameRunner) {
         if runner.state().stack.is_empty() {
             return;
         }
-        if runner.act(GameAction::PassPriority).is_err() {
+        if runner.pass_holding_team().is_err() {
             return;
         }
     }
@@ -106,7 +106,7 @@ fn drive_to_seat_prompt(runner: &mut GameRunner) -> PlayerId {
                 if runner.state().stack.is_empty() {
                     panic!("settled without surfacing the seat prompt");
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     panic!(
                         "stuck without the seat prompt: {:?}",
                         runner.state().waiting_for
@@ -118,13 +118,25 @@ fn drive_to_seat_prompt(runner: &mut GameRunner) -> PlayerId {
     panic!("never reached the seat prompt");
 }
 
-/// Drain to an idle empty stack. A further `OptionalEffectChoice` here is
-/// UNEXPECTED and fails loudly: every decision under test was already made by
-/// the caller.
+/// Drain to an idle empty stack — or to the `EffectZoneChoice` the caller is
+/// about to answer (the two-card offer parks there by design). A further
+/// `OptionalEffectChoice` here is UNEXPECTED and fails loudly: every decision
+/// under test was already made by the caller. `Priority` with a live stack
+/// passes the whole holding team through it (CR 117.3d/805.5b: resolution
+/// needs a full pass cycle); any other window fails loudly, never silently.
 fn drive_to_idle(runner: &mut GameRunner) {
     for _ in 0..100 {
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => {
+                if let Err(error) = runner.pass_holding_team() {
+                    panic!(
+                        "live-stack Priority must advance via team pass, got {error:?}: {:?}",
+                        runner.state().waiting_for
+                    );
+                }
+            }
+            WaitingFor::EffectZoneChoice { .. } => return,
             WaitingFor::OptionalEffectChoice { .. } => {
                 panic!(
                     "unexpected optional-effect prompt during drive_to_idle: {:?} — \
@@ -132,10 +144,8 @@ fn drive_to_idle(runner: &mut GameRunner) {
                     runner.state().waiting_for
                 );
             }
-            _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    return;
-                }
+            other => {
+                panic!("unexpected window during drive_to_idle: {other:?}");
             }
         }
     }
@@ -337,7 +347,7 @@ fn web_of_inertia_silent_through_real_controller_combat_transition() {
         if runner.state().phase != Phase::BeginCombat {
             break;
         }
-        if runner.act(GameAction::PassPriority).is_err() {
+        if runner.pass_holding_team().is_err() {
             break;
         }
     }

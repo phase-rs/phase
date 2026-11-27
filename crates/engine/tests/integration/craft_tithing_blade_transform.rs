@@ -438,7 +438,7 @@ fn craft_returns_blade_transformed_and_front_etb_does_not_refire() {
                     target: TargetFilter::Typed(
                         TypedFilter::permanent().with_type(TypeFilter::Creature),
                     ),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )

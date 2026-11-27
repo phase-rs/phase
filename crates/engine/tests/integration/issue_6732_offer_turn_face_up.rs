@@ -14,9 +14,11 @@
 //! held six casts, four land plays and a pass.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ManaContribution,
-    ManaProduction, ReplacementDefinition, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
+    ControllerRef, Duration, Effect, ManaContribution, ManaProduction, ReplacementDefinition,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -28,6 +30,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::zones::{EtbTapState, Zone};
 
 fn morph_cost() -> ManaCost {
@@ -331,11 +334,32 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
             .as_enchantment()
             .with_replacement_definition(redirect_exile_to_graveyard());
     }
+    let foreign_top = scenario.add_land_to_library_top(P1, "Island").id();
     let mut runner = scenario.build();
 
     let mut events = Vec::new();
     engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
         .expect("the card is played face down");
+
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            id,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: P0 },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtTopOfLibrary {
+                    library: ControllerRef::SpecificPlayer { id: P1 },
+                },
+            }],
+            None,
+        )
+        .expect("grant a foreign library look");
+    assert_ne!(
+        filter_state_for_viewer(runner.state(), P0).objects[&foreign_top].name,
+        HIDDEN_CARD_NAME
+    );
 
     let paused = runner
         .act(GameAction::TurnFaceUp {
@@ -369,9 +393,20 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
         "nothing is committed while the payment is open"
     );
 
+    // CR 401.5: the outer turn-up owns the snapshot even while the mana
+    // source's replacement choice owns the prompt.
+    let state = serde_json::to_value(runner.state()).expect("serialize the paused authority");
+    assert_eq!(
+        state["foreign_library_look_snapshot"]["tops"],
+        serde_json::json!([[P1, foreign_top]])
+    );
+
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the replacement choice is answered");
+
+    let state = serde_json::to_value(runner.state()).expect("serialize the completed authority");
+    assert!(state.get("foreign_library_look_snapshot").is_none());
 
     let obj = &runner.state().objects[&id];
     assert!(

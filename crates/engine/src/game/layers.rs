@@ -36,13 +36,13 @@ use crate::types::ability::{
     quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
     ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
     CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
-    CopiableValues, Designation, Duration, Effect, FilterProp, ManaContribution, ManaProduction,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
+    CopiableValues, DefinitionOrigin, Designation, Duration, Effect, FilterProp, ManaContribution,
+    ManaProduction, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
-    token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
+    token_static_creator_grant, token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -709,6 +709,9 @@ fn permission_duration_expires_at(
         // `prune_untap_step_casting_permissions`) and ended by the cleanup arm
         // above. It never expires directly, at any seam.
         Duration::UntilEndOfNextTurnOf { .. } => false,
+        // CR 611.2a: the granted-turn window is never a seam expiry; the
+        // bound turn's end and both skip sites retire it (`turns.rs`).
+        Duration::UntilEndOfGrantedTurn { .. } => false,
         Duration::UntilNextStepOf { step, player } => {
             PermissionSeam::for_step(*step) == Some(seam)
                 && permission_scope_selects(player, keyed, active_player)
@@ -809,6 +812,9 @@ pub(crate) fn casting_permission_duration_is_enforceable(
         // transient continuous effects only — no pass revokes a casting
         // permission when a spell becomes cast.
         Duration::UntilEvent { .. } => false,
+        // CR 611.2a: the granted-turn window is unrepresentable on a casting
+        // permission — refused, fail-closed.
+        Duration::UntilEndOfGrantedTurn { .. } => false,
     }
 }
 
@@ -1237,6 +1243,7 @@ pub(crate) fn prune_lapsed_host_bound_casting_permissions(state: &mut GameState)
                 | Duration::UntilEndOfCombat
                 | Duration::UntilNextTurnOf { .. }
                 | Duration::UntilEndOfNextTurnOf { .. }
+                | Duration::UntilEndOfGrantedTurn { .. }
                 | Duration::UntilNextStepOf { .. }
                 | Duration::ForAsLongAs { .. }
                 | Duration::UntilSourceExilesAnotherCard
@@ -2222,6 +2229,10 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         // creature this static applies to), not the source, so this condition is
         // recipient-relative regardless of what its filter reads.
         StaticCondition::DefendingPlayerControls { .. } => true,
+        // CR 508.5: the identity anchor resolves from the recipient attacker
+        // exactly like `DefendingPlayerControls`' — recipient-relative
+        // regardless of the subject scope.
+        StaticCondition::IsDefendingPlayer { .. } => true,
         // CR 303.4m + CR 611.3a: resolve a recipient-anchored monarch subject
         // for each affected object, not once against the source.
         StaticCondition::IsMonarch { player } => {
@@ -2345,6 +2356,8 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: combat-derived identity, never board-population-dependent.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -2460,6 +2473,10 @@ fn static_condition_characteristic_reads_at(
         // CR 509.1a + CR 109.4: per-player board census over a live filter.
         StaticCondition::DefendingPlayerControls { filter } => CharacteristicKinds::CONTROLLER
             .union(target_filter_characteristic_reads_at(filter, depth)),
+        // CR 508.5: the identity anchor reads the attack target's controller
+        // (planeswalker/battle targets), like `DefendingPlayerControls`' —
+        // CONTROLLER, not EMPTY.
+        StaticCondition::IsDefendingPlayer { .. } => CharacteristicKinds::CONTROLLER,
         // CR 903.3 + CR 613.1b: commander designation is fixed at deck
         // construction; only the control scope is layer-writable.
         StaticCondition::ControlsCommander { .. }
@@ -2656,6 +2673,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        // CR 508.5: declared attacks fix the defending player — a battlefield
+        // entry cannot perturb the identity.
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -3295,6 +3315,21 @@ fn evaluate_condition_inner(
         StaticCondition::IsMonarch { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_is_monarch(state, player))
+        }
+        // CR 508.5 + CR 109.5: defending-player IDENTITY — true when the
+        // named scope resolves to the defending player. The subject resolves
+        // like `IsMonarch`'s; the anchor resolves like
+        // `DefendingPlayerControls`' (recipient-or-source attacker, declared
+        // attack authoritative during declaration). No anchor bindable =>
+        // false, and a `Not` wrapper inverting this is the printed "unless".
+        StaticCondition::IsDefendingPlayer { player } => {
+            let subject = designation_player(state, player, controller, source_id, context);
+            let attacking = context.recipient.unwrap_or(source_id);
+            let defending = match context.declared_attack {
+                Some(target) => crate::game::combat::defending_player_for_target(state, target),
+                None => crate::game::combat::defending_player_for_attacker(state, attacking),
+            };
+            matches!((subject, defending), (Some(a), Some(b)) if a == b)
         }
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // player axis resolves like `IsMonarch`'s; the leaf reads the held
@@ -5042,6 +5077,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -5439,6 +5475,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -5612,6 +5649,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -5797,6 +5835,7 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::HasBoon { .. }
         // CR 122.1f: poison counters are player state, never a layer-writable
         // object characteristic or a board population.
@@ -5942,6 +5981,7 @@ fn static_condition_reads_monarch(condition: &StaticCondition) -> bool {
         | StaticCondition::CompletedADungeon
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
@@ -9157,16 +9197,27 @@ pub(crate) fn stamp_static_granter(def: &mut StaticDefinition, granter: ObjectIn
 /// static that grants to the token itself carries the token's own quoted abilities, so
 /// its whole tree names the creator. Any other static binds only its own fields; its
 /// nested definitions are grants to other objects, left unbound until the token applies
-/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token. The parser
-/// refuses a token body whose references would land in the other frame.
+/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token, except a
+/// direct quoted-static grant in the creator's frame ([`token_static_creator_grant`]),
+/// which binds to the creator here. The parser refuses a token body whose references
+/// would land in the other frame.
 pub(crate) fn stamp_token_static_creator(
     def: &mut StaticDefinition,
     creator: ObjectIncarnationRef,
 ) {
     if token_static_grants_to_itself(def) {
         stamp_static_granter(def, creator);
-    } else if own_fields_name_granter(def) {
-        stamp_granter(creator)(DefinitionNodeMut::Static(def));
+    } else {
+        if own_fields_name_granter(def) {
+            stamp_granter(creator)(DefinitionNodeMut::Static(def));
+        }
+        for modification in &mut def.modifications {
+            if token_static_creator_grant(modification).is_some()
+                && grant_names_granter(modification)
+            {
+                stamp_grant(modification, creator);
+            }
+        }
     }
 }
 
@@ -9880,6 +9931,7 @@ pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinu
     transient_effect_passes_other_gates(state, tce)
         && transient_duration_holds(state, tce)
         && host_bound_duration_holds(state, &tce.duration, tce.source_id, tce.controller)
+        && granted_turn_duration_window_holds(state, &tce.duration)
 }
 
 fn transient_effect_passes_other_gates(state: &GameState, tce: &TransientContinuousEffect) -> bool {
@@ -10158,6 +10210,23 @@ pub(crate) fn transient_gate_conditions(
         .chain(tce.condition.as_ref())
 }
 
+/// CR 611.2a + CR 500.7: whether a granted-turn window still holds — the
+/// single authority for the `UntilEndOfGrantedTurn` reading, shared by
+/// liveness (`transient_effect_is_live`) and both
+/// `transient_grants_static_mode_to_*` queries. The window holds exactly
+/// while its bound turn is the turn in progress (mirrors the
+/// `AtBeginningOfGrantedTurn` firing gate in `triggers.rs`); an unbound
+/// anaphor never holds (fail-closed). Every other duration holds here —
+/// this predicate answers only the granted-turn window.
+pub(crate) fn granted_turn_duration_window_holds(state: &GameState, duration: &Duration) -> bool {
+    match duration {
+        Duration::UntilEndOfGrantedTurn { turn } => {
+            turn.is_some_and(|bound| state.current_extra_turn == Some(bound))
+        }
+        _ => true,
+    }
+}
+
 /// CR 611.2b: whether a host-bound STATE duration still holds — the single
 /// authority for both readings, shared by liveness, the settled-board prune
 /// (`prune_lapsed_host_bound_effects`) and the resolution-time start test
@@ -10197,6 +10266,7 @@ fn host_bound_duration_holds(
         | Duration::UntilEndOfCombat
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
+        | Duration::UntilEndOfGrantedTurn { .. }
         | Duration::UntilNextStepOf { .. }
         // CR 611.2b: `transient_duration_holds` owns this reading.
         | Duration::ForAsLongAs { .. }
@@ -11698,12 +11768,16 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
 ///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
 ///   to the target's controller.
+/// - `BlockRestriction` carrying a controller-relative attacker filter ("can't
+///   block creatures you control"), grafted onto another player's creature by a
+///   resolving spell (Immortal Obligation). Both consumers read the anchor
+///   through `combat::blocker_filter_context`.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
 ///
@@ -11722,7 +11796,137 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
-        _ => false,
+        // CR 109.5 + CR 509.1b + CR 608.2c: a "can't block <object>" whitelist
+        // grafted by a resolving spell onto another player's creature reads
+        // "you" as that spell's controller (Immortal Obligation: "can't block
+        // creatures you control").
+        StaticMode::BlockRestriction { filter } => target_filter_controller_is_relative(filter),
+        // Exhaustive: each new StaticMode must decide here whether its "you"
+        // refers to the installing player (CR 109.5).
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ModifyCost { .. }
+        | StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::ReduceAbilityCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::CantSetSchemeInMotion
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { by: None }
+        | StaticMode::MustBeBlockedByAll { blockers: None }
+        | StaticMode::Goaded
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary { .. }
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => false,
     }
 }
 
@@ -12366,20 +12570,22 @@ fn unstarted_effect_generator_is_suppressed(
 ///   `StackSpell`-filtered statics); `{keywords, controller}` reset. CR 112.2: this pass also
 ///   reseeds each stack object's controller from its `StackEntry` default.
 ///
-/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. Its single call site
-/// is `collect_scan_zones`' `TargetFilter::SpecificObject` arm, which picks the scan zone for
-/// EVERY identity-filtered continuous effect regardless of modification kind. That includes
-/// the `ContinuousModification::ChangeController` that `exchange_control::resolve` installs on
-/// a stolen spell, so `Zone::Stack`'s membership here is load-bearing for the CR 613.1b
-/// controller derivation and not merely for keyword grants. Narrowing this predicate would
-/// silently stop a stolen spell's control change from reaching its object.
+/// SCOPE OF THIS PREDICATE — it does NOT govern the keyword half only. It has two callers:
+/// `effects::effect::affected_object_ids`, which binds a resolution-time grant only to cards in
+/// the zones the pass does not own, and `collect_scan_zones`' `TargetFilter::SpecificObject`
+/// arm, which picks the scan zone for EVERY identity-filtered continuous effect regardless of
+/// modification kind. That includes the `ContinuousModification::ChangeController` that
+/// `exchange_control::resolve` installs on a stolen spell, so `Zone::Stack`'s membership here
+/// is load-bearing for the CR 613.1b controller derivation and not merely for keyword grants.
+/// Narrowing this predicate would silently stop a stolen spell's control change from reaching
+/// its object.
 ///
 /// Every OTHER zone (library, graveyard, exile) is owned by `off_zone_characteristics`, which
 /// computes keywords ON DEMAND from base + active effects and never materializes them.
 /// `keywords::object_has_effective_keyword_kind` is the reader that routes by exactly this
 /// split. Materializing into an off-zone object from here would install a second writer behind
 /// that authority's back.
-fn layer_pass_materializes_keywords(zone: Zone) -> bool {
+pub(crate) fn layer_pass_materializes_keywords(zone: Zone) -> bool {
     matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
 }
 
@@ -13386,13 +13592,17 @@ fn apply_continuous_effect_filtered(
                 obj.granted_abilities_from = Some(0);
                 obj.trigger_definitions.clear();
                 // CR 613.1f + CR 611.2c: Layer 6 removes the object's ABILITIES.
-                // A replacement created by the resolution of a spell or ability is
+                // A rule effect that a resolved spell or ability stored here as a
+                // replacement or static definition (`is_resolution_installed`) is
                 // not one of the object's abilities — and per CR 611.2c not one of
                 // its characteristics at all — so Humility does not end a
-                // prevention/regeneration shield already resolved onto this object.
+                // prevention/regeneration shield or a "can't block this turn"
+                // restriction already resolved onto this object. A granted quoted
+                // ability (CR 113.10) is an ability and is removed.
                 obj.replacement_definitions
                     .retain(|d| d.is_resolution_installed());
-                obj.static_definitions.clear();
+                obj.static_definitions
+                    .retain(|d| d.is_resolution_installed());
                 obj.clear_keywords();
                 abilities_suppressed.insert(id);
             }
@@ -13578,7 +13788,11 @@ fn apply_continuous_effect_filtered(
             // passes don't multiply the grant (mirrors the `GrantAbility` /
             // `GrantTrigger` / `AddStaticMode` idempotency invariant in this match).
             ContinuousModification::GrantStaticAbility { definition } => {
-                let granted = *definition.clone();
+                let mut granted = *definition.clone();
+                // CR 613.1f: A static ability's grant is subject to ability removal.
+                if effect.transient_id.is_none() {
+                    granted.origin = DefinitionOrigin::Characteristic;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &granted) {
                     obj.static_definitions.push(granted);
                 }
@@ -13656,6 +13870,11 @@ fn apply_continuous_effect_filtered(
                 // silently drop the second caster's requirement. Full-def equality
                 // still collapses the same effect re-applied across layer passes
                 // (identical anchor), so no grant is multiplied.
+                // CR 611.2 + CR 611.2c: A transient rule effect grafted
+                // onto this object does not become one of its abilities.
+                if effect.transient_id.is_some() {
+                    def.origin = DefinitionOrigin::Resolution;
+                }
                 if !obj.static_definitions.iter_all().any(|sd| sd == &def) {
                     obj.static_definitions.push(def);
                 }
@@ -16687,6 +16906,144 @@ mod tests {
         );
         assert!(live[0].is_resolution_installed());
         assert!(live[0].is_consumed, "runtime state survives Humility too");
+    }
+
+    fn install_test_static_modification(
+        state: &mut GameState,
+        recipient: ObjectId,
+        modification: ContinuousModification,
+        transient: bool,
+    ) {
+        let source = make_creature(state, "Static source", 2, 2, P0);
+        let affected = TargetFilter::SpecificObject { id: recipient };
+        if transient {
+            state.add_transient_continuous_effect(
+                source,
+                P0,
+                Duration::UntilEndOfTurn,
+                affected,
+                vec![modification],
+                None,
+            );
+        } else {
+            install_static_definition(
+                state,
+                source,
+                StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![modification]),
+            );
+        }
+        state.layers_dirty.mark_full();
+        evaluate_layers(state);
+    }
+
+    #[test]
+    fn transient_static_mode_is_resolution_installed() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            true,
+        );
+        // CR 611.2 + CR 611.2c: The graft represents a resolved rule effect.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Resolution);
+    }
+
+    #[test]
+    fn printed_static_mode_is_characteristic() {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBlock,
+            },
+            false,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, DefinitionOrigin::Characteristic);
+    }
+
+    // Synthetic fixture isolating the graft rules. The Promise of Loyalty
+    // integration tests exercise the resolution-origin grant through a real cast.
+    fn check_static_grant_removal(
+        inner_origin: DefinitionOrigin,
+        transient: bool,
+        expected_origin: DefinitionOrigin,
+        expected_after_removal: usize,
+    ) {
+        let mut state = setup();
+        let recipient = make_creature(&mut state, "Recipient", 2, 2, P0);
+        let mut definition =
+            StaticDefinition::new(StaticMode::CantBlock).affected(TargetFilter::SelfRef);
+        definition.origin = inner_origin;
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::GrantStaticAbility {
+                definition: Box::new(definition),
+            },
+            transient,
+        );
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].mode, StaticMode::CantBlock);
+        assert_eq!(live[0].origin, expected_origin);
+
+        install_test_static_modification(
+            &mut state,
+            recipient,
+            ContinuousModification::RemoveAllAbilities,
+            true,
+        );
+        // CR 613.1f + CR 611.2c: A later ability removal leaves installed rule effects.
+        let live = state.objects[&recipient].static_definitions.as_slice();
+        assert_eq!(live.len(), expected_after_removal);
+        for definition in live {
+            assert_eq!(definition.mode, StaticMode::CantBlock);
+            assert_eq!(definition.origin, DefinitionOrigin::Resolution);
+        }
+    }
+
+    #[test]
+    fn printed_static_grant_cannot_install_resolution_origin() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            false,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
+    }
+
+    #[test]
+    fn transient_resolution_static_grant_survives_removal() {
+        check_static_grant_removal(
+            DefinitionOrigin::Resolution,
+            true,
+            DefinitionOrigin::Resolution,
+            1,
+        );
+    }
+
+    #[test]
+    fn transient_characteristic_static_grant_is_removed() {
+        check_static_grant_removal(
+            DefinitionOrigin::Characteristic,
+            true,
+            DefinitionOrigin::Characteristic,
+            0,
+        );
     }
 
     /// An activated ability whose effect draws `count` cards — distinct
@@ -31097,7 +31454,7 @@ mod tests {
             .expect("execute body required");
         let Effect::Sacrifice {
             target,
-            count,
+            count: crate::types::ability::SacrificeSelection::Count(count),
             min_count,
         } = &*execute.effect
         else {
@@ -31156,7 +31513,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 1 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer)
                 )
@@ -31198,7 +31555,7 @@ mod tests {
                     trigger.definition.execute.as_deref().map(|ability| &*ability.effect),
                     Some(Effect::Sacrifice {
                         target: TargetFilter::Typed(filter),
-                        count: QuantityExpr::Fixed { value: 3 },
+                        count: crate::types::ability::SacrificeSelection::Count(QuantityExpr::Fixed { value: 3 }),
                         ..
                     }) if filter.controller == Some(ControllerRef::DefendingPlayer)
                 )
@@ -31875,6 +32232,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );

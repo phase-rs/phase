@@ -5339,6 +5339,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             ],
         };
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -14617,6 +14618,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 properties: vec![],
             });
             obj.static_definitions = vec![StaticDefinition {
+                origin: Default::default(),
                 mode: StaticMode::CastWithKeyword { keyword: granted },
                 affected: Some(affected),
                 modifications: vec![],
@@ -17465,6 +17467,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             properties: vec![],
         });
         let def = StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: granted_kw,
             },
@@ -17569,6 +17572,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
         obj.card_types.core_types.push(CoreType::Creature);
         obj.card_types.supertypes.push(Supertype::Legendary);
         obj.static_definitions = vec![StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::CastWithKeyword {
                 keyword: Keyword::Affinity(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],
@@ -27133,6 +27137,7 @@ fn modal_x_target_legality_chooses_x_before_targets() {
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Eldrazi Spawn".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(1),
@@ -43234,6 +43239,8 @@ mod top_of_library_cast_permission_runtime {
             Zone::Battlefield,
         );
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::Unlimited,
             alt_cost: None,
@@ -43340,9 +43347,14 @@ mod top_of_library_cast_permission_runtime {
         let land =
             put_card_on_top_of_library(state, P0, CardId(907), "Top Land", vec![CoreType::Land]);
         assert_eq!(
-            top_of_library_land_playable_by_permission(state, P0),
-            Some((land, source_id)),
+            top_of_library_lands_playable_by_permission(state, P0).next(),
+            Some(land),
             "the land branch must authorize the top land on the play-land path"
+        );
+        assert_eq!(
+            top_of_library_grant_for_object(state, P0, land, CardPlayMode::Play)
+                .map(|grant| grant.source),
+            Some(source_id),
         );
         assert!(
             !spell_objects_available_to_cast(state, P0).contains(&land),
@@ -43400,6 +43412,8 @@ mod top_of_library_cast_permission_runtime {
             Zone::Battlefield,
         );
         let def = StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            library: crate::types::ability::ControllerRef::You,
+            mana_spend_permission: None,
             play_mode: CardPlayMode::Cast,
             frequency: CastFrequency::OncePerTurn,
             alt_cost: None,
@@ -43423,7 +43437,7 @@ mod top_of_library_cast_permission_runtime {
     /// `spell_objects_available_to_cast` once its per-turn slot is consumed,
     /// and comes back at turn cleanup. This is the discriminating test for
     /// the new `frequency` axis: reverting the frequency gate in
-    /// `top_of_library_permission_source` makes the `after_consumed`
+    /// `top_of_library_grant_for_object` makes the `after_consumed`
     /// assertion fail (the slot would never be honored, so the card stays
     /// castable). Mirrors the Maralen exile-permission frequency test.
     #[test]
@@ -43478,7 +43492,7 @@ mod top_of_library_cast_permission_runtime {
     }
 
     /// CR 601.2a + CR 401.5: The cast-time selection helper
-    /// `top_of_library_selected_permission` returns the granting source AND
+    /// `top_of_library_grant_for_object` returns the granting source AND
     /// its frequency for a `OncePerTurn` permission (so `finalize_cast`
     /// stamps the slot) and an `Unlimited` frequency for the Realmwalker
     /// shape (which never consumes a slot). This is the discriminating test
@@ -43493,7 +43507,8 @@ mod top_of_library_cast_permission_runtime {
         let src = install_once_per_turn_creature_static(&mut state, player);
         let top = put_creature_on_top_of_library(&mut state, player, CardId(906));
         assert_eq!(
-            top_of_library_selected_permission(&state, player, top),
+            top_of_library_grant_for_object(&state, player, top, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             Some((src, CastFrequency::OncePerTurn)),
             "OncePerTurn permission must be selected with its OncePerTurn frequency"
         );
@@ -43503,7 +43518,7 @@ mod top_of_library_cast_permission_runtime {
         let unlimited_src = install_realmwalker_static(&mut state2, player, "Elf");
         let top2 = put_creature_on_top_of_library(&mut state2, player, CardId(907));
         assert_eq!(
-            top_of_library_selected_permission(&state2, player, top2),
+            top_of_library_grant_for_object(&state2, player, top2, CardPlayMode::Cast).map(|grant| (grant.source, grant.frequency)),
             Some((unlimited_src, CastFrequency::Unlimited)),
             "Unlimited permission must be selected with Unlimited frequency — never consumes a slot"
         );
@@ -43525,7 +43540,8 @@ mod top_of_library_cast_permission_runtime {
         pd.library.retain(|id| *id != below);
         pd.library.push_back(below);
         assert_eq!(
-            top_of_library_selected_permission(&state, player, below),
+            top_of_library_grant_for_object(&state, player, below, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             None,
             "only the current top card is authorized by the top-of-library permission"
         );
@@ -43536,7 +43552,7 @@ mod top_of_library_cast_permission_runtime {
     /// helper PREFERS the `Unlimited` authorizer so the bounded slot is
     /// preserved. This is the discriminating test for the
     /// preserve-bounded-slot fix: reverting the Unlimited-preference in
-    /// `top_of_library_permission_source` (back to "first match wins") lets
+    /// `top_of_library_grant_for_object` (back to "first match wins") lets
     /// a battlefield-ordering that puts the OncePerTurn source first report
     /// `OncePerTurn`, flipping this assertion. The cast-path consumption is
     /// driven by the reported frequency, so reporting `Unlimited` here is
@@ -43562,7 +43578,8 @@ mod top_of_library_cast_permission_runtime {
             "test sanity: the two permission sources must be distinct"
         );
         assert_eq!(
-            top_of_library_selected_permission(&state, player, top),
+            top_of_library_grant_for_object(&state, player, top, CardPlayMode::Cast)
+                .map(|grant| (grant.source, grant.frequency)),
             Some((unlimited_src, CastFrequency::Unlimited)),
             "Unlimited authorizer must be preferred so the OncePerTurn slot is preserved"
         );
@@ -44953,7 +44970,7 @@ fn animate_dead_aura_spell_resolves_and_attaches_to_graveyard_creature() {
 }
 
 /// Verbatim Animate Dead Oracle text (matches `crates/engine/tests/fixtures/
-/// integration_cards.json.gz` — the repo's canonical corpus form, which uses the
+/// integration_cards/` — the repo's canonical corpus form, which uses the
 /// self-reference "this Aura"). Reused across the end-to-end reanimation tests.
 const ANIMATE_DEAD_ORACLE_FULL: &str = "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Return enchanted creature card to the battlefield under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets -1/-0.";
 
@@ -47676,6 +47693,279 @@ fn add_exiled_card(state: &mut GameState, player: PlayerId, name: &str) -> Objec
         generic: 1,
     };
     object_id
+}
+
+/// CR 113.6b + CR 406.6 + CR 406.2 (V-fast-exit): `exile_permission_pools_empty`
+/// preserves the short-circuit for every pool scope. A live `CounterLinked`
+/// source (Tinybones shape) is present for every leg, so an empty offer proves
+/// the exit — not a missing source — decided: exile holding a counterless card
+/// offers nothing, while the same card with a stash counter is offered, and
+/// removing the counter empties the offer again (live read, no latch).
+#[test]
+fn exile_permission_pools_empty_short_circuits_counter_linked_scope() {
+    use crate::types::counter::CounterMatch;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Tinybones",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::CounterLinked {
+            matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+        },
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Reach-guard: the source is live and functioning before any offer is read.
+    assert_eq!(exile_permission_sources(&state, player).len(), 1);
+
+    // Empty exile: the predicate holds and discovery offers nothing.
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+
+    // Non-empty exile WITHOUT counters: still empty (the counter clause).
+    let exiled = add_exiled_card(&mut state, player, "Exiled Bear");
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+    assert!(
+        !spell_objects_available_to_cast(&state, player).contains(&exiled),
+        "a counterless exiled card must not be offered"
+    );
+
+    // Positive guard: the same card WITH a stash counter is offered.
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    assert!(!exile_permission_pools_empty(&state));
+    assert!(
+        exile_objects_castable_by_permission(&state, player)
+            .iter()
+            .any(|(id, src, _)| *id == exiled && *src == source),
+        "the stashed card must be offered through the live source"
+    );
+    assert!(
+        spell_objects_available_to_cast(&state, player).contains(&exiled),
+        "the stashed card must surface on the castable list"
+    );
+
+    // Removing the counter exits the pool on the next read (CR 611.3a).
+    state
+        .objects
+        .get_mut(&exiled)
+        .unwrap()
+        .counters
+        .remove(&CounterType::Generic("stash".to_string()));
+    assert!(exile_permission_pools_empty(&state));
+    assert!(exile_objects_castable_by_permission(&state, player).is_empty());
+}
+
+/// CR 406.2 + CR 122.1 + CR 400.7 (S1-card-exit):
+/// `exile_permission_pools_cannot_offer` fires exactly when no pool scope can
+/// offer the candidate: the per-turn map and the live-link store are both
+/// empty and the candidate itself is counterless. In particular the
+/// C1-elsewhere shape — a live successor-LKI entry plus counters on a
+/// *different* exiled card — still cannot offer the counterless candidate
+/// (pins the dropped LKI conjunct: a successor-LKI bare read is not an offer,
+/// CR 400.7), while a counter on the candidate, a non-empty per-turn map, or a
+/// non-empty link store each defeat the exit.
+#[test]
+fn exile_permission_pools_cannot_offer_card_scoped_exit() {
+    use crate::game::exile_links::exiled_card_snapshot;
+    use crate::types::game_state::LinkedExileLki;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let candidate = add_exiled_card(&mut state, player, "Candidate Bear");
+
+    // Empty + counterless: nothing can offer the candidate.
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // C1-elsewhere shape: a post-flicker battlefield source (live incarnation
+    // 1, links pruned) with a successor-admitting LKI pile for the candidate,
+    // plus a stash counter on a *different* exiled card. The exit still fires.
+    let card_id = crate::types::identifiers::CardId(state.next_object_id);
+    let source = create_object(
+        &mut state,
+        card_id,
+        player,
+        "Flickered Source".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&source).unwrap().incarnation = 1;
+    let elsewhere = add_exiled_card(&mut state, player, "Elsewhere Bear");
+    state
+        .objects
+        .get_mut(&elsewhere)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    state
+        .linked_exile_lki
+        .entry(source)
+        .or_default()
+        .push(LinkedExileLki {
+            departed: 0,
+            successor: 1,
+            snapshot: vec![snapshot],
+        });
+    assert!(
+        exile_permission_pools_cannot_offer(&state, candidate),
+        "C1-elsewhere (LKI-nonempty, counters elsewhere, counterless candidate) must not defeat the card-scoped exit"
+    );
+
+    // A counter on the candidate defeats the exit (a CounterLinked pool may
+    // now contain it); removing it re-arms the exit.
+    state
+        .objects
+        .get_mut(&candidate)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+    state
+        .objects
+        .get_mut(&candidate)
+        .unwrap()
+        .counters
+        .remove(&CounterType::Generic("stash".to_string()));
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // A non-empty per-turn map defeats the exit; clearing it re-arms the exit.
+    state
+        .cards_exiled_with_source_this_turn
+        .insert(source, vec![candidate]);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+    state.cards_exiled_with_source_this_turn.clear();
+    assert!(exile_permission_pools_cannot_offer(&state, candidate));
+
+    // A non-empty live-link store defeats the exit.
+    link_exiled_to_source(&mut state, candidate, source);
+    assert!(!exile_permission_pools_cannot_offer(&state, candidate));
+}
+
+/// CR 400.7 + CR 607.2a + CR 406.2 (S1-C1-elsewhere): a flickered Persistent
+/// source — live incarnation back on the battlefield, live links pruned,
+/// successor-admitting LKI pile — with an empty per-turn map, a counterless
+/// candidate, and a stash counter on a *different* exiled card. Admission
+/// refuses the candidate (the card-scoped exit fires: the successor bare read
+/// is over-admission per the `LinkedExileLki::admits` doc) while discovery
+/// still offers it through the untouched exile-wide exit + scan (preserved tip
+/// over-admission, characterized here, degrading gracefully via prepare-time
+/// re-derivation). Printed reachability: a Prosper/Tibalt-class flickered
+/// Persistent source plus a flicker effect; the fixture constructs the
+/// post-flicker state directly.
+#[test]
+fn persistent_permission_c1_elsewhere_admission_refuses_while_discovery_offers() {
+    use crate::game::exile_links::exiled_card_snapshot;
+    use crate::types::game_state::LinkedExileLki;
+
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source_id = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Flickered Matrix",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Hostile: a second Persistent source with an empty pile — per-source
+    // `pool_contains` must not let it authorize the candidate.
+    let _other_source_id = add_exile_cast_permission_source_with(
+        &mut state,
+        player,
+        "Other Matrix",
+        TargetFilter::Any,
+        CastFrequency::Unlimited,
+        CardPlayMode::Play,
+        ExileCastCost::PayNormalCost,
+        ExileCardPool::Persistent,
+        ExileCastTiming::YourTurnOnly,
+    );
+    // Post-flicker incarnation: entered at 0, departed at 0, back at 1 with
+    // its live links pruned (re-entry prune).
+    state.objects.get_mut(&source_id).unwrap().incarnation = 1;
+    let candidate = add_exiled_card(&mut state, player, "Candidate Bear");
+    // Counters on a *different* exiled card keep discovery's exile-wide exit
+    // open while the candidate stays counterless.
+    let elsewhere = add_exiled_card(&mut state, player, "Elsewhere Bear");
+    state
+        .objects
+        .get_mut(&elsewhere)
+        .unwrap()
+        .counters
+        .insert(CounterType::Generic("stash".to_string()), 1);
+    // Successor-LKI pile, mirroring `record_linked_exile_departure`'s
+    // successor entry: admits the live incarnation; snapshot live in exile.
+    let snapshot = exiled_card_snapshot(&state, candidate).expect("candidate live in exile");
+    state
+        .linked_exile_lki
+        .entry(source_id)
+        .or_default()
+        .push(LinkedExileLki {
+            departed: 0,
+            successor: 1,
+            snapshot: vec![snapshot],
+        });
+
+    // Leg A: admission refuses (prep-identical seam —
+    // `exile_cast_permission_source` delegates to matching, the exact call
+    // `casting_candidates` makes at prepare time).
+    assert!(
+        exile_cast_permission_source(&state, player, candidate).is_none(),
+        "C1-elsewhere admission must refuse the counterless candidate"
+    );
+
+    // Leg B: discovery still offers the candidate, through the flickered
+    // source only — the positive reach-guard proving the successor-LKI pile
+    // is live and matchable, so leg A cannot pass vacuously.
+    let offered: Vec<_> = exile_objects_castable_by_permission(&state, player)
+        .into_iter()
+        .filter(|(id, _, _)| *id == candidate)
+        .collect();
+    assert_eq!(
+        offered.len(),
+        1,
+        "discovery must offer the candidate exactly once, got {:?}",
+        offered
+    );
+    assert_eq!(
+        offered[0].1, source_id,
+        "the offering source must be the flickered source, not the empty-pile hostile"
+    );
+
+    // Leg C: the surface union still includes the candidate.
+    assert!(
+        spell_objects_available_to_cast(&state, player).contains(&candidate),
+        "the surfaced castable list must include the discovery-offered candidate"
+    );
+
+    // Leg D (departed-only guard): the same setup with the LKI admitting only
+    // a departed incarnation — admission refuses AND discovery is empty,
+    // proving legs A–C came from successor-LKI matching.
+    {
+        let entry = &mut state.linked_exile_lki.get_mut(&source_id).unwrap()[0];
+        entry.successor = entry.departed;
+    }
+    assert!(
+        exile_cast_permission_source(&state, player, candidate).is_none(),
+        "departed-only LKI must still refuse admission"
+    );
+    assert!(
+        exile_objects_castable_by_permission(&state, player).is_empty(),
+        "departed-only LKI must empty discovery"
+    );
 }
 
 /// CR 601.2a + CR 113.6b + CR 118.9: With Maralen on the battlefield, the
@@ -54587,7 +54877,10 @@ fn cosmic_cube_dynamic_mv_ceiling_enforced_at_finalize() {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::You),
-                            properties: vec![FilterProp::Attacking { defender: None }],
+                            properties: vec![FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            }],
                         }),
                     },
                 )
@@ -54914,8 +55207,7 @@ mod plot_from_library {
 
         // The cast family still authorizes a Library→Stack cast.
         assert!(
-            top_of_library_permission_source(runner.state(), P0, Some(CardPlayMode::Cast))
-                .is_some(),
+            top_of_library_grant_for_object(runner.state(), P0, top, CardPlayMode::Cast).is_some(),
             "Future Sight class must still authorize casting the top card"
         );
         // But it is NOT a plot authorizer — the dedicated path is disjoint.

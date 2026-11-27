@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4471
-- **Total card appearances across root causes:** 4504 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4448
+- **Total card appearances across root causes:** 4481 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -56,41 +56,41 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 717 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 395 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 321 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 223 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 1 | Relative-clause / filter restriction on target dropped | 708 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 566 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 393 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 376 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 317 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 6 | Disjunctive (or-list) collapsed to first branch | 222 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 150 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 125 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 124 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
-| 15 | Multi-target / 'up to N' optionality or count dropped | 79 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 78 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 80 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
-| 17 | Copy 'except' / additional-modification clause dropped | 80 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
+| 17 | Copy 'except' / additional-modification clause dropped | 79 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
-| 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
+| 21 | Token entry flags / keyword / attachment clause dropped | 50 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
-| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 35 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
+| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 34 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
 | 26 | Delayed / future-phase trigger flattened to immediate effect | 19 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 11 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 10 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2379/4504 ≈ 52.8% of all misparse appearances; the top 10 cover 3355/4504 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
+> The top **5** root causes cover 2364/4481 ≈ 52.8% of all misparse appearances; the top 10 cover 3338/4481 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (717 cards)
+### 1. Relative-clause / filter restriction on target dropped  (708 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -132,7 +132,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Arcade Gannon
 - Archon of the Wild Rose
 - Argivian Blacksmith
-- Armored Transport
 - Arrogant Bloodlord
 - Ashiok's Erasure
 - Ashiok, Nightmare Weaver
@@ -213,7 +212,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Cloudstone Curio
 - Coiling Stalker
 - Coils of the Medusa
-- Colfenor, the Last Yew
 - Commencement of Festivities
 - Compound Fracture
 - Consulate Surveillance
@@ -295,7 +293,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Ethereal Forager
 - Ethersworn Shieldmage
 - Euroakus
-- Evendo, Waking Haven
 - Everett K. Ross, Hapless Attaché
 - Executioner's Swing
 - Expel the Interlopers
@@ -317,7 +314,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Flame Channeler
 - Flamerush Rider
 - Flamewar, Brash Veteran
-- Flash Foliage
 - Flensing Raptor
 - Flower
 - Flowstone Flood
@@ -427,7 +423,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Junkyard Scrapper
 - Kaima, the Fractured Calm
 - Kamachal, Ship's Mascot
-- Kamahl's Summons
 - Karona, False God Avatar
 - Karplusan Strider
 - Kathril, Aspect Warper
@@ -472,7 +467,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Lesser Werewolf
 - Lethal Scheme
 - Liara of the Flaming Fist
-- Light of Sanction
 - Likeness Looter
 - Lila, Hospitality Hostess
 - Lithomancer's Focus
@@ -507,7 +501,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Mistform Mutant
 - Mistmoon Griffin
 - Mizzium Mortars
-- Mizzix's Mastery
 - Monastery Siege
 - Mongrel Pack
 - Murasa Sproutling
@@ -770,7 +763,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Wall of Mulch
 - Wall of Nets
 - Wall of Putrid Flesh
-- Wall of Vapor
 - Wallop
 - Wandermare
 - Warpath
@@ -801,7 +793,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Yawning Fissure
 - Yenna, Redtooth Regent
 - You Cannot Pass!
-- You Find Some Prisoners
 - You Find a Cursed Idol
 - Your Mistake Is My Triumph
 - Zara, Renegade Recruiter
@@ -818,7 +809,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (566 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -889,7 +880,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Brain Pry
 - Breath of the Sleepless
 - Brimstone Vandal
-- Bronze Horse
 - Bull-Rush Bruiser
 - Bulwark Ox
 - Cache Grab
@@ -910,7 +900,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Codespell Cleric
 - Colfenor's Urn
 - Collectigull
-- Combat Celebrant
 - Command Mine
 - Command Power Plant
 - Concord with the Kami
@@ -1395,7 +1384,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (395 cards)
+### 3. Anaphor bound to wrong referent  (393 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1591,7 +1580,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Knight of Grace
 - Know Naught but Fire
 - Kor Scythemaster
-- Kresh the Bloodbraided
 - Krovikan Plague
 - Kroxa, Titan of Death's Hunger
 - Kusari-Gama
@@ -1648,7 +1636,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Ordruun Commando
 - Origin of Black Widow
 - Origin of Thor
-- Orthion, Hero of Lavabrink
 - Othelm, Sigardian Outcast
 - Overburden
 - Ovika, Enigma Goliath
@@ -1801,7 +1788,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (377 cards)
+### 4. Conjoined / chained second effect clause dropped  (376 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -1984,7 +1971,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Magus of the Jar
 - March from Velis Vel
 - Marcus, Mutant Mayor
-- Mardu Siegebreaker
 - Margle, Cousin of Yargle
 - Mascot Exhibition
 - Memory Jar
@@ -2189,7 +2175,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (321 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (317 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2441,7 +2427,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Ryan Sinclair
 - Sage of Hours
 - Sage's Reverie
-- Sarevok's Tome
 - Sasaya's Essence
 - Say Its Name
 - Search for Glory
@@ -2488,9 +2473,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Undead Sprinter
 - Unlucky Cabbage Merchant
 - Ursine Monstrosity
-- Urza's Mine
-- Urza's Power Plant
-- Urza's Tower
 - Uyo, Silent Prophet
 - Valakut Awakening
 - Valiant Changeling
@@ -2521,7 +2503,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (223 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (222 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2622,7 +2604,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Glittering Massif
 - Godhunter Octopus
 - Golem Artisan
-- Greater Gargadon
 - Guru Pathik
 - HYDRA Assault Robot
 - Hand of Vecna
@@ -3878,7 +3859,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (125 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (124 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3961,7 +3942,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Nature's Chosen
 - Nemesis Phoenix
 - Neriv, Heart of the Storm
-- New Master of Arms
 - Night Revelers
 - Nightsky Mimic
 - Nine-Fingers Keene
@@ -4117,7 +4097,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 15. Multi-target / 'up to N' optionality or count dropped  (79 cards)
+### 15. Multi-target / 'up to N' optionality or count dropped  (78 cards)
 
 **Signature.** MultiTargetSpec / 'up to one/two target' optionality dropped to a mandatory single Typed target (or collapsed into DamageAll), losing the multi_target / up_to slot and per-target distinctness.
 
@@ -4157,7 +4137,6 @@ are outside the detector's class.
 - Conduct Electricity
 - Conjurer's Bauble
 - Fire Juggler
-- Flame Sweep
 - Gravegouger
 - Griffnaut Tracker
 - Grime Gorger
@@ -4308,7 +4287,7 @@ are outside the detector's class.
 
 </details>
 
-### 17. Copy 'except' / additional-modification clause dropped  (80 cards)
+### 17. Copy 'except' / additional-modification clause dropped  (79 cards)
 
 **Signature.** Copy-spell/animate/token-copy drops the 'except it's X' / 'with <ability>' override (P/T, keyword, type, supertype, non-legendary, retarget) from the copy.
 
@@ -4325,7 +4304,6 @@ are outside the detector's class.
 - Cephalid Facetaker
 - Donal, Herald of Wings
 - Double Header (copy)
-- Double Major
 - Duplication Device
 - Echoing Equation
 - Electroduplicate
@@ -4635,7 +4613,7 @@ are outside the detector's class.
 
 </details>
 
-### 21. Token entry flags / keyword / attachment clause dropped  (52 cards)
+### 21. Token entry flags / keyword / attachment clause dropped  (50 cards)
 
 **Signature.** Token creation drops tapped/enters_attacking flags, a 'with <keyword>' grant, color/name, or an attach-to-target clause (terminator misses a trailing relative phrase).
 
@@ -4648,7 +4626,6 @@ are outside the detector's class.
 - A-Winota, Joiner of Forces
 - Aang, Master of Elements
 - Adeline, Resplendent Cathar
-- Brimaz, King of Oreskos
 - Cabaretti Courtyard
 - Cloudform
 - Crow Storm
@@ -4662,7 +4639,6 @@ are outside the detector's class.
 - Godsire
 - Goldmeadow Lookout
 - Ignacio of Myra's Marvels
-- Immortal Obligation
 - Imperious Mindbreaker
 - Impetuous Lootmonger
 - In Too Deep
@@ -4758,7 +4734,7 @@ are outside the detector's class.
 
 </details>
 
-### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (35 cards)
+### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (34 cards)
 
 **Signature.** X-derived cost/count emitted as a u32::MAX sentinel, Fixed, or raw-string Variable with no 'where X is' binding; the X linkage is severed.
 
@@ -4789,7 +4765,6 @@ are outside the detector's class.
 - Mutated Cultist
 - Necron Overlord
 - Night Dealings
-- Pantlaza, Sun-Favored
 - Petalmane Baku
 - Quillmane Baku
 - Saltcrusted Steppe
@@ -4887,7 +4862,7 @@ are outside the detector's class.
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (11 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (10 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -4905,7 +4880,6 @@ are outside the detector's class.
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
 - Uthros Research Craft
-- Uthros, Titanic Godcore
 
 </details>
 

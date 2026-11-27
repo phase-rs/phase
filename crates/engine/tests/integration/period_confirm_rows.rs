@@ -599,7 +599,7 @@ fn a_delayed_trigger_is_stripped_only_while_it_acts_on_grown_objects_alone() {
             Box::new(|a| {
                 a.effect = Effect::Sacrifice {
                     target: TargetFilter::Typed(TypedFilter::creature()),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 }
             }),

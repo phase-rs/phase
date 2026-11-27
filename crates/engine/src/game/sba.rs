@@ -105,12 +105,13 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
 /// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
 /// safety net, which can run while a resolution is paused on a player's
 /// replacement choice. Reports a departure that canceled that pause, so the
-/// caller finishes the resolution before any player receives priority.
+/// caller finishes the resolution before any player receives priority. The
+/// count is the tail of deferred triggers collected by this call's departures.
 pub(crate) fn check_state_based_actions_reporting_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> DepartureResume {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
+) -> (DepartureResume, usize) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller)
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
@@ -766,13 +767,18 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player, read from the same collectors
-/// the SBA check runs. This is intentionally narrower than running the full SBA
-/// loop: callers that are only trying to avoid waiting on a dead player during a
-/// non-priority continuation should not trigger unrelated SBA choice prompts such
-/// as commander-zone or legend-rule choices.
-pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    !player_losses(state).is_empty()
+/// eliminate a living player, or one of the named actors when an actor slice
+/// is present. The check shares the loss reasons and CR 810.8a departure
+/// membership with the SBA loop without applying unrelated SBAs.
+pub(crate) fn has_pending_player_loss_sba(state: &GameState, actors: Option<&[PlayerId]>) -> bool {
+    let losses = player_losses(state);
+    match actors {
+        None => !losses.is_empty(),
+        Some(actors) => losses
+            .into_keys()
+            .flat_map(|root| super::elimination::living_loss_departure_seats(state, root))
+            .any(|seat| actors.contains(&seat)),
+    }
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -1052,18 +1058,17 @@ fn lethal_damage_candidates(state: &GameState, battlefield_snapshot: &[ObjectId]
         .filter(|id| {
             live_battlefield_object(state, id).is_some_and(|obj| {
                 obj.card_types.core_types.contains(&CoreType::Creature)
-                    && obj.toughness.is_some_and(|t| {
-                        t > 0
-                            && (
-                                // CR 704.5g: Normal lethal damage requires positive toughness and damage >= toughness.
-                                obj.damage_marked >= t as u32
-                                // CR 704.5h + CR 702.2b: any damage dealt by a deathtouch source, marked
-                                // (CR 120.3e) or as -1/-1 counters (CR 120.3d).
-                                || obj.dealt_deathtouch_damage
-                            )
-                    })
-                    // CR 702.12b: Indestructible creatures are not destroyed by lethal damage.
-                    && !obj.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+                    // CR 704.5g + CR 704.5h + CR 702.12b: the lethal-damage authority, on the
+                    // live battlefield. Lethal damage may be measured against power (CR 613.11);
+                    // the toughness > 0 precondition stays toughness-based. Deathtouch damage was
+                    // dealt marked (CR 120.3e) or as -1/-1 counters (CR 120.3d).
+                    && crate::game::lethal_damage::is_destroyed_by_lethal_damage(
+                        state,
+                        obj,
+                        obj.damage_marked,
+                        obj.dealt_deathtouch_damage,
+                        &[],
+                    )
             })
         })
         .collect()
@@ -1209,10 +1214,7 @@ fn perform_creature_deaths(
                 }
                 performed_ids.push(object_id);
             }
-            zones::mark_simultaneous_departures(
-                events,
-                &zones::departed_subset(state, &performed_ids),
-            );
+            stamp_sba_departures(state, events, &performed_ids);
             return;
         }
 
@@ -1356,7 +1358,28 @@ fn perform_creature_deaths(
     // co-departing dies/LTB observers (Blood Artist) observe each other.
     // CR 701.19a/b: a creature whose destruction was Prevented (regeneration)
     // stays on the battlefield, so `departed_subset` excludes it from the group.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    stamp_sba_departures(state, events, &performed_ids);
+}
+
+/// CR 603.2c + CR 704.3: the simultaneous-departure stamp changes the
+/// event's payload without creating a second occurrence. Stamp exact claims
+/// from the deliveries along with their events.
+fn stamp_sba_departures(state: &mut GameState, events: &mut [GameEvent], performed: &[ObjectId]) {
+    let departed = zones::departed_subset(state, performed);
+    if departed.len() < 2 {
+        return;
+    }
+    for claim in &mut state.consumed_before_priority_trigger_events {
+        if events
+            .iter()
+            .filter(|event| **event == claim.event)
+            .nth(claim.occurrence)
+            .is_some()
+        {
+            zones::mark_simultaneous_departures(std::slice::from_mut(&mut claim.event), &departed);
+        }
+    }
+    zones::mark_simultaneous_departures(events, &departed);
 }
 
 /// CR 704.5j: A legendary permanent is exempt from the legend rule while an
@@ -1572,7 +1595,7 @@ fn check_legend_rule_pre_m14(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously,
     // so these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    stamp_sba_departures(state, events, &performed_ids);
     SbaPassControl::Continue
 }
 
@@ -2028,7 +2051,7 @@ fn check_world_rule(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    stamp_sba_departures(state, events, &performed_ids);
 }
 
 /// CR 704.5i + CR 306.9: A planeswalker with loyalty 0 is put into its owner's graveyard.
@@ -2064,7 +2087,7 @@ fn check_zero_loyalty(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    stamp_sba_departures(state, events, &performed_ids);
 }
 
 /// CR 704.5s + CR 704.5v + CR 704.6f + CR 603.3 + CR 704.3: is `source` the
@@ -2161,7 +2184,7 @@ fn check_zero_defense(
     // CR 603.10a + CR 704.3: state-based actions are performed simultaneously, so
     // these permanents left the battlefield together — record the group so
     // co-departing leaves-the-battlefield/dies observers observe each other.
-    zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
+    stamp_sba_departures(state, events, &performed_ids);
 }
 
 /// CR 704.5p (+ CR 310.10 for the battle half): the full "this permanent may not
@@ -3044,7 +3067,7 @@ mod tests {
         state.waiting_for = paused_prompt.clone();
 
         let mut events = Vec::new();
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
         check_state_based_actions(&mut state, &mut events);
 
         assert!(state.players[1].is_eliminated, "CR 704.5a still fires");
@@ -4824,6 +4847,7 @@ mod tests {
         // A replacement choice is pending: resolution is paused mid-event. The
         // proposed event's contents are irrelevant here — only `is_some()` matters.
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -4831,6 +4855,7 @@ mod tests {
                 stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -5006,6 +5031,7 @@ mod tests {
             remember_identity: None,
         };
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(2),
@@ -5013,6 +5039,7 @@ mod tests {
                 stage: DrawEventStage::Individual,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -5248,7 +5275,7 @@ mod tests {
         ));
         state.players[0].life = 0;
         assert!(player_losses(&state).is_empty());
-        assert!(!has_pending_player_loss_sba(&state));
+        assert!(!has_pending_player_loss_sba(&state, None));
 
         state.players[0].life = 20;
         state.players[1].life = 0;
@@ -5260,7 +5287,7 @@ mod tests {
                 (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
             ])
         );
-        assert!(has_pending_player_loss_sba(&state));
+        assert!(has_pending_player_loss_sba(&state, None));
     }
 
     #[test]

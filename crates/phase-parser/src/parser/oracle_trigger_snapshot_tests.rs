@@ -1414,3 +1414,38 @@ fn hidetsugu_and_kairi_instant_or_sorcery_gate_keeps_both_legs() {
         "both printed card-type legs must gate the free cast"
     );
 }
+
+/// CR 603.2 + CR 603.3b (#11338): Firebender Ascension's observer trigger —
+/// full verbatim Oracle ability. Mode/source/valid_card pinned structurally
+/// in `oracle_trigger_tests.rs`; this snapshot pins the whole definition.
+#[test]
+fn trigger_firebender_ascension_observer_snapshot() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control attacking causes a triggered ability of that creature to trigger, put a quest counter on this enchantment. Then if it has four or more quest counters on it, you may copy that ability. You may choose new targets for the copy.",
+        "Firebender Ascension",
+    );
+    insta::assert_json_snapshot!(def);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Aboleth Spawn's observer trigger. The
+/// "Probing Telepathy — " ability-word prefix is stripped upstream at
+/// priority 14, so this snapshot starts at "Whenever" (see the unit test).
+#[test]
+fn trigger_aboleth_spawn_observer_snapshot() {
+    let def = parse_trigger_line(
+        "Whenever a creature entering under an opponent's control causes a triggered ability of that creature to trigger, you may copy that ability. You may choose new targets for the copy.",
+        "Aboleth Spawn",
+    );
+    insta::assert_json_snapshot!(def);
+}
+
+/// CR 603.2 + CR 603.3b (#11338): Strict Proctor's observer trigger — full
+/// verbatim Oracle ability.
+#[test]
+fn trigger_strict_proctor_observer_snapshot() {
+    let def = parse_trigger_line(
+        "Whenever a permanent entering causes a triggered ability to trigger, counter that ability unless its controller pays {2}.",
+        "Strict Proctor",
+    );
+    insta::assert_json_snapshot!(def);
+}

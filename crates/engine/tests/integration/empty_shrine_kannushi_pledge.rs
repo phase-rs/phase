@@ -1,5 +1,5 @@
 //! Live protection sets: Empty-Shrine Kannushi and Pledge of Loyalty.
-//! Regenerate integration_cards.json.gz after oracle-gen with gen-test-fixture.py;
+//! Regenerate integration_cards/ after oracle-gen with gen-test-fixture.py;
 //! the public-loader rows deliberately require fresh exported real cards.
 
 use engine::database::card_db::CardDatabase;

@@ -264,6 +264,7 @@ pub(super) fn capture_exit_lki(
         intensity: obj.intensity,
         // CR 701.3d: the caller captures these before any attachment sever.
         attachments,
+        produceable_mana_types: Vec::new(),
     };
     state.lki_cache.insert(object_id, lki.clone());
     state
@@ -852,6 +853,27 @@ pub(crate) fn apply_zone_exit_cleanup(
     }
 }
 
+/// Reserve an identity and build the object without publishing it to the game.
+pub(crate) fn new_detached_object(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    name: String,
+    zone: Zone,
+) -> GameObject {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+
+    GameObject::new(id, card_id, owner, name, zone)
+}
+
+/// Publish a newly constructed object to its first in-game zone.
+pub(crate) fn place_new_object(state: &mut GameState, object: GameObject) {
+    let (id, zone, owner) = (object.id, object.zone, object.owner);
+    state.objects.insert(id, object);
+    add_to_zone(state, id, zone, owner);
+}
+
 /// Allocate a new ObjectId, create a GameObject with defaults, insert into state.objects, and add to the specified zone.
 pub fn create_object(
     state: &mut GameState,
@@ -860,12 +882,9 @@ pub fn create_object(
     name: String,
     zone: Zone,
 ) -> ObjectId {
-    let id = ObjectId(state.next_object_id);
-    state.next_object_id += 1;
-
-    let obj = GameObject::new(id, card_id, owner, name, zone);
-    state.objects.insert(id, obj);
-    add_to_zone(state, id, zone, owner);
+    let object = new_detached_object(state, card_id, owner, name, zone);
+    let id = object.id;
+    place_new_object(state, object);
 
     // CR 302.6 + CR 403.4: Record ETB turn as a global counter (used by
     // "this turn" triggers and filters). NOTE: this helper is used both for
@@ -1759,7 +1778,8 @@ pub(crate) fn move_to_zone_with_entry_flags(
                     // are released before the caller delivers the move (see
                     // `replacement::release_transformed_entry_projection`).
                     // This arm exists for exhaustiveness only.
-                    crate::types::game_state::LiminalEntryKind::TransformedEntry => None,
+                    crate::types::game_state::LiminalEntryKind::TransformedEntry
+                    | crate::types::game_state::LiminalEntryKind::OutsideGameCard { .. } => None,
                 })
         })
         .flatten();
@@ -1944,8 +1964,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         // CR 509.1g + CR 506.4 + CR 608.2h: snapshot the object's current block
         // pairings before exit cleanup removes it from combat. A liminal entry
         // projection is not in combat, so it records none.
-        zone_change_record.block_pairs = super::combat::live_block_pairs_of(state, object_id);
-        capture_combat_status(state, object_id)
+        capture_zone_change_combat(state, obj, &mut zone_change_record)
     };
     zone_change_record.sync_trigger_source_context();
 
@@ -2368,7 +2387,10 @@ pub(crate) fn record_and_emit_entry_from_no_zone(
 /// the same pass as the ones in `events`, so every co-entrant is read at one boundary — but not
 /// while another battlefield entry is still being made, when the boundary belongs to a chain run
 /// inside that entry and the held entrants' event is not complete.
-pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, events: &[GameEvent]) {
+pub(crate) fn settle_battlefield_entry_observations<'a>(
+    state: &mut GameState,
+    events: impl IntoIterator<Item = &'a GameEvent>,
+) {
     let parked_entry_keys: Vec<(u32, usize)> = state
         .parked_entry_events()
         .filter_map(|event| match event {
@@ -2383,30 +2405,33 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
     } else {
         &state.unsettled_entry_batch_events
     };
-    let pending: Vec<(usize, ObjectId, Option<u64>)> = held
-        .iter()
-        .chain(events.iter())
-        .filter_map(|event| match event {
-            GameEvent::ZoneChanged { to, record, .. } if *to == Zone::Battlefield => Some(record),
-            _ => None,
-        })
-        .filter(|record| {
-            record.recorded_turn_number == state.turn_number
-                && !state
-                    .battlefield_entry_observations
-                    .contains_key(&record.turn_zone_change_index)
+    // The entry's ledger key and entrant, read off the event alone so the held
+    // batch (borrowed from `state`) and the caller's events share one item type.
+    let entry_key = |event: &GameEvent| match event {
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            record.object_id,
+            record.entered_incarnation,
+        )),
+        _ => None,
+    };
+    let mut entries: Vec<_> = held.iter().filter_map(entry_key).collect();
+    entries.extend(events.into_iter().filter_map(entry_key));
+    let pending: Vec<_> = entries
+        .into_iter()
+        .filter(|&(turn, index, _, _)| {
+            turn == state.turn_number
+                && state.battlefield_entry_observations.get(&index).is_none()
                 // CR 614.12a + CR 707.5: a parked mid-entry entry is matched by its ledger key,
                 // not by full event equality, so later record stamping cannot unpark it.
-                && !parked_entry_keys
-                    .contains(&(record.recorded_turn_number, record.turn_zone_change_index))
+                && !parked_entry_keys.contains(&(turn, index))
         })
-        .map(|record| {
-            (
-                record.turn_zone_change_index,
-                record.object_id,
-                record.entered_incarnation,
-            )
-        })
+        .map(|(_, index, object_id, entered_incarnation)| (index, object_id, entered_incarnation))
         .collect();
     if pending.is_empty() {
         return;
@@ -2426,6 +2451,19 @@ pub(crate) fn settle_battlefield_entry_observations(state: &mut GameState, event
             })
             .map(|obj| super::triggers::trigger_source_context_for_latch(state, obj));
         if let Some(observation) = observation {
+            // CR 611.3c: the ledger's type filters see the same entry-time
+            // characteristics as the trigger observation.
+            let entry_index = state
+                .battlefield_entry_zone_changes()
+                .position(|record| record.turn_zone_change_index == index);
+            if let Some(entry) = entry_index
+                .and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
+                .filter(|entry| entry.object_id == object_id)
+            {
+                entry.core_types.clone_from(&observation.lki.card_types);
+                entry.subtypes.clone_from(&observation.lki.subtypes);
+                entry.supertypes.clone_from(&observation.lki.supertypes);
+            }
             state
                 .battlefield_entry_observations
                 .insert(index, observation);
@@ -3000,6 +3038,72 @@ fn sever_battlefield_attachment_graph_on_exit(
     severed_and_announced
 }
 
+/// CR 603.10a + CR 608.2h: every member of a simultaneous departure
+/// sees the combat relations that existed before the first delivery.
+pub(crate) fn capture_batch_departure_combat(
+    state: &GameState,
+    group: &mut crate::types::game_state::LogicalZoneChangeGroup,
+) {
+    group.departure_combat.clear();
+    if state.combat.is_none() || group.prospective_battlefield_members.len() < 2 {
+        return;
+    }
+    group
+        .departure_combat
+        .extend(
+            group
+                .prospective_battlefield_members
+                .iter()
+                .filter_map(|member| {
+                    let object = state.objects.get(&member.identity.object_id)?;
+                    if object.zone != Zone::Battlefield
+                        || ObjectIncarnationRef::from_object(object) != member.identity
+                    {
+                        return None;
+                    }
+                    Some(crate::types::game_state::DepartureCombatSnapshot {
+                        identity: member.identity,
+                        status: capture_combat_status(state, object.id),
+                        block_pairs: super::combat::live_block_pairs_of(state, object.id),
+                    })
+                }),
+        );
+}
+
+pub(crate) fn simultaneous_departure_combat(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<&crate::types::game_state::DepartureCombatSnapshot> {
+    match &state.active_departure_combat {
+        Some(snapshot) => (snapshot.identity == identity).then_some(snapshot),
+        None => state
+            .resolution_stack
+            .paused_owner_group_of(identity.object_id)
+            .and_then(|group| {
+                group
+                    .departure_combat
+                    .iter()
+                    .find(|item| item.identity == identity)
+            }),
+    }
+}
+
+fn capture_zone_change_combat(
+    state: &GameState,
+    object: &GameObject,
+    record: &mut ZoneChangeRecord,
+) -> ZoneChangeCombatStatus {
+    let snapshot = (object.zone == Zone::Battlefield)
+        .then(|| ObjectIncarnationRef::from_object(object))
+        .and_then(|identity| simultaneous_departure_combat(state, identity));
+    if let Some(snapshot) = snapshot {
+        record.block_pairs.clone_from(&snapshot.block_pairs);
+        return snapshot.status;
+    }
+    record.block_pairs = super::combat::live_block_pairs_of(state, object.id);
+    capture_combat_status(state, object.id)
+}
+
 pub(crate) fn capture_combat_status(
     state: &GameState,
     object_id: ObjectId,
@@ -3349,6 +3453,8 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before the departure
     // sever (CR 701.3d) clears it.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
+    zone_change_record.combat_status =
+        capture_zone_change_combat(state, obj, &mut zone_change_record);
     // CR 113.6b + CR 400.7 + CR 611.3a: this path bypasses `move_to_zone`'s
     // dirty-mark block (see `move_to_zone`), so both the moved object's own
     // zone-of-function crossing and the board-wide zone-read scan must run here
@@ -3383,10 +3489,6 @@ pub fn move_to_library_at_index(
     ) {
         crate::game::layers::mark_layers_full(state);
     }
-    zone_change_record.combat_status = capture_combat_status(state, object_id);
-    // CR 509.1g + CR 506.4 + CR 608.2h: as in `move_to_zone_with_entry_flags`,
-    // snapshot the current block pairings before exit cleanup prunes them.
-    zone_change_record.block_pairs = super::combat::live_block_pairs_of(state, object_id);
     // CR 603.10a + CR 607.2a: as in `move_to_zone_with_entry_flags`, snapshot
     // the linked "exiled with" cards before CR 400.7 cleanup prunes them.
     zone_change_record.linked_exile_snapshot =

@@ -390,6 +390,7 @@ pub(crate) fn discard_legs_jointly_payable(
                     .filter(|&id| {
                         id != source
                             && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1340,7 +1341,11 @@ impl AbilityCostPayability for AbilityCost {
                     return p.hand.contains(&source)
                         && p.hand
                             .iter()
-                            .filter(|&&id| id != source && id != pending_spell)
+                            .filter(|&&id| {
+                                id != source
+                                    && id != pending_spell
+                                    && !super::casting::is_held_by_payment_probe(state, id)
+                            })
                             .count()
                             >= reserved_count;
                 }
@@ -1356,6 +1361,7 @@ impl AbilityCostPayability for AbilityCost {
                     .filter(|&&id| {
                         id != source
                             && id != pending_spell
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -1673,6 +1679,7 @@ impl AbilityCostLegPayability for AbilityCost {
                     .filter(|&&id| {
                         id != source
                             && !super::casting::is_spell_being_cast(state, id)
+                            && !super::casting::is_held_by_payment_probe(state, id)
                             && effective_filter
                                 .as_ref()
                                 .is_none_or(|f| matches_target_filter(state, id, f, &ctx))
@@ -2279,9 +2286,10 @@ fn tap_creature_candidates<'a>(
     })
 }
 
-/// CR 118.3 + CR 601.2h: one battlefield-object leg of a spell's cost whose
-/// objects must stay available beside the mana payment: exactly `count` of
-/// `candidates`, held for the leg's `use_`.
+/// CR 118.3 + CR 601.2h: one object leg of a spell's cost whose objects must
+/// stay available beside the mana payment (battlefield objects, or hand and
+/// graveyard cards a mana ability's cost could consume): exactly `count` of
+/// `candidates`, held for the leg's `reserved_use`.
 #[derive(Debug, Clone)]
 pub(super) struct ReservableLeg {
     pub(super) reserved_use: super::casting::ReservedUse,
@@ -2293,8 +2301,9 @@ pub(super) struct ReservableLeg {
 /// battlefield objects beside its mana: a counted `TapCreatures` leg (the
 /// objects must stay untapped, CR 118.3), and each counted sacrifice, exile or
 /// return leg over battlefield objects (CR 601.2g: they may be tapped for mana
-/// first, but must still be there). Hand and graveyard legs can't make mana; a
-/// leg whose count the joint model doesn't represent isn't reserved.
+/// first, but must still be there). Hand and graveyard legs are
+/// [`reservable_card_legs`]'s; a leg whose count the joint model doesn't
+/// represent isn't reserved.
 pub(super) fn reservable_battlefield_legs(
     state: &GameState,
     player: PlayerId,
@@ -2356,6 +2365,78 @@ pub(super) fn reservable_battlefield_legs(
         }
     }
     reservable
+}
+
+/// CR 118.3 + CR 601.2h: the hand and graveyard legs of a spell's cost whose
+/// cards a mana ability's cost could also consume. `fodder` is the set of cards
+/// such abilities can spend ([`super::mana_sources::mana_ability_card_fodder`]);
+/// a counted leg none of whose candidates is in it changes no mana probe and
+/// isn't reserved. The spell itself is never a candidate: it is on the stack
+/// when its costs are paid (CR 601.2a).
+pub(super) fn reservable_card_legs(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    legs: &[AbilityCost],
+    fodder: &std::collections::HashSet<ObjectId>,
+) -> Vec<ReservableLeg> {
+    let mut reservable = Vec::new();
+    for leg in legs {
+        if matches!(leg, AbilityCost::TapCreatures { .. }) {
+            continue;
+        }
+        let mut object_legs = Vec::new();
+        collect_object_cost_legs(
+            state,
+            player,
+            source,
+            None,
+            leg,
+            CostSourceRole::SpellBeingCast,
+            ExileCostPopulation::PayerZones,
+            &mut object_legs,
+        );
+        for object_leg in object_legs {
+            let ObjectLegDemand::Exactly(count) = object_leg.demand else {
+                continue;
+            };
+            let candidates: Vec<ObjectId> = object_leg
+                .candidates
+                .into_iter()
+                .filter(|id| *id != source && !state.battlefield.contains(id))
+                .collect();
+            if candidates.iter().any(|id| fodder.contains(id)) {
+                reservable.push(ReservableLeg {
+                    reserved_use: super::casting::ReservedUse::Present,
+                    count,
+                    candidates,
+                });
+            }
+        }
+    }
+    reservable
+}
+
+/// CR 118.3: every object `cost`, a cost of an ability of `source`, could be
+/// paid with: the candidates of each of its object-using legs.
+pub(super) fn object_cost_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    cost: &AbilityCost,
+) -> Vec<ObjectId> {
+    let mut legs = Vec::new();
+    collect_object_cost_legs(
+        state,
+        player,
+        source,
+        None,
+        cost,
+        CostSourceRole::AbilitySource,
+        ExileCostPopulation::PayerZones,
+        &mut legs,
+    );
+    legs.into_iter().flat_map(|leg| leg.candidates).collect()
 }
 
 /// CR 117.1 + CR 118.3: Infer the source zone for a non-self
@@ -2434,6 +2515,7 @@ pub(super) fn eligible_exile_cost_objects(
     ids.filter(|&id| {
         id != source
             && !super::casting::is_spell_being_cast(state, id)
+            && !super::casting::is_held_by_payment_probe(state, id)
             && filter_ref.is_none_or(|f| matches_target_filter_in_owner_zone(state, id, f, &ctx))
     })
     .collect()
@@ -2472,6 +2554,7 @@ pub(crate) fn eligible_exile_with_aggregate_objects(
             id != source
                 // CR 601.2a: a spell being cast is on the stack, not in `zone`.
                 && !super::casting::is_spell_being_cast(state, id)
+                && !super::casting::is_held_by_payment_probe(state, id)
                 && matches_target_filter_in_owner_zone(state, id, filter, &ctx)
         })
         .collect()

@@ -88,7 +88,6 @@ export function DeckBuilder({
     handleSearchResults,
     handleSearchTrigger,
     handleAddCard,
-    handleAddCardByName,
     handleRemoveCard,
     handleIncrementCard,
     canIncrement,
@@ -104,6 +103,7 @@ export function DeckBuilder({
     resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
+    commanderCandidateNames,
     handleRemoveCommander,
     signatureSpellCandidates,
     companionCandidateNames,
@@ -507,6 +507,7 @@ export function DeckBuilder({
                         onImport={handleImport}
                         onCardHover={onCardHover}
                         format={format}
+                        commanderInferenceFormat={isCommander ? format : undefined}
                         compatibility={compatibility}
                         cardDataCache={cardDataCache}
                         groupMode={groupMode}
@@ -524,7 +525,7 @@ export function DeckBuilder({
                       commanders={commanders}
                       cardDataCache={cardDataCache}
                       groupMode={groupMode}
-                      onAddCard={handleAddCardByName}
+                      onAddCard={(entry) => handleIncrementCard(entry, "main")}
                       canAddCard={canIncrement}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}
@@ -555,7 +556,7 @@ export function DeckBuilder({
                 deckComposition="commanders-outside"
                 cardDataCache={cardDataCache}
                 deckSizeRule={deckSizeRule}
-                isCommanderEligible={isCommanderEligible}
+                commanderCandidates={commanderCandidateNames}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 signatureSpell={deck.signature_spell?.[0]}

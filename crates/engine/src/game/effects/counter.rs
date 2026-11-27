@@ -343,6 +343,11 @@ fn counter_trigger_event<'a>(
         return None;
     };
     let event = state.current_trigger_event.as_ref()?;
+    // CR 608.2k: an ability-triggering observer ("that ability" — Strict
+    // Proctor) counters the observed stack entry by its entry id.
+    if let GameEvent::AbilityTriggered { stack_entry, .. } = event {
+        return stack_entry.as_ref().map(|id| (event, *id));
+    }
     Some((event, targeting::extract_source_from_event(event)?))
 }
 
@@ -353,6 +358,23 @@ pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) ->
     let Effect::Counter { target, .. } = &ability.effect else {
         return ability.targets.clone();
     };
+    // The observed occurrence was removed before placement (CR 603.3d), so
+    // "that ability" names nothing on the stack: counter nothing. Explicit
+    // rather than falling through to the own-source fallback, which would
+    // find no entry either but only by accident. No CR number claimed for
+    // the absence-of-referent plumbing itself.
+    if matches!(
+        target,
+        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+    ) && matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityTriggered {
+            stack_entry: None,
+            ..
+        })
+    ) {
+        return Vec::new();
+    }
     // CR 608.2k: "that spell" / "that ability" is identified through the
     // trigger event.
     if let Some((event, object_id)) = counter_trigger_event(state, ability) {

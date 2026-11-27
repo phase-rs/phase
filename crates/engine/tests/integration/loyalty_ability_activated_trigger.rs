@@ -28,14 +28,16 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, QuantityExpr,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
-use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::counter::{CounterMatch, CounterType};
+use engine::types::events::{ActivatedAbilityKind, GameEvent};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -47,6 +49,10 @@ const KERAL_ORACLE: &str =
 const ELSPETH_TALENT_ORACLE: &str =
     "Whenever you activate a loyalty ability of enchanted planeswalker, creatures you control get +2/+2 and gain vigilance until end of turn.";
 const AJANI_ORACLE: &str = "Whenever you activate a loyalty ability, create a 2/2 colorless Wizard Soldier creature token named Cadet.\n[+1]: Creatures you control get +1/+0 and gain haste until end of turn.\n[−2]: Discard your hand, then draw a card for each creature you control.\n[−3]: Ajani deals 4 damage to each creature except for tokens you control.";
+const WAY_OF_THE_MIND_SCULPTOR_ORACLE: &str = "When Way of the Mind Sculptor enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")\nWhenever you activate a loyalty ability, if you removed two or more loyalty counters to activate it, draw a card.";
+const CHANDRA_AWAKENED_INFERNO_ORACLE: &str = "This spell can't be countered.\n[+2]: Each opponent gets an emblem with \"At the beginning of your upkeep, this emblem deals 1 damage to you.\"\n[−3]: Chandra deals 3 damage to each non-Elemental creature.\n[−X]: Chandra deals X damage to target creature or planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.";
+const STIFLE_ORACLE: &str =
+    "Counter target activated or triggered ability. (Mana abilities can't be targeted.)";
 
 /// A targeted minus-loyalty ability: CR 606.1 loyalty cost (`[−2]`, an
 /// `AbilityCost::Loyalty`) + `Effect::DealDamage 2` to `target creature`. Two
@@ -211,10 +217,717 @@ fn ajani_unqualified_loyalty_trigger_uses_production_activation_scope() {
     );
 }
 
-/// Activate `pw`'s loyalty ability at index 0, announcing the `[−X]` counter
-/// removal (X = 2) and answering the `target creature` slot with `target`,
-/// halting at the post-commit `Priority` window so the caller can inspect the
-/// stack (where any fired trigger now sits).
+#[test]
+fn ajani_unrelenting_minus_three_spares_activators_tokens_after_control_changes() {
+    const P1: PlayerId = PlayerId(1);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ajani = scenario
+        .add_planeswalker_from_oracle(P0, "Ajani Unrelenting", "Ajani", 5, AJANI_ORACLE)
+        .as_legendary()
+        .id();
+    let friendly_nontoken = scenario.add_creature(P0, "Friendly Nontoken", 1, 5).id();
+    let opposing_nontoken = scenario.add_creature(P1, "Opposing Nontoken", 1, 5).id();
+    let friendly_token = scenario
+        .add_creature(P1, "Friendly Token", 1, 5)
+        .controlled_by(P0)
+        .id();
+    let opposing_token = scenario
+        .add_creature(P0, "Opposing Token", 1, 5)
+        .controlled_by(P1)
+        .id();
+    let mut runner = scenario.build();
+    for token in [friendly_token, opposing_token] {
+        runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+    }
+    let battlefield_size = runner.state().battlefield.len();
+
+    let walker = &runner.state().objects[&ajani];
+    assert_eq!(walker.loyalty, Some(5));
+    let ability_index = walker
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -3 })))
+        .expect("Ajani's parsed −3 loyalty ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ajani,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Ajani's −3 activates through the public action");
+
+    // CR 606.4: Pay three loyalty up front. CR 115.10a: No targets are declared.
+    assert_eq!(runner.state().objects[&ajani].loyalty, Some(2));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let stack = &runner.state().stack;
+    // CR 405.2 + CR 603.3: The Cadet trigger goes above the loyalty ability.
+    assert_eq!(stack.len(), 2);
+    let activation = stack.front().unwrap();
+    let trigger = stack.back().unwrap();
+    assert!(matches!(
+        activation.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert!(matches!(
+        trigger.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    for entry in stack {
+        assert_eq!(entry.source_id, ajani);
+        assert_eq!(entry.controller, P0);
+    }
+    let activation_id = activation.id;
+    let trigger_id = trigger.id;
+
+    // CR 113.8: Both stack entries keep P0 when Ajani changes controllers.
+    runner.state_mut().debug_mode = true;
+    runner
+        .act(GameAction::Debug(DebugAction::SetController {
+            object_id: ajani,
+            controller: P1,
+        }))
+        .expect("transfer Ajani while both abilities are on the stack");
+    assert_eq!(runner.state().objects[&ajani].controller, P1);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| (entry.id, entry.controller))
+            .collect::<Vec<_>>(),
+        [(activation_id, P0), (trigger_id, P0)],
+    );
+    assert_eq!(runner.state().battlefield.len(), battlefield_size);
+
+    // CR 117.4 + CR 111.2: Resolve the trigger first and create P0's Cadet.
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack.front().unwrap().id, activation_id);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().battlefield.len(), battlefield_size + 1);
+    let cadet = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| runner.state().objects[id].name == "Cadet")
+        .expect("the trigger created Cadet before the loyalty ability resolved");
+    let cadet_object = &runner.state().objects[&cadet];
+    assert!(cadet_object.is_token);
+    assert_eq!((cadet_object.owner, cadet_object.controller), (P0, P0));
+    assert_eq!(cadet_object.card_types.core_types, [CoreType::Creature]);
+    assert_eq!(cadet_object.card_types.subtypes.len(), 2);
+    for subtype in ["Wizard", "Soldier"] {
+        assert!(cadet_object
+            .card_types
+            .subtypes
+            .iter()
+            .any(|name| name == subtype));
+    }
+    assert_eq!(
+        (cadet_object.power, cadet_object.toughness),
+        (Some(2), Some(2))
+    );
+    assert!(cadet_object.color.is_empty());
+    for creature in [
+        friendly_nontoken,
+        opposing_nontoken,
+        friendly_token,
+        opposing_token,
+        cadet,
+    ] {
+        assert_eq!(runner.state().objects[&creature].damage_marked, 0);
+    }
+    for (token, owner, controller) in [(friendly_token, P1, P0), (opposing_token, P0, P1)] {
+        let object = &runner.state().objects[&token];
+        assert!(object.is_token);
+        assert_eq!((object.owner, object.controller), (owner, controller));
+    }
+
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // CR 109.5 + CR 120.3e: Damage hits both nontokens and the opposing token.
+    for (creature, damage) in [
+        (friendly_nontoken, 4),
+        (opposing_nontoken, 4),
+        (opposing_token, 4),
+        (friendly_token, 0),
+        (cadet, 0),
+    ] {
+        let object = &runner.state().objects[&creature];
+        assert_eq!(object.zone, Zone::Battlefield, "{} survives", object.name);
+        assert_eq!(object.damage_marked, damage, "{} damage", object.name);
+    }
+}
+
+/// CR 603.4 + CR 606.4: drive Way's verbatim Oracle trigger through a public
+/// loyalty activation. The positive [−3] event must bind `Some(3)`, put Way's
+/// draw above Jace's draw, and use that same event snapshot at resolution. The
+/// paired [−1] activation proves a known sub-threshold value reaches the same
+/// matcher without firing Way.
+#[test]
+fn way_of_the_mind_sculptor_uses_actual_loyalty_cost_and_resolves_trigger_first() {
+    let mut positive_scenario = GameScenario::new();
+    positive_scenario.at_phase(Phase::PreCombatMain);
+    positive_scenario.with_library_top(P0, &["Card A", "Card B", "Card C", "Card D"]);
+    positive_scenario.add_basic_land(P0, ManaColor::White);
+    positive_scenario.add_basic_land(P0, ManaColor::White);
+    let disenchant = positive_scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disenchant",
+            true,
+            "Destroy target artifact or enchantment.",
+        )
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"))
+        .id();
+    let way = positive_scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let mut positive = positive_scenario.build();
+    // Cast the exact printed legendary enchantment through the public pipeline. Its real
+    // Empower Jace ETB creates the token whose printed [−3] is activated below.
+    positive.cast(way).resolve();
+    let jace = *positive
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| {
+            let object = &positive.state().objects[id];
+            object.is_token
+                && object.controller == P0
+                && object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Jace")
+        })
+        .expect("Way's Empower Jace ETB creates a controlled Jace token");
+    assert_eq!(positive.state().objects[&jace].loyalty, Some(5));
+    let before = positive.state().players[0].library.len();
+    let activated = positive
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("Jace's [−3] activates through the public action");
+    assert!(
+        activated.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(3),
+                ..
+            } if *source_id == jace
+        )),
+        "activation event must carry its actual three-counter payment"
+    );
+    assert_eq!(
+        positive.state().stack.len(),
+        2,
+        "Way trigger sits above Jace ability"
+    );
+    let way_trigger = positive.state().stack.back().unwrap();
+    assert!(
+        matches!(way_trigger.kind, StackEntryKind::TriggeredAbility { source_id, .. } if source_id == way)
+    );
+    let way_trigger_id = way_trigger.id;
+    let jace_activation_id = positive.state().stack.front().unwrap().id;
+
+    // CR 113.7a: destroy the source while its triggered ability is on the stack.
+    positive.cast(disenchant).target_object(way).commit();
+    assert_eq!(positive.state().stack.back().unwrap().source_id, disenchant);
+    positive.resolve_top();
+    assert_eq!(positive.state().objects[&way].zone, Zone::Graveyard);
+    assert_eq!(positive.state().stack.len(), 2);
+    assert_eq!(positive.state().stack.back().unwrap().id, way_trigger_id);
+    assert_eq!(positive.state().players[0].library.len(), before);
+
+    // CR 603.4: the resolution-time recheck uses the activation event snapshot,
+    // not the planeswalker's changed live loyalty total.
+    positive.state_mut().objects.get_mut(&jace).unwrap().loyalty = Some(0);
+    positive
+        .state_mut()
+        .objects
+        .get_mut(&jace)
+        .unwrap()
+        .counters
+        .insert(CounterType::Loyalty, 0);
+    let hand_before = positive.state().players[0].hand.len();
+    positive.resolve_top();
+    assert_eq!(before - positive.state().players[0].library.len(), 1);
+    assert_eq!(positive.state().players[0].hand.len(), hand_before + 1);
+    assert_eq!(
+        positive.state().stack.len(),
+        1,
+        "Jace ability remains below Way's trigger"
+    );
+    let remaining = positive.state().stack.front().unwrap();
+    assert_eq!(remaining.id, jace_activation_id);
+    assert!(
+        matches!(remaining.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == jace)
+    );
+    positive.resolve_top();
+    assert_eq!(before - positive.state().players[0].library.len(), 2);
+
+    let mut negative_scenario = GameScenario::new();
+    negative_scenario.at_phase(Phase::PreCombatMain);
+    negative_scenario.with_library_top(P0, &["Card A", "Card B"]);
+    let way = negative_scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let mut negative = negative_scenario.build();
+    negative.cast(way).resolve();
+    let jace = *negative
+        .state()
+        .last_created_token_ids
+        .first()
+        .expect("Way's printed Empower Jace ability created its Jace token");
+    assert!(
+        negative.state().objects[&jace].is_token,
+        "reach: use the real Jace token"
+    );
+    let activated = negative
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the Jace token's printed [−1] activates through the public action");
+    assert!(
+        activated.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(1),
+                ..
+            } if *source_id == jace
+        )),
+        "negative reach guard: activation carries known Some(1)"
+    );
+    assert_eq!(
+        negative.state().stack.len(),
+        1,
+        "known Some(1) does not fire Way"
+    );
+    let library_before_surveil = negative.state().players[0].library.len();
+    negative.resolve_top();
+    let kept = match &negative.state().waiting_for {
+        WaitingFor::SurveilChoice { player: P0, cards } if cards.len() == 1 => cards[0],
+        waiting => panic!("expected Jace's Surveil 1 choice, got {waiting:?}"),
+    };
+    negative
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("keep the card seen by the Jace token's printed Surveil 1");
+    assert_eq!(
+        negative.state().players[0].library.len(),
+        library_before_surveil
+    );
+    assert_eq!(negative.state().players[0].library[0], kept);
+    assert_eq!(negative.state().players[0].hand.len(), 0);
+    assert_eq!(negative.state().objects[&jace].loyalty, Some(4));
+    assert!(matches!(
+        negative.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(negative.state().stack.len(), 0);
+
+    // The variable loyalty-cost path uses the generic activation payment
+    // continuation; real Chandra [−X] activations pin both threshold sides.
+    for (x, expected_stack) in [(1, 1), (2, 2)] {
+        let mut x_scenario = GameScenario::new();
+        x_scenario.at_phase(Phase::PreCombatMain);
+        x_scenario.with_library_top(P0, &["Card A", "Card B"]);
+        x_scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Way of the Mind Sculptor",
+                WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+            )
+            .as_legendary();
+        let target = x_scenario.add_creature(P0, "Target", 2, 2).id();
+        let chandra = x_scenario
+            .add_planeswalker_from_oracle(
+                P0,
+                "Chandra, Awakened Inferno",
+                "Chandra",
+                6,
+                CHANDRA_AWAKENED_INFERNO_ORACLE,
+            )
+            .id();
+        let mut x_runner = x_scenario.build();
+        x_runner
+            .act(GameAction::ActivateAbility {
+                source_id: chandra,
+                ability_index: 2,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("Chandra's [−X] announcement opens its X choice");
+        x_runner
+            .act(GameAction::ChooseX { value: x })
+            .expect("announce X value");
+        let x_committed = x_runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .expect("complete Chandra's target choice");
+        assert!(
+            x_committed.events.iter().any(|event| matches!(
+                event,
+                GameEvent::AbilityActivated {
+                    source_id,
+                    loyalty_counters_removed: Some(removed),
+                    ..
+                } if *source_id == chandra && *removed == x
+            )),
+            "generic X payment binds the actual {x}-counter event"
+        );
+        assert_eq!(
+            x_runner.state().stack.len(),
+            expected_stack,
+            "Way's threshold result for X={x}"
+        );
+    }
+
+    // Chandra's printed natural +2 action removes a known zero. It reaches the same
+    // loyalty-event matcher but does not satisfy Way's threshold.
+    let mut plus_scenario = GameScenario::new();
+    plus_scenario.at_phase(Phase::PreCombatMain);
+    plus_scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary();
+    let plus_chandra = plus_scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Chandra, Awakened Inferno",
+            "Chandra",
+            6,
+            CHANDRA_AWAKENED_INFERNO_ORACLE,
+        )
+        .id();
+    let mut plus_runner = plus_scenario.build();
+    let plus_result = plus_runner
+        .act(GameAction::ActivateAbility {
+            source_id: plus_chandra,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("printed natural +2 activation completes through apply");
+    assert!(
+        plus_result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(0),
+                ..
+            } if *source_id == plus_chandra
+        )),
+        "reach guard: natural +2 reports known Some(0)"
+    );
+    assert_eq!(
+        plus_runner.state().stack.len(),
+        1,
+        "known zero does not fire Way"
+    );
+
+    // AtomicCards contains no printed loyalty ability whose activation cost
+    // also removes another counter type. Use the nearest printed loyalty
+    // pattern (Jace [−3]) with a small synthetic composite cost to prove that
+    // only the loyalty leg contributes to Way's threshold.
+    let mut mixed_scenario = GameScenario::new();
+    mixed_scenario.at_phase(Phase::PreCombatMain);
+    let mixed_way = mixed_scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let mut mixed = mixed_scenario.build();
+    mixed.cast(mixed_way).resolve();
+    let mixed_jace = *mixed
+        .state()
+        .last_created_token_ids
+        .first()
+        .expect("Way creates its printed Jace token");
+    let mixed_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Loyalty { amount: -2 },
+            AbilityCost::RemoveCounter {
+                count: 1,
+                counter_type: CounterMatch::OfType(CounterType::Generic("charge".into())),
+                target: None,
+                selection: CounterCostSelection::SingleObject,
+            },
+        ],
+    };
+    let mixed_ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .cost(mixed_cost);
+    {
+        let object = mixed.state_mut().objects.get_mut(&mixed_jace).unwrap();
+        object
+            .counters
+            .insert(CounterType::Generic("charge".into()), 1);
+        object.abilities = std::sync::Arc::new(vec![mixed_ability.clone()]);
+        object.base_abilities = std::sync::Arc::new(vec![mixed_ability]);
+    }
+    let mixed_result = mixed
+        .act(GameAction::ActivateAbility {
+            source_id: mixed_jace,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("mixed loyalty and charge cost activates through apply");
+    assert!(
+        mixed_result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                loyalty_counters_removed: Some(2),
+                ..
+            } if *source_id == mixed_jace
+        )),
+        "only the two loyalty counters satisfy the event receipt"
+    );
+    assert_eq!(
+        mixed.state().objects[&mixed_jace]
+            .counters
+            .get(&CounterType::Generic("charge".into())),
+        None
+    );
+    assert_eq!(
+        mixed.state().stack.len(),
+        2,
+        "two loyalty counters still fire Way"
+    );
+
+    let mut normal_scenario = GameScenario::new();
+    normal_scenario.at_phase(Phase::PreCombatMain);
+    normal_scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary();
+    let pyromancer = normal_scenario
+        .add_creature_from_oracle(
+            P0,
+            "Prodigal Pyromancer",
+            1,
+            1,
+            "{T}: This creature deals 1 damage to any target.",
+        )
+        .id();
+    let mut normal = normal_scenario.build();
+    normal
+        .act(GameAction::ActivateAbility {
+            source_id: pyromancer,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("announce Prodigal Pyromancer's tap ability");
+    let targeted = normal
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(PlayerId(1))),
+        })
+        .expect("target the opponent with the Pyromancer's ability");
+    assert!(targeted.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated { source_id, kind: ActivatedAbilityKind::Normal, .. } if *source_id == pyromancer
+    )));
+    assert_eq!(
+        normal.state().stack.len(),
+        1,
+        "a Normal activation does not fire Way"
+    );
+    assert!(matches!(normal.state().stack.front().unwrap().kind,
+        StackEntryKind::ActivatedAbility { source_id, .. } if source_id == pyromancer
+    ));
+
+    let mut opponent_scenario = GameScenario::new();
+    opponent_scenario.at_phase(Phase::PreCombatMain);
+    opponent_scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary();
+    let source = opponent_scenario
+        .add_planeswalker_from_oracle(
+            PlayerId(1),
+            "Chandra, Awakened Inferno",
+            "Chandra",
+            6,
+            CHANDRA_AWAKENED_INFERNO_ORACLE,
+        )
+        .id();
+    let mut opponent = opponent_scenario.build();
+    opponent.state_mut().active_player = PlayerId(1);
+    opponent.state_mut().priority_player = PlayerId(1);
+    opponent.state_mut().waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let activated = opponent
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("opponent's loyalty ability reaches its normal event path");
+    assert!(
+        activated.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                player_id: PlayerId(1),
+                loyalty_counters_removed: Some(3),
+                ..
+            }
+        )),
+        "reach guard: opponent's event has a known qualifying count"
+    );
+    assert_eq!(
+        opponent.state().stack.len(),
+        1,
+        "opponent's 'you' does not satisfy Way"
+    );
+}
+
+/// CR 602.2 + 603.4: counter the real Jace token's printed `[−3]` ability
+/// after Way's trigger has fired, then verify Way's trigger still resolves.
+#[test]
+fn way_trigger_remains_after_the_activated_loyalty_ability_is_countered() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Card A", "Card B"]);
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Blue,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let way = scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Way of the Mind Sculptor",
+            WAY_OF_THE_MIND_SCULPTOR_ORACLE,
+        )
+        .as_legendary()
+        .id();
+    let stifle = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stifle", true, STIFLE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(way).resolve();
+    let jace = *runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .expect("Way's printed Empower Jace ability created its Jace token");
+    assert!(
+        runner.state().objects[&jace].is_token,
+        "reach: use the real Jace token"
+    );
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the qualifying loyalty activation commits");
+    let loyalty_entry = runner
+        .state()
+        .stack
+        .iter()
+        .find(|entry| entry.source_id == jace)
+        .expect("the activated loyalty ability remains on the stack")
+        .id;
+    assert_eq!(runner.state().stack.len(), 2, "reach: Way's trigger fired");
+    let way_trigger = runner.state().stack.back().unwrap();
+    assert_eq!(way_trigger.source_id, way);
+    assert!(matches!(
+        way_trigger.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    let way_trigger_id = way_trigger.id;
+    runner.cast(stifle).target_object(loyalty_entry).commit();
+    assert_eq!(runner.state().stack.len(), 3);
+    assert_eq!(runner.state().stack.back().unwrap().source_id, stifle);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Stifle removes only Jace's ability"
+    );
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|entry| entry.id != loyalty_entry));
+    assert_eq!(runner.state().stack.back().unwrap().source_id, way);
+    assert_eq!(runner.state().stack.back().unwrap().id, way_trigger_id);
+    assert!(runner.state().players[0].hand.is_empty());
+    runner.resolve_top();
+    assert!(
+        runner.state().stack.is_empty(),
+        "Way's trigger still resolves"
+    );
+    assert!(
+        !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == loyalty_entry),
+        "the activated Jace ability was countered"
+    );
+    let hand_cards = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.owner == P0 && object.zone == Zone::Hand)
+        .count();
+    assert_eq!(
+        hand_cards, 1,
+        "Way's trigger draws after Stifle counters Jace's ability"
+    );
+}
+
 fn activate_and_target(runner: &mut GameRunner, pw: ObjectId, target: ObjectId) {
     runner
         .act(GameAction::ActivateAbility {

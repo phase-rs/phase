@@ -203,6 +203,7 @@ fn type_filter_deps(filter: &TypeFilter) -> RetargetDeps {
         | TypeFilter::Kindred
         | TypeFilter::Permanent
         | TypeFilter::Card
+        | TypeFilter::Scheme
         | TypeFilter::Any
         | TypeFilter::Subtype(_) => RetargetDeps::Independent,
     }
@@ -271,7 +272,7 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
             }
             CombatRelationSubject::Source => RetargetDeps::Independent,
         },
-        FilterProp::Attacking { defender } => defender
+        FilterProp::Attacking { defender, .. } => defender
             .as_ref()
             .map_or(RetargetDeps::Independent, controller_deps),
         FilterProp::CastThisTurn { caster: controller }
@@ -319,6 +320,7 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
         | FilterProp::NotColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
@@ -444,8 +446,16 @@ impl<'s> RetargetSearch<'s> {
         if bindings.is_empty() {
             return None;
         }
-        let slot_pools =
-            crate::game::effects::change_targets::derive_slot_pools(state, entry, pre, &bindings);
+        let trigger_context = Some(crate::game::targeting::StackTriggerContext::for_entry(
+            state, entry,
+        ));
+        let slot_pools = crate::game::effects::change_targets::derive_slot_pools(
+            state,
+            entry,
+            pre,
+            &bindings,
+            trigger_context,
+        );
         let mut legal_new_targets: Vec<TargetRef> = Vec::new();
         for target in slot_pools.iter().flatten() {
             if !legal_new_targets.contains(target) {
@@ -606,6 +616,11 @@ impl<'s> RetargetSearch<'s> {
             self.state,
             &RetargetProposal {
                 stack_entry_index: self.stack_entry_index,
+                stack_entry_id: self
+                    .state
+                    .stack
+                    .get(self.stack_entry_index)
+                    .map(|entry| entry.id),
                 scope: &RetargetScope::All,
                 current_targets: &self.current_targets,
                 slots: &self.slots,

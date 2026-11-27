@@ -166,9 +166,7 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             selection: SpellbookSelection::Draft,
         }
     ));
-    // Deferral pin (F1): the battlefield rider still creates the card directly
-    // on the battlefield; the literal draft-into-hand-then-put reading is not
-    // modeled yet.
+    // An explicit battlefield destination has no intervening hand placement.
     assert!(matches!(
         parse_effect(
             "draft a card from Adaptive Armorer's spellbook and put it onto the battlefield."
@@ -218,6 +216,41 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             exile.effect
         );
     }
+}
+
+#[test]
+fn chosen_battlefield_draft_publishes_one_admitted_card_with_no_origin_zone() {
+    use crate::types::events::GameEvent;
+
+    let mut state = GameState::new_two_player(42);
+    let source = source_with_spellbook(&mut state, &["Forest"]);
+    let mut events = Vec::new();
+    complete_draft(
+        &mut state,
+        PlayerId(0),
+        source,
+        &["Forest".to_owned()],
+        "Forest",
+        Zone::Battlefield,
+        true,
+        &mut events,
+    )
+    .unwrap();
+
+    let [created] = state.last_created_token_ids.as_slice() else {
+        panic!("the chosen card should be the effect's only creation result");
+    };
+    assert!(state.liminal_entries.is_empty());
+    assert!(!state.objects[created].is_token);
+    assert!(state.objects[created].tapped);
+    assert!(matches!(
+        events.as_slice(),
+        [
+            GameEvent::ZoneChanged { object_id: entered, from, to, .. },
+            GameEvent::ObjectConjured { object_id: conjured, .. },
+            GameEvent::EffectResolved { .. }
+        ] if from.is_none() && *to == Zone::Battlefield && entered == created && conjured == created
+    ));
 }
 
 #[test]
@@ -619,4 +652,199 @@ fn kaylas_kindling_parse_oracle_text_shape() {
     let execute = upkeep_execute(&parsed);
     assert_chain_has_no_unimplemented(execute);
     assert_draft_then_exile_then_grant(execute, CardPlayMode::Cast);
+}
+
+/// Verbatim Oracle of Brood Astronomer (MTGJSON AtomicCards).
+const BROOD_ASTRONOMER_ORACLE: &str = "When this creature enters, you may sacrifice a land. If you do, draft a card from the Planets Spellbook and put it onto the battlefield tapped.\n{T}: Add one mana of any color. If you control a Planet with twelve or more charge counters on it, add three mana of any one color instead.";
+
+/// SHAPE: production `parse_oracle_text` of Brood Astronomer lowers the
+/// ETB trigger's execute to Sacrifice -> sub_ability with DraftFromSpellbook
+/// { destination: Zone::Battlefield, tapped: true }. Crucially, the draft
+/// node must NOT have a ChangeZone on ParentTarget as its sub_ability (which
+/// would tap Brood Astronomer and leave the drafted Planet in hand).
+#[test]
+fn brood_astronomer_parse_oracle_text_shape() {
+    let parsed = parse_oracle_text(
+        BROOD_ASTRONOMER_ORACLE,
+        "Brood Astronomer",
+        &[],
+        &["Creature".to_string()],
+        &["Eldrazi".to_string(), "Human".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .expect("must parse an ETB trigger");
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("ETB trigger must have execute");
+    assert_chain_has_no_unimplemented(execute);
+    assert!(
+        matches!(&*execute.effect, Effect::Sacrifice { .. }),
+        "ETB executes sacrifice first: {:?}",
+        execute.effect
+    );
+    let draft = execute
+        .sub_ability
+        .as_deref()
+        .expect("draft must chain after sacrifice");
+    assert!(
+        matches!(
+            &*draft.effect,
+            Effect::DraftFromSpellbook {
+                destination: Zone::Battlefield,
+                tapped: true,
+                selection: SpellbookSelection::Draft,
+            }
+        ),
+        "CR 608.2c: draft creates the chosen Planet on the battlefield tapped: {:?}",
+        draft.effect
+    );
+    assert!(
+        draft.sub_ability.is_none(),
+        "CR 608.2c: draft node must not have a stray sub_ability (issue #10720): {:?}",
+        draft.sub_ability
+    );
+}
+
+/// Runtime test for Brood Astronomer (issue #10720):
+/// Accepting the ETB trigger and sacrificing a land drafts a Planet from its
+/// spellbook and puts it onto the battlefield tapped. Brood Astronomer remains
+/// untapped.
+#[test]
+fn brood_astronomer_etb_drafts_planet_onto_battlefield_tapped_and_remains_untapped() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::mana::ManaColor;
+    use crate::types::phase::Phase;
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let forest = scenario.add_basic_land(p0, ManaColor::Green);
+    let astronomer = scenario
+        .add_creature_to_hand_from_oracle(p0, "Brood Astronomer", 2, 3, BROOD_ASTRONOMER_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+
+    let planets = vec![
+        "Adagia, Windswept Bastion".to_string(),
+        "Evendo, Waking Haven".to_string(),
+        "Kavaron, Memorial World".to_string(),
+        "Susur Secundi, Void Altar".to_string(),
+        "Uthros, Titanic Godcore".to_string(),
+    ];
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&astronomer)
+        .unwrap()
+        .spellbook = planets;
+
+    let outcome = runner
+        .cast(astronomer)
+        .accept_optional()
+        .effect_zone(&[forest])
+        .spellbook_pick("Susur Secundi, Void Altar")
+        .resolve();
+
+    // 1. Brood Astronomer is on the battlefield and UNTAPPED.
+    let astronomer_obj = outcome
+        .state()
+        .objects
+        .get(&astronomer)
+        .expect("astronomer on battlefield");
+    assert_eq!(astronomer_obj.zone, Zone::Battlefield);
+    assert!(
+        !astronomer_obj.tapped,
+        "Brood Astronomer must remain untapped (issue #10720)"
+    );
+
+    // 2. Susur Secundi, Void Altar is on the battlefield and TAPPED.
+    let planet = outcome
+        .state()
+        .objects
+        .values()
+        .find(|o| o.name == "Susur Secundi, Void Altar")
+        .expect("drafted Planet must exist in game state");
+    assert_eq!(
+        planet.zone,
+        Zone::Battlefield,
+        "drafted Planet must be on the battlefield, not in hand (issue #10720)"
+    );
+    assert!(
+        planet.tapped,
+        "drafted Planet must enter tapped per Oracle text"
+    );
+
+    // 3. Forest is in the graveyard (sacrificed).
+    let forest_obj = outcome.state().objects.get(&forest).expect("forest exists");
+    assert_eq!(forest_obj.zone, Zone::Graveyard, "Forest was sacrificed");
+
+    // 4. Stack is empty, Priority returned to P0.
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must complete to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+}
+
+/// Control test for Brood Astronomer: declining the optional land sacrifice
+/// does not trigger the draft, leaves Forest on battlefield, and keeps Brood
+/// Astronomer untapped.
+#[test]
+fn brood_astronomer_etb_decline_sacrifice_does_not_draft() {
+    use crate::game::scenario::GameScenario;
+    use crate::types::mana::ManaColor;
+    use crate::types::phase::Phase;
+
+    let p0 = PlayerId(0);
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let forest = scenario.add_basic_land(p0, ManaColor::Green);
+    let astronomer = scenario
+        .add_creature_to_hand_from_oracle(p0, "Brood Astronomer", 2, 3, BROOD_ASTRONOMER_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&astronomer)
+        .unwrap()
+        .spellbook = vec!["Susur Secundi, Void Altar".to_string()];
+
+    let outcome = runner.cast(astronomer).decline_optional().resolve();
+
+    let astronomer_obj = outcome
+        .state()
+        .objects
+        .get(&astronomer)
+        .expect("astronomer on battlefield");
+    assert_eq!(astronomer_obj.zone, Zone::Battlefield);
+    assert!(!astronomer_obj.tapped);
+
+    // No planet was drafted
+    assert!(
+        !outcome
+            .state()
+            .objects
+            .values()
+            .any(|o| o.name == "Susur Secundi, Void Altar"),
+        "declining sacrifice must not draft a planet"
+    );
+
+    // Forest remains on the battlefield
+    let forest_obj = outcome.state().objects.get(&forest).expect("forest exists");
+    assert_eq!(forest_obj.zone, Zone::Battlefield);
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must complete to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
 }

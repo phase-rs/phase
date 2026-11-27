@@ -20,7 +20,7 @@ use engine::types::counter::CounterType;
 use engine::types::definitions::Definitions;
 use engine::types::events::{BoundActivationCost, GameEvent, PlayerActionKind};
 use engine::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, DepartedStackSpell,
+    AbilityActivationRecord, ActivationTargetFact, AutoPassMode, CyclingRecord, DepartedStackSpell,
     LandPlayRecord, LiminalEntrant, LiminalEntry, LinkedExileLki, LinkedExileSnapshot,
     PendingConniveReentry, PersistedGameState, PriorityPassingMode, SpellCastRecord, StackEntry,
     StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay, StackResolutionBudget,
@@ -119,6 +119,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_drawn_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cycles_completed_this_game_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::spells_cast_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::abilities_activated_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lands_played_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -130,6 +131,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::cards_discarded_this_turn_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::mana_spent_on_spells_this_turn", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::last_effect_counts_by_player", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::scoped_reveal_sets", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_event_batches", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::stack_trigger_firings", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_cache", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -138,6 +140,7 @@ const NUMERIC_MAP_ROUND_TRIP_OWNERS: &[NumericRoundTripOwner] = &[
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::lki_copiable_values_by_incarnation", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_stack_spells", map_key_types: &["ObjectId", "u64"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_activated_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
+    NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::departed_triggered_abilities", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::linked_exile_lki", map_key_types: &["ObjectId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_level", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
     NumericRoundTripOwner { id: "src/types/game_state.rs::GameState::ring_bearer", map_key_types: &["PlayerId"], group: RoundTripGroup::DirectGameState, numeric_deserializer: None },
@@ -278,15 +281,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         game_state,
         "GameState",
         None,
-        "post_replacement_token_choice_applied",
-        "Option<HashSet>",
-        Classification::Canonical(OPTION_HASH_SET),
-    );
-    add_spec(
-        &mut specs,
-        game_state,
-        "GameState",
-        None,
         "creature_types_dealt_combat_damage_this_turn",
         "im::HashSet",
         Classification::Canonical(IM_HASH_SET),
@@ -321,12 +315,14 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "lands_played_this_turn_by_player",
         "attacking_creatures_this_turn",
         "cards_discarded_this_turn_by_player",
         "mana_spent_on_spells_this_turn",
         "last_effect_counts_by_player",
+        "scoped_reveal_sets",
         "stack_trigger_event_batches",
         "stack_trigger_firings",
         "linked_exile_lki",
@@ -420,6 +416,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
+        "departed_triggered_abilities",
     ] {
         add_spec(
             &mut specs,
@@ -989,6 +986,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "MoveCounter",
         "CreateToken",
         "TokenEntry",
+        "OutsideGameCardEntry",
         "Discard",
         "Tap",
         "Untap",
@@ -1012,6 +1010,15 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
             Classification::Canonical(HASH_SET),
         );
     }
+    add_spec(
+        &mut specs,
+        "src/types/proposed_event.rs",
+        "TokenBatch",
+        None,
+        "applied",
+        "HashSet",
+        Classification::Canonical(HASH_SET),
+    );
 
     for owner in NUMERIC_MAP_ROUND_TRIP_OWNERS {
         let spec = specs.get_mut(owner.id).unwrap_or_else(|| {
@@ -1396,7 +1403,7 @@ fn serde_hash_owner_census_is_exhaustive_and_every_canonical_owner_names_its_ada
 
     assert_eq!(
         NUMERIC_MAP_ROUND_TRIP_OWNERS.len(),
-        62,
+        65,
         "the reviewed numeric-map owner matrix must remain exact"
     );
     for group in [
@@ -1828,6 +1835,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(1),
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(first.clone())),
                 name: "First liminal".to_string(),
@@ -1850,6 +1858,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (
             ObjectId(2),
             LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(TokenProjection::materialize(second.clone())),
                 name: "Second liminal".to_string(),
@@ -2028,6 +2037,21 @@ fn build_all_direct_numeric_maps_state() -> GameState {
     state.spells_cast_this_turn_by_player = HashMap::from([
         (PlayerId(0), im::Vector::from(vec![first_spell])),
         (PlayerId(1), im::Vector::from(vec![second_spell])),
+    ]);
+    let first_cycle = CyclingRecord {
+        name: "First cycled card".to_owned(),
+        turn: 1,
+    };
+    let second_cycle = CyclingRecord {
+        name: "Second cycled card".to_owned(),
+        turn: 2,
+    };
+    state.cycles_completed_this_game_by_player = HashMap::from([
+        (PlayerId(0), im::Vector::unit(first_cycle.clone())),
+        (
+            PlayerId(1),
+            im::Vector::from(vec![first_cycle, second_cycle]),
+        ),
     ]);
     state.lands_played_this_turn_by_player = HashMap::from([
         (
@@ -2227,6 +2251,31 @@ fn build_all_direct_numeric_maps_state() -> GameState {
         (ObjectId(1), departed_activation(ObjectId(1), PlayerId(0))),
         (ObjectId(2), departed_activation(ObjectId(2), PlayerId(1))),
     ]);
+    let departed_trigger = |entry_id: ObjectId, controller: PlayerId| StackEntry {
+        id: entry_id,
+        source_id: entry_id,
+        controller,
+        kind: StackEntryKind::TriggeredAbility {
+            source_id: entry_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                entry_id,
+                controller,
+            )),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        },
+    };
+    state.departed_triggered_abilities = im::HashMap::from_iter([
+        (ObjectId(1), departed_trigger(ObjectId(1), PlayerId(0))),
+        (ObjectId(2), departed_trigger(ObjectId(2), PlayerId(1))),
+    ]);
     state.linked_exile_lki = HashMap::from([
         (
             ObjectId(1),
@@ -2330,6 +2379,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "cards_drawn_this_turn",
         "spells_cast_this_game",
         "spells_cast_this_game_by_player",
+        "cycles_completed_this_game_by_player",
         "spells_cast_this_turn_by_player",
         "abilities_activated_this_turn_by_player",
         "lands_played_this_turn_by_player",
@@ -2348,6 +2398,7 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
         "lki_copiable_values_by_incarnation",
         "departed_stack_spells",
         "departed_activated_abilities",
+        "departed_triggered_abilities",
         "linked_exile_lki",
         "ring_level",
         "ring_bearer",
@@ -2356,8 +2407,8 @@ fn every_direct_numeric_key_game_state_map_round_trips_populated() {
     ];
     assert_eq!(
         direct_fields.len(),
-        47,
-        "private stack_trigger_firings is covered by its unit test"
+        49,
+        "private stack_trigger_firings and scoped_reveal_sets have their own unit tests"
     );
     for field in direct_fields {
         let value = &before[field];
@@ -2976,8 +3027,8 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         controller: PlayerId(2),
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(9_004),
-                target_creature_id: ObjectId(9_005),
+                equipment: ObjectIncarnationRef::of(ObjectId(9_004), 0),
+                target_creature: ObjectIncarnationRef::of(ObjectId(9_005), 0),
             },
         },
     };
@@ -2988,7 +3039,7 @@ fn stack_resolution_session_fixture(budget: StackResolutionBudget) -> GameState 
         ],
         cursor: 1,
         representatives: BTreeSet::from([PlayerId(0), PlayerId(2)]),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget,
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {

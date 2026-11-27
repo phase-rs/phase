@@ -7,8 +7,8 @@ use crate::game::layers::{compute_current_copiable_values, remove_core_type, rem
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
 use crate::types::ability::{
-    ChosenAttribute, ContinuousModification, CopiableValues, Effect, EffectError, EffectKind,
-    EntryAttackDestination, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    ChosenAttribute, ContinuousModification, CopiableValues, Duration, Effect, EffectError,
+    EffectKind, EntryAttackDestination, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerCondition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedLoyalty};
@@ -23,7 +23,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedDoubleFaces, CopyTokenSpec, CounterCause, EtbTapState, ProposedEvent,
+    CopiedDoubleFaces, CopyTokenSpec, CounterCause, EtbTapState, ProposedEvent, TokenAttackRequest,
     TokenCharacteristics, TokenSpec,
 };
 use crate::types::resolution::ChildStackDepth;
@@ -34,73 +34,80 @@ use crate::types::zones::Zone;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-/// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
-/// Copies copiable characteristics from the target to a newly created token.
-///
-/// CR 707.2 + CR 614.1a: When `count` resolves to N > 1 (e.g. Rite of
-/// Replication kicked = 5), N independent copy-tokens are created. The
-/// per-source count is additionally routed through the `CreateToken`
-/// replacement pipeline so token-count-doubling replacements (Doubling Season,
-/// Adrix and Nev, Parallel Lives, Anointed Procession, Mondrak) apply uniformly
-/// to copy-token creation, exactly as they do to predefined `Effect::Token`.
-pub fn resolve(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    // Extract fields from effect
-    let (
-        target_filter,
-        owner_filter,
-        source_filter,
-        enters_attacking,
-        attack_destination,
-        tapped,
-        count_expr,
-        extra_keywords,
-        additional_modifications,
-    ) = match &ability.effect {
-        Effect::CopyTokenOf {
-            target,
-            owner,
-            source_filter,
+/// CR 707.2 + CR 614.6: the entry state a `CopyTokenOf` instruction resolves
+/// its copy-token specs with: tapped, attacking, attack request and the
+/// end-of-combat sacrifice rider. Resolved once per instruction by
+/// [`CopyEntryState::resolve`], shared by [`resolve`] and the in-event token
+/// substitutes, so a substitute's copies carry exactly the entry state the
+/// instruction's own copies would.
+pub(crate) struct CopyEntryState {
+    tapped: bool,
+    enters_attacking: bool,
+    attack_request: TokenAttackRequest,
+    sacrifice_at: Option<Duration>,
+}
+
+impl CopyEntryState {
+    /// Resolve the entry state (and the per-source count) of a `CopyTokenOf`
+    /// ability. `None` for any other effect.
+    pub(crate) fn resolve(state: &GameState, ability: &ResolvedAbility) -> Option<(u32, Self)> {
+        let Effect::CopyTokenOf {
             enters_attacking,
             attack_destination,
             tapped,
             count,
-            extra_keywords,
-            additional_modifications,
-        } => (
-            target,
-            owner,
-            source_filter,
+            ..
+        } = &ability.effect
+        else {
+            return None;
+        };
+        let (count, enters_attacking, attack_request) = super::token::resolve_token_batch(
+            state,
+            ability,
+            count,
             *enters_attacking,
             attack_destination,
-            *tapped,
-            count.clone(),
-            extra_keywords.clone(),
-            additional_modifications.clone(),
-        ),
-        _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
-    };
-    let (count, enters_attacking, attack_request) = super::token::resolve_token_batch(
-        state,
-        ability,
-        &count_expr,
-        enters_attacking,
-        attack_destination,
-    );
+        );
+        Some((
+            count,
+            Self {
+                tapped: *tapped,
+                enters_attacking,
+                attack_request,
+                sacrifice_at: ability.duration.clone(),
+            },
+        ))
+    }
+}
 
-    // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
-    // determined by the `owner` filter. Resolved once, before the creation
-    // loops, through the same single-authority helper `Effect::Token` uses so
-    // "target opponent creates a token that's a copy of it" places the copy
-    // under the chosen opponent's control rather than the trigger controller's.
-    let Some(token_owner) =
-        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
-    else {
-        return crate::game::effects::token::no_token(state, ability, events);
-    };
+/// CR 707.2 + CR 614.1a: resolve the copy sources of a `CopyTokenOf` ability
+/// (Step 1 of [`resolve`]) and build one [`CopyTokenSpec`] per source (Step 2),
+/// without creating anything. [`resolve`] drives the specs through the
+/// `CreateToken` replacement pipeline; an in-event token substitute builds its
+/// substitute from the first spec instead. An empty source list resolves to no
+/// specs — each caller owns its own CR 609.3 no-op.
+pub(crate) fn resolve_copy_token_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    entry: CopyEntryState,
+) -> Result<Vec<CopyTokenSpec>, EffectError> {
+    // Extract fields from effect
+    let (target_filter, source_filter, extra_keywords, additional_modifications) =
+        match &ability.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter,
+                extra_keywords,
+                additional_modifications,
+                ..
+            } => (
+                target,
+                source_filter,
+                extra_keywords.clone(),
+                additional_modifications.clone(),
+            ),
+            _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
+        };
 
     // Step 1: Resolve the copy source list.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
@@ -177,6 +184,21 @@ pub fn resolve(
                 .flat_map(|zone| targeting::zone_object_ids(state, zone))
                 .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
                 .collect()
+        } else if matches!(target_filter, TargetFilter::ExiledBySource) {
+            // CR 607.2a + CR 400.7: read the linked exile of the acting
+            // incarnation. A departed trigger source keeps its own pile even
+            // if the permanent returned and exiled a different card.
+            let linked = match ability.trigger_source.as_ref() {
+                Some(source) if !ability.source_is_current(state) => {
+                    crate::game::players::linked_exile_pile(state, source)
+                }
+                _ => crate::game::players::linked_exile_cards_for_source(state, ability.source_id),
+            };
+            linked
+                .into_iter()
+                .filter(|entry| entry.is_still_exiled(state))
+                .map(|entry| entry.exiled_id)
+                .collect()
         } else if matches!(target_filter, TargetFilter::CostPaidObject) {
             // CR 400.7: resolve through the shared live-reference guard — a
             // referent that changed zones is a new object and must not become the
@@ -229,10 +251,12 @@ pub fn resolve(
             // sub-ability cannot inherit the parent's targets via chain
             // propagation in `effects::mod.rs::resolve_ability_chain` (issue
             // #323 class).
-            crate::game::effects::resolved_effect_object_ids(
+            // CR 707.2 + CR 608.2h: the copy reads the referent's copiable values.
+            crate::game::effects::resolved_effect_object_ids_with(
                 state,
                 resolution_ability,
                 target_filter,
+                crate::game::targeting::ReferentRead::Inform,
             )
         };
         copy_source_ids
@@ -245,13 +269,94 @@ pub fn resolve(
     };
 
     // CR 609.3 + CR 101.3: "Do as much as possible" — when the copy source
+    // resolves empty there are no specs to build. Each caller owns its own
+    // no-op: [`resolve`] emits `EffectResolved`, a substitute creates nothing.
+    if copy_sources.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // CR 707.2 + CR 115.1d: Build one spec per copy source. All source values
+    // were read in Step 1, before the first creation, so later SBAs (e.g.,
+    // legendary rule) see identical copies.
+    let mut specs = Vec::with_capacity(copy_sources.len());
+    for source in copy_sources {
+        // CR 707.8a: read before `source.values` moves into the spec.
+        let double_faced = copied_double_faces(state, &source);
+        specs.push(CopyTokenSpec {
+            blocking_attacker: None,
+            values: Box::new(source.values),
+            // Created copy-tokens derive their descriptor from their
+            // own base at injection (copy exceptions included), so the
+            // source's captured body is deliberately not carried here.
+            display: DisplayIdentity {
+                token_art: None,
+                ..source.display
+            },
+            extra_keywords: extra_keywords.clone(),
+            additional_modifications: additional_modifications.clone(),
+            tapped: entry.tapped,
+            enters_attacking: entry.enters_attacking,
+            attack_request: entry.attack_request.clone(),
+            sacrifice_at: entry.sacrifice_at.clone(),
+            source_id: ability.source_id,
+            controller: ability.controller,
+            // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
+            // bound so donor-referential exceptions halve donor values.
+            donor: Some(source.incarnation),
+            double_faced,
+        });
+    }
+    Ok(specs)
+}
+
+/// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
+/// Copies copiable characteristics from the target to a newly created token.
+///
+/// CR 707.2 + CR 614.1a: When `count` resolves to N > 1 (e.g. Rite of
+/// Replication kicked = 5), N independent copy-tokens are created. The
+/// per-source count is additionally routed through the `CreateToken`
+/// replacement pipeline so token-count-doubling replacements (Doubling Season,
+/// Adrix and Nev, Parallel Lives, Anointed Procession, Mondrak) apply uniformly
+/// to copy-token creation, exactly as they do to predefined `Effect::Token`.
+pub fn resolve(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    // Extract the owner filter from the effect; the entry state (and the
+    // per-source count) resolves through the shared `CopyEntryState::resolve`
+    // so an in-event substitute reads the same values.
+    let owner_filter = match &ability.effect {
+        Effect::CopyTokenOf { owner, .. } => owner,
+        _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
+    };
+    let Some((count, entry)) = CopyEntryState::resolve(state, ability) else {
+        return Err(EffectError::MissingParam("CopyTokenOf".to_string()));
+    };
+
+    // CR 109.4 + CR 111.2: The token's creator (and therefore controller) is
+    // determined by the `owner` filter. Resolved once, before the creation
+    // loops, through the same single-authority helper `Effect::Token` uses so
+    // "target opponent creates a token that's a copy of it" places the copy
+    // under the chosen opponent's control rather than the trigger controller's.
+    let Some(token_owner) =
+        crate::game::effects::token::resolve_token_owner(state, ability, owner_filter)
+    else {
+        return crate::game::effects::token::no_token(state, ability, events);
+    };
+
+    // Steps 1–2 (copy-source resolution + spec build) are the shared
+    // `resolve_copy_token_specs`, also read by the in-event token substitutes.
+    let specs = resolve_copy_token_specs(state, ability, entry)?;
+
+    // CR 609.3 + CR 101.3: "Do as much as possible" — when the copy source
     // resolves empty, `CopyTokenOf` is a clean zero-token no-op rather than an
     // error. This is required for an unattached Springheart Nantuko: its
     // `target: AttachedTo` host resolves empty when the card is not bestowed
     // onto a creature, so the copy makes nothing and the chained
     // `Not(IfYouDo)` Insect-token fallback can still fire. `EffectResolved` is
     // still emitted so the chain treats the effect as resolved.
-    if copy_sources.is_empty() {
+    if specs.is_empty() {
         // No tokens created — clear the per-resolution token-id ledger so a
         // downstream "the token created this way" anaphor does not pick up a
         // stale id from an earlier resolution. Engine bookkeeping, not a
@@ -270,35 +375,12 @@ pub fn resolve(
     // so later SBAs (e.g., legendary rule) see identical copies. The drain can
     // pause and resume when the `CreateToken` replacement pipeline requires a
     // CR 616.1 choice.
-    let mut remaining = VecDeque::with_capacity(copy_sources.len());
-    for source in copy_sources {
-        // CR 707.8a: read before `source.values` moves into the spec.
-        let double_faced = copied_double_faces(state, &source);
+    let mut remaining = VecDeque::with_capacity(specs.len());
+    for spec in specs {
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
             count,
-            copy: Box::new(CopyTokenSpec {
-                values: Box::new(source.values),
-                // Created copy-tokens derive their descriptor from their
-                // own base at injection (copy exceptions included), so the
-                // source's captured body is deliberately not carried here.
-                display: DisplayIdentity {
-                    token_art: None,
-                    ..source.display
-                },
-                extra_keywords: extra_keywords.clone(),
-                additional_modifications: additional_modifications.clone(),
-                tapped,
-                enters_attacking,
-                attack_request: attack_request.clone(),
-                sacrifice_at: ability.duration.clone(),
-                source_id: ability.source_id,
-                controller: ability.controller,
-                // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
-                // bound so donor-referential exceptions halve donor values.
-                donor: Some(source.incarnation),
-                double_faced,
-            }),
+            copy: Box::new(spec),
         });
     }
 
@@ -632,7 +714,9 @@ pub(crate) fn drain_pending_copy_token_resolution(
             .liminal_entries
             .get(source_id)
             .map(|entry| entry.source_id),
-        Some(PendingLiminalEntryResume::Meld { .. }) | None => None,
+        Some(PendingLiminalEntryResume::Meld { .. })
+        | Some(PendingLiminalEntryResume::OutsideGameCard { .. })
+        | None => None,
     };
     if state
         .active_copy_token()
@@ -720,6 +804,7 @@ fn drain_copy_token_resolution_on_board(
         let mut spec = copy_entry_probe_spec(&batch.copy, &state.all_creature_types);
         spec.tapped = batch.copy.tapped;
         spec.enters_attacking = batch.copy.enters_attacking;
+        spec.set_blocking_attacker_ref(batch.copy.blocking_attacker);
         let enter_tapped = EtbTapState::from_seeded_tapped(batch.copy.tapped);
         let proposed = ProposedEvent::CreateToken {
             redirected_to: None,
@@ -728,18 +813,12 @@ fn drain_copy_token_resolution_on_board(
             copy: Some(batch.copy),
             enter_tapped,
             count: batch.count,
-            // CR 614.6 + CR 616.1: a copy-token-substitution continuation
-            // (Moonlit Meditation) inherits the originating event's applied set
-            // so the substitution replacement cannot re-prompt on its own copy
-            // tokens. `None` for normal copy effects (Springheart, Twinflame,
-            // populate) → empty set → byte-identical to the prior
-            // `HashSet::new()`. A *different* source's replacement (Doubling
-            // Season's rid) is absent from the seed and still applies (#1511).
+            // CR 614.6 + CR 616.1: a copy-token batch proposes with an empty
+            // applied set. A token substitute's copies (Moonlit Meditation,
+            // Esix) are rewritten into the event they modify, so they never
+            // re-enter their own replacement here.
             appended: Vec::new(),
-            applied: state
-                .post_replacement_token_choice_applied
-                .clone()
-                .unwrap_or_default(),
+            applied: HashSet::new(),
         };
 
         // CR 614.6 + CR 608.2c: this offered batch owns only its creation's
@@ -1282,6 +1361,7 @@ fn apply_copy_token_batch_on_board(
         tapped,
         enters_attacking,
         attack_request,
+        blocking_attacker,
         sacrifice_at,
         source_id,
         controller,
@@ -1382,7 +1462,8 @@ fn apply_copy_token_batch_on_board(
         entry_events_start = events.len();
         // CR 508.4: this token's own destination, selected by its creation
         // ordinal within the batch.
-        let attack_destination = attack_request.for_entrant(created_ids.len() - prefix_len);
+        let creation_ordinal = created_ids.len() - prefix_len;
+        let attack_destination = attack_request.for_entrant(creation_ordinal);
         if liminal_immediate {
             let (token_id, mut token) =
                 super::token::reserve_liminal_token_object(state, token_owner, name.clone());
@@ -1396,6 +1477,7 @@ fn apply_copy_token_batch_on_board(
                 tapped,
                 enters_attacking,
                 attack_request: attack_request.clone(),
+                blocking_attacker,
                 sacrifice_at: sacrifice_at.clone(),
                 source_id,
                 controller,
@@ -1436,6 +1518,7 @@ fn apply_copy_token_batch_on_board(
                     controller,
                     enters_attacking,
                     attack_destination: attack_destination.clone(),
+                    blocking_attacker,
                     attach_to: None,
                     sacrifice_at: sacrifice_at.clone(),
                     remaining_count: final_count.saturating_sub(index + 1),
@@ -1529,6 +1612,7 @@ fn apply_copy_token_batch_on_board(
             tapped,
             enters_attacking,
             attack_request: attack_request.clone(),
+            blocking_attacker,
             sacrifice_at: sacrifice_at.clone(),
             source_id,
             controller,
@@ -1696,8 +1780,7 @@ fn apply_copy_token_batch_on_board(
         // tokens from zero, so its request starts past the tokens created so
         // far, this one included.
         let mut resume_copy = copy_spec.clone();
-        resume_copy.attack_request =
-            attack_request.after_entrants(created_ids.len() - prefix_len + 1);
+        resume_copy.attack_request = attack_request.after_entrants(creation_ordinal + 1);
         let tail = CopyTokenEntryTail {
             owner: token_owner,
             copy: resume_copy,
@@ -1943,6 +2026,7 @@ struct CopyTokenFinalization {
     name: String,
     enters_attacking: bool,
     attack_destination: EntryAttackDestination,
+    blocking_attacker: Option<ObjectIncarnationRef>,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     /// CR 608.2h + CR 707.9b: donor incarnation donor-referential exceptions
@@ -2020,6 +2104,7 @@ fn finish_non_liminal_copy_token_entry(
         name: name.clone(),
         enters_attacking,
         attack_destination: attack_destination.clone(),
+        blocking_attacker: tail.copy.blocking_attacker,
         source_id,
         controller,
         donor: copy_spec.donor,
@@ -2094,6 +2179,7 @@ fn finish_non_liminal_copy_token_entry(
                             name: name.clone(),
                             enters_attacking,
                             attack_destination: attack_destination.clone(),
+                            blocking_attacker: finalization.blocking_attacker,
                             source_id,
                             controller,
                         },
@@ -2144,6 +2230,7 @@ fn finish_non_liminal_copy_token_entry(
     // CR 608.2i battlefield-entry bookkeeping itself, so the co-located
     // `record_battlefield_entry` call is deleted — keeping it would double-count
     // `battlefield_entries_this_turn`.
+    super::token::place_token_blocking(state, token_id, finalization.blocking_attacker, events);
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events)
         .expect("token just created");
     sink.publish(state, token_id);
@@ -2430,6 +2517,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     name: String,
     enters_attacking: bool,
     attack_destination: EntryAttackDestination,
+    blocking_attacker: Option<ObjectIncarnationRef>,
     source_id: ObjectId,
     controller: crate::types::player::PlayerId,
     remaining_modifications: Vec<ContinuousModification>,
@@ -2440,6 +2528,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         name: name.clone(),
         enters_attacking,
         attack_destination,
+        blocking_attacker,
         source_id,
         controller,
         donor,
@@ -2485,6 +2574,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     // and this batch's `created_ids`, which `drain_pending_copy_token_resolution` assigns wholesale
     // back onto ledger 3 — because a separate buffer push republished the withheld id and clobbered
     // the guarded list on top of it.
+    super::token::place_token_blocking(state, token_id, blocking_attacker, events);
     super::token::push_committed_token_entry_events(state, token_id, name, source_id, events);
     super::token::record_last_created_copy_batch_token(state, token_id);
     true
@@ -2625,6 +2715,7 @@ fn apply_token_modifications(
                                 name: finalization.name.clone(),
                                 enters_attacking: finalization.enters_attacking,
                                 attack_destination: finalization.attack_destination.clone(),
+                                blocking_attacker: finalization.blocking_attacker,
                                 source_id: finalization.source_id,
                                 controller: finalization.controller,
                                 remaining_modifications: modifications[index + 1..].to_vec(),
@@ -3192,6 +3283,7 @@ mod tests {
         let values =
             crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&source_id]);
         let copy = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Token,
@@ -3307,6 +3399,7 @@ mod tests {
         use crate::types::proposed_event::TokenAttackRequest;
 
         CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&source_id],
             )),
@@ -4721,6 +4814,7 @@ mod tests {
         );
         let create_food = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Food".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -5135,20 +5229,7 @@ mod tests {
         // Set up combat
         state.combat = Some(crate::game::combat::CombatState::default());
 
-        let source_id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Attacker".to_string(),
-            Zone::Battlefield,
-        );
-        {
-            let source = state.objects.get_mut(&source_id).unwrap();
-            source.base_power = Some(2);
-            source.base_toughness = Some(2);
-            source.power = Some(2);
-            source.toughness = Some(2);
-        }
+        let source_id = add_copy_source(&mut state, "Grizzly Bears");
 
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
@@ -7830,6 +7911,7 @@ mod tests {
             offered_batch: OfferedBatchCustody::Settled,
         });
         let copy = CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&source_id],
             )),
@@ -8284,6 +8366,7 @@ mod tests {
             Zone::Battlefield,
         );
         crate::types::game_state::LiminalEntry {
+            blocking_attacker: None,
             copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(object),

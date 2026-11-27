@@ -5,7 +5,7 @@ import { EMPTY_DRAFT_POOL_GROUPS } from "../draft-adapter";
 import { ServerDraftAdapter, type ServerDraftAdapterEvent } from "../server-draft-adapter";
 import { PROTOCOL_VERSION } from "../ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../types";
-import type { DraftPlayerView } from "../draft-adapter";
+import type { DraftPlayerView, DraftPlayerViewFields } from "../draft-adapter";
 import type { GameAction, GameLogEntry, GameState, LegalActionsResult, ObjectAction, SubmitResult } from "../types";
 import { STATE_CODEC_DECODE_TIMEOUT_MS, StateCodecRuntime, type StateCodecSession } from "../state-codec-runtime";
 import { STATE_CODEC_SOCKET_TIMEOUT_MS } from "../../services/stateCodecSocket";
@@ -217,7 +217,7 @@ async function receiveDraftView(
   expect(committed).toEqual(view);
 }
 
-function createMockDraftView(overrides: Partial<DraftPlayerView> = {}): DraftPlayerView {
+function createMockDraftView(overrides: Partial<DraftPlayerViewFields> = {}): DraftPlayerView {
   return {
     status: "Drafting",
     kind: "Premier",

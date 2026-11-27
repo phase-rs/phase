@@ -8,10 +8,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::card::PrintedCardRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::{CastOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext};
+use super::events::ManaTapState;
+use super::game_state::{
+    CastOccurrence, CyclingOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext,
+};
 use super::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use super::identifiers::{
-    CardId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
+    CardId, DamageDeliveryOwnerId, EpicEffectId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION,
 };
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -873,6 +876,9 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // CR 701.33b: abandoning moves command-zone→scheme-deck, never a
         // battlefield departure.
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities moves nothing off
+        // the battlefield.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::ReverseTurnOrder
         | Effect::RedistributeLifeTotals
@@ -1956,10 +1962,87 @@ pub struct SplitDamagePortion {
     pub applied: Vec<AppliedReplacementKey>,
 }
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
+/// CR 608.2c: Whether a paused damage instruction has dealt damage to zero,
+/// one, or multiple distinct objects so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AwaitedDamageRecipient {
+    /// No object has been dealt damage by this instruction so far.
+    #[default]
+    None,
+    /// Exactly one object incarnation has been dealt damage so far.
+    Single { recipient: ObjectIncarnationRef },
+    /// Two or more distinct objects have been dealt damage, so there is no
+    /// single damaged object referent.
+    Multiple,
+}
+
+impl AwaitedDamageRecipient {
+    /// Record one object incarnation dealt damage by this instruction.
+    pub fn record_object(&mut self, pin: ObjectIncarnationRef) {
+        match *self {
+            Self::None => *self = Self::Single { recipient: pin },
+            Self::Single { recipient } if recipient == pin => {}
+            Self::Single { .. } | Self::Multiple => *self = Self::Multiple,
+        }
+    }
+
+    /// The unique damaged object incarnation, if exactly one was damaged.
+    pub fn single(self) -> Option<ObjectIncarnationRef> {
+        match self {
+            Self::Single { recipient } => Some(recipient),
+            Self::None | Self::Multiple => None,
+        }
+    }
+}
+
+/// CR 608.2c + CR 614.9: what a damage instruction did, as its direct child
+/// reads it (`SpellContext::direct_damage_result`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum DamageInstructionResult {
+    /// The instruction has dealt its damage. `recipient` is the single object
+    /// it was actually dealt to, after any redirection; `None` when it reached
+    /// only players, was fully prevented, or reached several objects.
+    Dealt {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient: Option<ObjectIncarnationRef>,
+    },
+    /// CR 616.1 + CR 608.2c: The instruction paused before all of its damage
+    /// settled, and this child awaits completion. Accumulates the instruction's
+    /// dealt damage across pauses until this child begins to resolve.
+    AwaitingDelivery {
+        #[serde(default, skip_serializing_if = "is_zero_i32")]
+        amount: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        excess: Option<i32>,
+        #[serde(default)]
+        recipient: AwaitedDamageRecipient,
+        /// CR 701.14a + CR 120.10: When the awaiting parent was `Effect::Fight`,
+        /// its scalar/excess channel tracks only excess dealt to this fought
+        /// creature (`FightExcessOnFoughtCreature`), never the fighting subject.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fight_fought_creature: Option<ObjectId>,
+    },
+    /// Marker on a remaining-recipient continuation node (`build_remaining_damage_node`)
+    /// so `resolve_chain_body` folds its dealt damage into the awaiting rider
+    /// rather than treating it as an independent damage instruction.
+    ContinuationPortion,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 400.7 + CR 603.7c: The announced occurrence a death watcher names.
+    /// The queued firing retains it to follow the recorded departure's split
+    /// components. The move's target pin still names the graveyard arrival.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_watch_incarnation: Option<ObjectIncarnationRef>,
     /// CR 608.2f + CR 700.1: guards read for the simultaneous damage batch this node is a
     /// remaining portion of. Node-local: a later instruction reads live (CR 700.1). Lazily
     /// boxed, like `parked_damage_batch`, so the common empty case keeps every
@@ -2083,6 +2166,25 @@ pub struct SpellContext {
     /// the copy uses that same information").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_removed_counter_amount: Option<u32>,
+    /// CR 606.4 + CR 602.2b: loyalty counters actually removed for this
+    /// activation's cost, separate from the all-counter result above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loyalty_counters_removed: Option<u32>,
+    /// CR 106.12 + CR 106.12b: the tap state of the activated mana ability whose
+    /// inline sub-chain this chain is. A "tapped for mana" replacement modifies a
+    /// production made "while such an ability is resolving and producing mana", so
+    /// the productions of the sub-chain's links deposit as tapped for mana (Urza's
+    /// Mine's "add {C}{C} instead"). Written only by
+    /// `mana_abilities::resolve_mana_ability_sub_chain` on the sub-chain root;
+    /// every link inherits it through the chain hand-off
+    /// (`effects::apply_parent_chain_context`). An inline carrier that starts its
+    /// branch from a fresh context (a die roll's result row, a coin flip's
+    /// outcome) does not carry it. Cleared by
+    /// `effects::build_reflexive_pending_trigger`, which builds every "when you
+    /// do" reflexive triggered ability, because such an ability is a separate
+    /// ability (CR 603.12). `NotFromTap` everywhere else.
+    #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
+    pub mana_tap_state: ManaTapState,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
@@ -2091,6 +2193,17 @@ pub struct SpellContext {
     /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_discard_result: Option<Box<DiscardedCardResult>>,
+    /// CR 608.2c + CR 614.9: The result of the immediately preceding damage
+    /// instruction — what a slotless "if a [type] is dealt damage this way"
+    /// rider reads. Stamped only by a damage instruction;
+    /// `apply_parent_chain_context` copies it only to that instruction's direct
+    /// child and clears it on every other hand-off, so an earlier instruction's
+    /// incidental object (a land tapped for a mana payment) never reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_damage_result: Option<DamageInstructionResult>,
+    /// The damage instruction that owns this suspended result or delivery node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damage_delivery_owner: Option<DamageDeliveryOwnerId>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -2142,6 +2255,8 @@ pub struct SpellContext {
     /// leaves or loses the ability during casting. `None` for every other cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graveyard_permission_latch: Option<crate::types::game_state::GraveyardPermissionLatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_of_library_cast_latch: Option<Box<crate::types::game_state::TopOfLibraryCastLatch>>,
     /// CR 601.2b/f/h: Number of non-kicker additional-cost payments declared
     /// while casting this spell. Used by keyword abilities such as Squad
     /// (CR 702.157a), whose repeatable payment count is not a kicker count.
@@ -2307,14 +2422,20 @@ pub struct SpellContext {
     /// `ResolvedAbility::record_prior_player_choice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_choice_member: Option<ObjectId>,
-    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
-    /// ("that player" anaphors to the player whose phase it is). Stamped only by
-    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// CR 603.2b + CR 102.1 / CR 506.2: the player a trigger itself bound its chain's
+    /// `scoped_player` to: the turn player for a phase trigger ("that player" anaphors to the
+    /// player whose phase it is), the attacking player for an attack trigger. Stamped only by
+    /// `ResolvedAbility::set_trigger_bound_player_recursive`; cleared by every other binding
     /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
-    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// `scoped_player` equals this is bound by its trigger, not by an unfinished simultaneous
     /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase_turn_player: Option<crate::types::player::PlayerId>,
+    /// Serialized as `phase_turn_player`, the key saved states already carry.
+    #[serde(
+        default,
+        rename = "phase_turn_player",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub trigger_bound_player: Option<crate::types::player::PlayerId>,
     /// CR 608.2c + CR 701.23a: the player actions an instruction of this chain performed, carried on the
     /// ability so a later "if you … this way" gate reads THIS chain's earlier instruction.
     /// The per-resolution `GameState::player_actions_this_way` ledger is cleared by every
@@ -2646,8 +2767,19 @@ pub enum CopyTargetPurpose {
 pub enum KeywordAction {
     /// CR 702.6a: attach source equipment to target creature.
     Equip {
-        equipment_id: ObjectId,
-        target_creature_id: ObjectId,
+        /// CR 400.7: the permanent whose ability was activated. Legacy bare ids
+        /// cannot identify a permanent to move.
+        #[serde(alias = "equipment_id", serialize_with = "serialize_equip_pin")]
+        equipment: ObjectIncarnationRef,
+        /// CR 702.6a + CR 601.2c + CR 400.7: the creature chosen as the target,
+        /// pinned to the incarnation it had when it was chosen. A creature that
+        /// leaves the battlefield, even one that returns, is a new object, so
+        /// the pin no longer names it (CR 115.9b, CR 608.2b). A legacy bare id
+        /// decodes to `LEGACY_INCARNATION` in either field. Checked restore
+        /// refuses a pending Equip with either incarnation unknown. Completed
+        /// actions may retain these ids in the rules journal.
+        #[serde(alias = "target_creature_id", serialize_with = "serialize_equip_pin")]
+        target_creature: ObjectIncarnationRef,
     },
     /// CR 702.122a: the Vehicle becomes an artifact creature until end of turn.
     /// Paid-creature ids are captured for logging and trigger context only.
@@ -2672,16 +2804,60 @@ pub enum KeywordAction {
     },
 }
 
+// Keep historical Equip ids bare when re-exporting a checkpoint. JavaScript
+// would round the u64::MAX sentinel past the u64 range.
+fn serialize_equip_pin<S: Serializer>(
+    pin: &ObjectIncarnationRef,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    if pin.incarnation == LEGACY_INCARNATION {
+        pin.object_id.serialize(serializer)
+    } else {
+        pin.serialize(serializer)
+    }
+}
+
 impl KeywordAction {
+    /// CR 702.6a + CR 601.2c: pin the Equipment and its chosen creature at activation.
+    pub fn equip(
+        equipment: &crate::game::game_object::GameObject,
+        target: &crate::game::game_object::GameObject,
+    ) -> Self {
+        KeywordAction::Equip {
+            equipment: ObjectIncarnationRef::from_object(equipment),
+            target_creature: ObjectIncarnationRef::from_object(target),
+        }
+    }
+
+    /// CR 115.1e + CR 601.2c + CR 400.7: the targets this keyword action
+    /// declared, each with the incarnation pinned when it was chosen. The
+    /// payload is the entry's only record of them: a keyword action carries
+    /// no `ResolvedAbility`.
+    pub(crate) fn declared_target_entries(
+        &self,
+    ) -> Vec<crate::game::ability_utils::DeclaredTargetEntry> {
+        match self {
+            Self::Equip {
+                target_creature, ..
+            } => {
+                vec![crate::game::ability_utils::DeclaredTargetEntry {
+                    target: TargetRef::Object(target_creature.object_id),
+                    pin: Some(*target_creature),
+                }]
+            }
+            // CR 702.122a / CR 702.171a / CR 702.184a: crew, saddle and
+            // station tap creatures as a cost and name no target.
+            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
+        }
+    }
+
     /// CR 115.1e + CR 702.6a: the targets chosen for this keyword action; only
     /// equip targets (crew, saddle and station target nothing).
     pub fn targets(&self) -> Vec<TargetRef> {
-        match self {
-            Self::Equip {
-                target_creature_id, ..
-            } => vec![TargetRef::Object(*target_creature_id)],
-            Self::Crew { .. } | Self::Saddle { .. } | Self::Station { .. } => Vec::new(),
-        }
+        self.declared_target_entries()
+            .into_iter()
+            .map(|entry| entry.target)
+            .collect()
     }
 }
 
@@ -3423,6 +3599,9 @@ pub struct ResolvedAbility {
     /// resolving spell ability. Spell copies that were not cast carry `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_occurrence: Option<CastOccurrence>,
+    /// Coordinate of the completed cycling activation represented by this graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycling_occurrence: Option<CyclingOccurrence>,
     /// CR 400.7: Exact source incarnation captured for self-transform guards.
     /// The full `trigger_source` context remains the authority for all triggered
     /// source facts; this field preserves the source epoch for activated and
@@ -3463,19 +3642,25 @@ pub struct ResolvedAbility {
     /// deliberately separate from the parsed grammatical selector on `Effect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_block_attacker: Option<ObjectIncarnationRef>,
-    /// CR 400.7 + CR 603.7c: Incarnation pins for the object referents in
-    /// `targets`, captured when a delayed triggered ability snapshotted its
-    /// `ParentTarget` referent at creation. A delayed ability that refers to a
-    /// particular object must not affect a later object that merely reuses the
-    /// same storage `ObjectId` — CR 603.7c: "if that object left that zone and
-    /// then returned, it's a new object and thus won't be affected."
+    /// CR 400.7 + CR 603.7c: keyed incarnation pins for an ability's object
+    /// referents. Two producers write them:
+    /// - a delayed triggered ability snapshots its `ParentTarget` referent at
+    ///   creation, so it doesn't affect a later object that merely reuses the
+    ///   same storage `ObjectId` (CR 603.7c: "if that object left that zone and
+    ///   then returned, it's a new object and thus won't be affected");
+    /// - a triggered ability's event-context referents (`TriggeringSource`,
+    ///   `EventTarget`, and the perpetual / attach `ParentTarget` roles) are
+    ///   pinned to the incarnation the trigger event recorded, at collection,
+    ///   push and assignment (`triggers::seed_event_referent_pins`), and judged
+    ///   by `targeting::event_referent_is_findable`. A damage recipient's pin is
+    ///   occurrence-exact. The resolution's own zone move re-pins its arrival
+    ///   onto later chain nodes (CR 400.7j).
     ///
-    /// Empty for every ability that is not a pinned `ParentTarget` delayed
-    /// trigger — including delayed triggers whose own condition names a ZONE
-    /// CHANGE OF THE REFERENT, in either direction (CR 400.7e; see
-    /// `condition_names_referent_zone_change`), where the referent is EXPECTED
-    /// to have moved and must still be affected. An id with no pin here
-    /// resolves unchanged, so the guard is inert outside the pinned path.
+    /// A delayed trigger whose own condition names a ZONE CHANGE OF THE
+    /// REFERENT, in either direction (CR 400.7e; see
+    /// `condition_names_referent_zone_change`), takes no pin: the referent is
+    /// EXPECTED to have moved and must still be affected. An id with no pin
+    /// here resolves unchanged; `LEGACY_INCARNATION` pins are ignored.
     ///
     /// Element-level pins are deliberately non-`Option` so an individual
     /// referent can never degrade to "always matches" (contrast
@@ -3485,8 +3670,8 @@ pub struct ResolvedAbility {
     /// CR 400.7 + CR 601.2c: the incarnation announced for each target
     /// OCCURRENCE, aligned position-for-position with `targets` (`None` for a
     /// player, or an occurrence nothing pinned). Empty means every occurrence
-    /// is unpinned. Separate from `target_incarnations`, whose keyed pins are
-    /// reserved for delayed-trigger referents. Written only through the
+    /// is unpinned. Separate from `target_incarnations`, whose keyed pins hold
+    /// delayed-trigger and event-context referents. Written only through the
     /// occurrence authority (`game::target_occurrences`), which moves targets
     /// and pins together.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4015,6 +4200,7 @@ impl PartialEq for ResolvedAbility {
             reads_return_result: a_reads_return_result,
             source_id: a_source_id,
             cast_occurrence: a_cast_occurrence,
+            cycling_occurrence: a_cycling_occurrence,
             source_incarnation: a_source_incarnation,
             announced_source_incarnation: a_announced_source_incarnation,
             trigger_source: a_trigger_source,
@@ -4100,6 +4286,7 @@ impl PartialEq for ResolvedAbility {
             reads_return_result: b_reads_return_result,
             source_id: b_source_id,
             cast_occurrence: b_cast_occurrence,
+            cycling_occurrence: b_cycling_occurrence,
             source_incarnation: b_source_incarnation,
             announced_source_incarnation: b_announced_source_incarnation,
             trigger_source: b_trigger_source,
@@ -4184,6 +4371,7 @@ impl PartialEq for ResolvedAbility {
             && a_reads_return_result == b_reads_return_result
             && a_source_id == b_source_id
             && a_cast_occurrence == b_cast_occurrence
+            && a_cycling_occurrence == b_cycling_occurrence
             && a_source_incarnation == b_source_incarnation
             && a_announced_source_incarnation == b_announced_source_incarnation
             && a_trigger_source == b_trigger_source
@@ -4624,6 +4812,7 @@ impl ResolvedAbility {
             | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::AbandonScheme
+            | Effect::SetSchemeInMotion { .. }
             | Effect::ChaosEnsues
             | Effect::ReverseTurnOrder
             | Effect::RedistributeLifeTotals
@@ -4776,6 +4965,7 @@ impl ResolvedAbility {
             reads_return_result: None,
             source_id,
             cast_occurrence: None,
+            cycling_occurrence: None,
             controller,
             original_controller: None,
             scoped_player: None,
@@ -4945,7 +5135,25 @@ impl ResolvedAbility {
         }
     }
 
+    pub(crate) fn set_cycling_occurrence_recursive(&mut self, occurrence: CyclingOccurrence) {
+        self.cycling_occurrence = Some(occurrence);
+        for (_, child) in self.child_links_mut() {
+            child.set_cycling_occurrence_recursive(occurrence);
+        }
+    }
+
+    pub(crate) fn cycling_occurrence_matches_recursive(
+        &self,
+        occurrence: CyclingOccurrence,
+    ) -> bool {
+        self.cycling_occurrence == Some(occurrence)
+            && self
+                .child_links()
+                .all(|(_, child)| child.cycling_occurrence_matches_recursive(occurrence))
+    }
+
     pub(crate) fn normalize_cast_occurrence_for_loop_recursive(&mut self) {
+        self.cycling_occurrence = None;
         if let Some(occurrence) = self.cast_occurrence.as_mut() {
             occurrence.turn_journal_index = 0;
         }
@@ -5369,6 +5577,7 @@ impl ResolvedAbility {
             .target_incarnations
             .iter_mut()
             .chain(self.target_pins.iter_mut().flatten())
+            .chain(self.context.delayed_watch_incarnation.iter_mut())
             .chain(self.force_block_attacker.iter_mut())
             .chain(self.context.granting_object.iter_mut())
             .chain(self.context.creation_illegal_referents.iter_mut())
@@ -6445,6 +6654,28 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 608.2c + CR 614.9: Stamp a damage instruction's result onto this node,
+    /// its next instruction, and onto the base clause of an unswapped "instead"
+    /// override, which is that same next instruction.
+    pub(crate) fn set_direct_damage_result(
+        &mut self,
+        result: Option<DamageInstructionResult>,
+        owner: Option<DamageDeliveryOwnerId>,
+    ) {
+        if self
+            .condition
+            .as_ref()
+            .is_some_and(|condition| condition.is_instead_override())
+        {
+            if let Some(base) = self.else_ability.as_deref_mut() {
+                base.context.direct_damage_result = result;
+                base.context.damage_delivery_owner = owner;
+            }
+        }
+        self.context.direct_damage_result = result;
+        self.context.damage_delivery_owner = owner;
+    }
+
     /// CR 608.2c: Stamp one completed effect result onto exactly the deferred
     /// direct child. Descendants and alternate branches are cleared so the
     /// result cannot leak beyond its typed completion node.
@@ -6475,32 +6706,33 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = None;
+        self.context.trigger_bound_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
         }
     }
 
-    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
-    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
-    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
-    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+    /// CR 603.2b + CR 102.1 / CR 506.2: bind a trigger's chain to the player the trigger itself
+    /// names: the turn player whose phase it is, or the attacking player. Resolves exactly as
+    /// `set_scoped_player_recursive` does, and additionally records that the binding is the
+    /// trigger's, not a `player_scope` seat leg's (`SpellContext::trigger_bound_player`).
+    pub fn set_trigger_bound_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
-        self.context.phase_turn_player = Some(player);
+        self.context.trigger_bound_player = Some(player);
         for (_, child) in self.child_links_mut() {
-            child.set_phase_turn_player_recursive(player);
+            child.set_trigger_bound_player_recursive(player);
         }
     }
 
     /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
-    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
-    /// other stays an instruction's.
+    /// trigger binding keeps its marker (`SpellContext::trigger_bound_player`), and an
+    /// instruction binding stays an instruction binding.
     pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
         let Some(player) = source.scoped_player else {
             return;
         };
-        if source.context.phase_turn_player == Some(player) {
-            self.set_phase_turn_player_recursive(player);
+        if source.context.trigger_bound_player == Some(player) {
+            self.set_trigger_bound_player_recursive(player);
         } else {
             self.set_scoped_player_recursive(player);
         }
@@ -6790,6 +7022,31 @@ impl ResolvedAbility {
         self.source_id == other.source_id && self.ability_index == other.ability_index
     }
 
+    /// CR 608.2c: a sub-ability is part of the same printed ability instance
+    /// as its parent, so it is "this ability" for an
+    /// `AbilityUseCountThisTurn` gate. Takes `parent_index` unless this node
+    /// already carries its own index, which is never clobbered.
+    pub fn inherit_ability_index(&mut self, parent_index: Option<usize>) {
+        if self.ability_index.is_none() {
+            self.ability_index = parent_index;
+        }
+    }
+
+    /// CR 608.2c: [`Self::inherit_ability_index`] applied down every
+    /// `sub_ability` / `else_ability` link. The runtime applies the one-hop
+    /// rule at each hand-off (`effects::apply_parent_chain_context`); a reader
+    /// that walks a chain without resolving it applies it to the whole tree.
+    pub fn inherit_ability_index_recursive(&mut self, parent_index: Option<usize>) {
+        self.inherit_ability_index(parent_index);
+        let index = self.ability_index;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.inherit_ability_index_recursive(index);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.inherit_ability_index_recursive(index);
+        }
+    }
+
     pub fn set_context_recursive(&mut self, context: SpellContext) {
         self.context = context.clone();
         for (_, child) in self.child_links_mut() {
@@ -6864,6 +7121,86 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::{DelayedTrigger, GameState, ZoneChangeRecord};
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// CR 400.7: the legacy bare source and target ids decode with
+    /// `LEGACY_INCARNATION`. The pinned shape round-trips unchanged.
+    #[test]
+    fn equip_payload_decodes_legacy_ids_and_round_trips_pinned_objects() {
+        let legacy: KeywordAction = serde_json::from_value(serde_json::json!({
+            "type": "Equip",
+            "data": { "equipment_id": 1, "target_creature_id": 2 }
+        }))
+        .expect("the legacy equip payload decodes");
+        assert_eq!(
+            legacy,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(ObjectId(1), LEGACY_INCARNATION),
+                target_creature: ObjectIncarnationRef::of(ObjectId(2), LEGACY_INCARNATION),
+            }
+        );
+
+        let mixed: KeywordAction = serde_json::from_value(serde_json::json!({
+            "type": "Equip",
+            "data": {
+                "equipment": { "object_id": 1, "incarnation": LEGACY_INCARNATION },
+                "target_creature": { "object_id": 2, "incarnation": 3 }
+            }
+        }))
+        .expect("a previously exported full legacy pin decodes");
+        assert_eq!(
+            serde_json::to_value(&mixed).unwrap(),
+            serde_json::json!({
+                "type": "Equip",
+                "data": { "equipment": 1, "target_creature": { "object_id": 2, "incarnation": 3 } }
+            })
+        );
+
+        let pinned = serde_json::json!({
+            "type": "Equip",
+            "data": {
+                "equipment": { "object_id": 1, "incarnation": 4 },
+                "target_creature": { "object_id": 2, "incarnation": 3 }
+            }
+        });
+        let decoded: KeywordAction =
+            serde_json::from_value(pinned.clone()).expect("the pinned equip payload decodes");
+        assert_eq!(
+            decoded,
+            KeywordAction::Equip {
+                equipment: ObjectIncarnationRef::of(ObjectId(1), 4),
+                target_creature: ObjectIncarnationRef::of(ObjectId(2), 3),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("the equip payload encodes"),
+            pinned,
+            "the pinned shape round-trips"
+        );
+    }
+
+    /// Saved states carry the marker as `phase_turn_player`: the field's rename keeps that key,
+    /// and a state written without the key still decodes to no marker.
+    #[test]
+    fn trigger_bound_player_keeps_the_phase_turn_player_wire_key() {
+        let player = PlayerId(0);
+        let context = SpellContext {
+            trigger_bound_player: Some(player),
+            ..SpellContext::default()
+        };
+        let encoded = serde_json::to_value(context).unwrap();
+        assert_eq!(
+            encoded.get("phase_turn_player"),
+            Some(&serde_json::json!(player))
+        );
+        assert!(encoded.get("trigger_bound_player").is_none());
+        let mut legacy = serde_json::to_value(SpellContext::default()).unwrap();
+        assert!(legacy.get("phase_turn_player").is_none());
+        let absent: SpellContext = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(absent.trigger_bound_player, None);
+        legacy["phase_turn_player"] = serde_json::json!(player);
+        let present: SpellContext = serde_json::from_value(legacy).unwrap();
+        assert_eq!(present.trigger_bound_player, Some(player));
+    }
 
     /// V12 — CR 400.7e: the zone-change record successor authority. The live
     /// object at the record's id is the object that move created only while no
@@ -7129,6 +7466,32 @@ mod tests {
                 .expect("a payload without the key deserializes")
                 .prior_player_choices,
             Vec::<PlayerId>::new()
+        );
+    }
+
+    /// CR 106.12b: the sub-chain tap state is an additive, default-skipped
+    /// field: `FromTap` round-trips under its own key, `NotFromTap` is not
+    /// serialized, and a payload without the key reads as `NotFromTap`.
+    #[test]
+    fn spell_context_mana_tap_state_round_trip_and_default_skip() {
+        let tapped = SpellContext {
+            mana_tap_state: ManaTapState::FromTap,
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&tapped).expect("context serializes");
+        assert_eq!(wire["mana_tap_state"], serde_json::json!("FromTap"));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            tapped
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("mana_tap_state").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .mana_tap_state,
+            ManaTapState::NotFromTap
         );
     }
 

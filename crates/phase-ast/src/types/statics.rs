@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use strum::EnumCount;
 
 use super::ability::{
-    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
-    QuantityExpr, QuantityRef, TargetFilter,
+    AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, ControllerRef, CostCategory,
+    ManaSpendPermission, PlayerFilter, QuantityExpr, QuantityRef, TargetFilter,
 };
 use super::event_kinds::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
@@ -478,13 +478,25 @@ impl FromStr for ExileCastCost {
 ///   ("...from among cards exiled with ~." — The Matrix of Time, the
 ///   Prosper/Tibalt impulse-commander class). Every card still linked to the
 ///   source remains eligible across turns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+/// - `CounterLinked` — CR 406.2 + CR 611.3a + CR 122.1: the counter-keyed,
+///   source-agnostic pool — every card in exile carrying a counter the matcher
+///   counts (Tinybones, Bauble Burglar: "...cards you don't own with stash
+///   counters on them from exile"). Unlike the source-keyed pools above, no
+///   exile-link record is consulted: which permanent put the counter there is
+///   irrelevant (CR 400.1: exile is one shared zone), and the pool is a live
+///   read recomputed at every gate (CR 611.3a), so a removed counter exits the
+///   pool immediately. Clone-only: the `CounterMatch` payload cannot be `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ExileCardPool {
     /// Per-turn rolling pool (`cards_exiled_with_source_this_turn`).
     #[default]
     ThisTurn,
     /// Lifetime per-source `exile_links` pool (`linked_exile_cards_for_source`).
     Persistent,
+    /// Counter-keyed, source-agnostic pool (live `state.exile` scan).
+    CounterLinked {
+        matcher: super::counter::CounterMatch,
+    },
 }
 
 impl fmt::Display for ExileCardPool {
@@ -492,6 +504,15 @@ impl fmt::Display for ExileCardPool {
         match self {
             ExileCardPool::ThisTurn => write!(f, "this_turn"),
             ExileCardPool::Persistent => write!(f, "persistent"),
+            ExileCardPool::CounterLinked { matcher } => match matcher {
+                // CR 122.1: the colon form carries the counter type word;
+                // `counter_any` stays colon-less so a future `Generic("any")`
+                // counter can never collide with the `Any` encoding.
+                super::counter::CounterMatch::OfType(counter_type) => {
+                    write!(f, "counter:{}", counter_type.as_str())
+                }
+                super::counter::CounterMatch::Any => write!(f, "counter_any"),
+            },
         }
     }
 }
@@ -503,7 +524,20 @@ impl FromStr for ExileCardPool {
         match s {
             "this_turn" => Ok(ExileCardPool::ThisTurn),
             "persistent" => Ok(ExileCardPool::Persistent),
-            other => Err(format!("unknown ExileCardPool: {other}")),
+            "counter_any" => Ok(ExileCardPool::CounterLinked {
+                matcher: super::counter::CounterMatch::Any,
+            }),
+            other => match other.strip_prefix("counter:") {
+                // CR 122.1: `parse_counter_type` is total — an unknown name
+                // falls back to `Generic`, so the matcher stays able to match
+                // the counters the exile pipeline actually writes.
+                Some(name) => Ok(ExileCardPool::CounterLinked {
+                    matcher: super::counter::CounterMatch::OfType(
+                        super::counter::parse_counter_type(name),
+                    ),
+                }),
+                None => Err(format!("unknown ExileCardPool: {other}")),
+            },
         }
     }
 }
@@ -1264,6 +1298,12 @@ pub enum StaticMode {
     /// Adamantoise, Patient Zero, Uthgardt Fury, …), so their marked damage
     /// persists across turns.
     DamageNotRemovedDuringCleanup,
+    /// CR 120.6 + CR 704.5g + CR 613.11: "Lethal damage dealt to [filter] is determined by
+    /// their power rather than their toughness" (Zilortha, Strength Incarnate). A rule
+    /// modification read at query time: for creatures matched by the definition's `affected`
+    /// filter, marked damage is checked against power instead of toughness wherever the game
+    /// checks for lethal damage. Reader: `game::lethal_damage::lethal_damage_basis`.
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -1876,6 +1916,10 @@ pub enum StaticMode {
     /// class (`Effect::CastFromZone` → `CastingPermission::ExileWithAltCost`),
     /// which exiles the card before granting a permission.
     TopOfLibraryCastPermission {
+        #[serde(default = "super::ability::default_controller_ref_you")]
+        library: ControllerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mana_spend_permission: Option<ManaSpendPermission>,
         /// CR 305.1: `Play` covers both lands (played as a land drop) and
         /// non-land spells (cast as a spell). `Cast` covers only spells.
         /// Realmwalker = `Cast`; Future Sight + Bolas's Citadel = `Play`.
@@ -2278,6 +2322,11 @@ pub enum StaticMode {
     /// regenerated." one-shot) — this is the standalone, until-end-of-turn form
     /// (Hurr Jackal, Furnace Brood, Lim-Dûl's Cohort).
     CantBeRegenerated,
+    /// CR 701.32a + CR 904.9: "Schemes can't be set in motion" (All in Good
+    /// Time). A rule-mod marker, not a layer modification; enforcement lives
+    /// in `archenemy.rs`'s set-in-motion gate. Always transient (the extra
+    /// turn), installed via `Effect::GenericEffect`.
+    CantSetSchemeInMotion,
     /// CR 702.34: Flashback — allows casting from graveyard, exiled after resolution.
     FlashBack,
     /// CR 702.18: Shroud — permanent cannot be the target of spells or abilities.
@@ -2392,7 +2441,11 @@ pub enum StaticMode {
         kind: CrewContributionKind,
         actions: Vec<CrewAction>,
     },
-    MayLookAtTopOfLibrary,
+    /// CR 401.5 + CR 701.20e: The grantee may privately look at the top card
+    /// of the library belonging to the player named by `library`.
+    MayLookAtTopOfLibrary {
+        library: ControllerRef,
+    },
     /// CR 708.5: Static permission to look at face-down permanents the
     /// controller would otherwise not be allowed to see. The default rule lets
     /// you look only at face-down permanents you control; this static lifts that
@@ -2706,6 +2759,7 @@ pub enum StaticMode {
 pub enum StaticModeKind {
     Continuous,
     DamageNotRemovedDuringCleanup,
+    LethalDamageDeterminedByPower,
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
@@ -2774,6 +2828,7 @@ pub enum StaticModeKind {
     Indestructible,
     CantBeDestroyed,
     CantBeRegenerated,
+    CantSetSchemeInMotion,
     FlashBack,
     Shroud,
     Hexproof,
@@ -2863,6 +2918,9 @@ impl StaticMode {
             StaticMode::DamageNotRemovedDuringCleanup => {
                 StaticModeKind::DamageNotRemovedDuringCleanup
             }
+            StaticMode::LethalDamageDeterminedByPower => {
+                StaticModeKind::LethalDamageDeterminedByPower
+            }
             StaticMode::CantAttack => StaticModeKind::CantAttack,
             StaticMode::CantBlock => StaticModeKind::CantBlock,
             StaticMode::CantAttackOrBlock => StaticModeKind::CantAttackOrBlock,
@@ -2943,6 +3001,7 @@ impl StaticMode {
             StaticMode::Indestructible => StaticModeKind::Indestructible,
             StaticMode::CantBeDestroyed => StaticModeKind::CantBeDestroyed,
             StaticMode::CantBeRegenerated => StaticModeKind::CantBeRegenerated,
+            StaticMode::CantSetSchemeInMotion => StaticModeKind::CantSetSchemeInMotion,
             StaticMode::FlashBack => StaticModeKind::FlashBack,
             StaticMode::Shroud => StaticModeKind::Shroud,
             StaticMode::Hexproof => StaticModeKind::Hexproof,
@@ -2963,7 +3022,7 @@ impl StaticMode {
             StaticMode::CantCrew => StaticModeKind::CantCrew,
             StaticMode::CantPhaseIn => StaticModeKind::CantPhaseIn,
             StaticMode::CrewContribution { .. } => StaticModeKind::CrewContribution,
-            StaticMode::MayLookAtTopOfLibrary => StaticModeKind::MayLookAtTopOfLibrary,
+            StaticMode::MayLookAtTopOfLibrary { .. } => StaticModeKind::MayLookAtTopOfLibrary,
             StaticMode::MayLookAtFaceDown => StaticModeKind::MayLookAtFaceDown,
             StaticMode::CantBeTurnedFaceUp => StaticModeKind::CantBeTurnedFaceUp,
             StaticMode::MayChooseNotToUntap => StaticModeKind::MayChooseNotToUntap,
@@ -3118,7 +3177,7 @@ impl StaticMode {
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
-            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
             | StaticMode::MayChooseNotToUntap
@@ -3151,6 +3210,8 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3502,7 +3563,7 @@ impl StaticMode {
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
             | StaticMode::CrewContribution { .. }
-            | StaticMode::MayLookAtTopOfLibrary
+            | StaticMode::MayLookAtTopOfLibrary { .. }
             | StaticMode::MayLookAtFaceDown
             | StaticMode::CantBeTurnedFaceUp
             | StaticMode::MayChooseNotToUntap
@@ -3536,6 +3597,8 @@ impl StaticMode {
             | StaticMode::CountsAsNamed { .. }
             | StaticMode::LinkedCollectionCounterPlayPermission
             | StaticMode::DamageNotRemovedDuringCleanup
+            | StaticMode::LethalDamageDeterminedByPower
+            | StaticMode::CantSetSchemeInMotion
             | StaticMode::Other(_) => None,
         }
     }
@@ -3547,6 +3610,9 @@ impl fmt::Display for StaticMode {
             StaticMode::Continuous => write!(f, "Continuous"),
             StaticMode::DamageNotRemovedDuringCleanup => {
                 write!(f, "DamageNotRemovedDuringCleanup")
+            }
+            StaticMode::LethalDamageDeterminedByPower => {
+                write!(f, "LethalDamageDeterminedByPower")
             }
             StaticMode::CantAttack => write!(f, "CantAttack"),
             StaticMode::CantBlock => write!(f, "CantBlock"),
@@ -3728,7 +3794,20 @@ impl fmt::Display for StaticMode {
                 play_mode,
                 frequency,
                 alt_cost,
+                library,
+                mana_spend_permission,
             } => {
+                if *library != ControllerRef::You || mana_spend_permission.is_some() {
+                    let payload = serde_json::to_string(&(
+                        play_mode,
+                        frequency,
+                        library,
+                        mana_spend_permission,
+                        alt_cost,
+                    ))
+                    .map_err(|_| fmt::Error)?;
+                    return write!(f, "TopOfLibraryCastPermission(data={payload})");
+                }
                 // CR 601.2a: `frequency` is appended as a tagged segment only
                 // when non-default (`OncePerTurn`) so the historical
                 // 1-/2-segment Unlimited forms keep parsing unchanged.
@@ -3783,7 +3862,10 @@ impl fmt::Display for StaticMode {
                 if matches!(cost, ExileCastCost::WithoutPayingManaCost) {
                     write!(f, ",free")?;
                 }
-                if matches!(pool, ExileCardPool::Persistent) {
+                // CR 406.2: every non-default pool scope (`Persistent`,
+                // `CounterLinked`) is emitted; the `ThisTurn` default stays
+                // elided so the historical 2-/3-segment forms round-trip.
+                if !matches!(pool, ExileCardPool::ThisTurn) {
                     write!(f, ",pool={pool}")?;
                 }
                 if matches!(timing, ExileCastTiming::YourTurnOnly) {
@@ -3878,6 +3960,7 @@ impl fmt::Display for StaticMode {
             StaticMode::Indestructible => write!(f, "Indestructible"),
             StaticMode::CantBeDestroyed => write!(f, "CantBeDestroyed"),
             StaticMode::CantBeRegenerated => write!(f, "CantBeRegenerated"),
+            StaticMode::CantSetSchemeInMotion => write!(f, "CantSetSchemeInMotion"),
             StaticMode::FlashBack => write!(f, "FlashBack"),
             StaticMode::Shroud => write!(f, "Shroud"),
             StaticMode::Hexproof => write!(f, "Hexproof"),
@@ -3929,7 +4012,15 @@ impl fmt::Display for StaticMode {
             StaticMode::CrewContribution { kind, actions } => {
                 write!(f, "CrewContribution({kind:?},{actions:?})")
             }
-            StaticMode::MayLookAtTopOfLibrary => write!(f, "MayLookAtTopOfLibrary"),
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            } => {
+                write!(f, "MayLookAtTopOfLibrary")
+            }
+            StaticMode::MayLookAtTopOfLibrary { library } => {
+                let payload = serde_json::to_string(library).map_err(|_| fmt::Error)?;
+                write!(f, "MayLookAtTopOfLibrary({payload})")
+            }
             StaticMode::MayLookAtFaceDown => write!(f, "MayLookAtFaceDown"),
             StaticMode::CantBeTurnedFaceUp => write!(f, "CantBeTurnedFaceUp"),
             // Tier 3
@@ -4023,6 +4114,7 @@ impl FromStr for StaticMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mode = match s {
             "Continuous" => StaticMode::Continuous,
+            "LethalDamageDeterminedByPower" => StaticMode::LethalDamageDeterminedByPower,
             "CantAttack" => StaticMode::CantAttack,
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
@@ -4290,6 +4382,8 @@ impl FromStr for StaticMode {
             // form omits the alt_cost payload (it's preserved through serde,
             // not the FromStr round-trip), so FromStr defaults alt_cost to None.
             "TopOfLibraryCastPermission" => StaticMode::TopOfLibraryCastPermission {
+                library: ControllerRef::You,
+                mana_spend_permission: None,
                 play_mode: CardPlayMode::Cast,
                 frequency: CastFrequency::Unlimited,
                 alt_cost: None,
@@ -4304,6 +4398,20 @@ impl FromStr for StaticMode {
                     .strip_prefix("TopOfLibraryCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
+                if let Some(payload) = inner.strip_prefix("data=") {
+                    return Ok(serde_json::from_str(payload).map_or_else(
+                        |_| StaticMode::Other(s.to_owned()),
+                        |(play_mode, frequency, library, mana_spend_permission, alt_cost)| {
+                            StaticMode::TopOfLibraryCastPermission {
+                                play_mode,
+                                frequency,
+                                library,
+                                mana_spend_permission,
+                                alt_cost,
+                            }
+                        },
+                    ));
+                }
                 let mut parts = inner.split(',');
                 let play_mode = parts
                     .next()
@@ -4315,6 +4423,8 @@ impl FromStr for StaticMode {
                     .and_then(|f| f.parse().ok())
                     .unwrap_or(CastFrequency::Unlimited);
                 StaticMode::TopOfLibraryCastPermission {
+                    library: ControllerRef::You,
+                    mana_spend_permission: None,
                     play_mode,
                     frequency,
                     // CR 118.9: the alt_cost payload is preserved through serde,
@@ -4438,6 +4548,8 @@ impl FromStr for StaticMode {
             "CantBeDestroyed" => StaticMode::CantBeDestroyed,
             // CR 701.19c: "[Permanent] can't be regenerated."
             "CantBeRegenerated" => StaticMode::CantBeRegenerated,
+            // CR 701.32a + CR 904.9: "Schemes can't be set in motion."
+            "CantSetSchemeInMotion" => StaticMode::CantSetSchemeInMotion,
             "FlashBack" => StaticMode::FlashBack,
             "Shroud" => StaticMode::Shroud,
             "Hexproof" => StaticMode::Hexproof,
@@ -4469,7 +4581,17 @@ impl FromStr for StaticMode {
                 requirement: CombatAloneRequirement::MustBeSole,
             },
             "CantCrew" => StaticMode::CantCrew,
-            "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary,
+            "MayLookAtTopOfLibrary" => StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            },
+            s if s.starts_with("MayLookAtTopOfLibrary(") => s
+                .strip_prefix("MayLookAtTopOfLibrary(")
+                .and_then(|s| s.strip_suffix(')'))
+                .and_then(|payload| serde_json::from_str(payload).ok())
+                .map_or_else(
+                    || StaticMode::Other(s.to_owned()),
+                    |library| StaticMode::MayLookAtTopOfLibrary { library },
+                ),
             "MayLookAtFaceDown" => StaticMode::MayLookAtFaceDown,
             "CantBeTurnedFaceUp" => StaticMode::CantBeTurnedFaceUp,
             // Tier 3
@@ -4840,6 +4962,11 @@ where
             if let Some(mode) = deserialize_legacy_cost_modify_string(s) {
                 return Ok(mode);
             }
+            if s == "MayLookAtTopOfLibrary" {
+                return Ok(StaticMode::MayLookAtTopOfLibrary {
+                    library: ControllerRef::You,
+                });
+            }
             if s == "BlockRestriction" {
                 return Ok(StaticMode::BlockRestriction {
                     filter: block_only_creatures_with_flying_filter(),
@@ -4950,6 +5077,46 @@ fn deserialize_legacy_modify_cost_object(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_look_mode_loads_legacy_and_explicit_owner() {
+        #[derive(Deserialize)]
+        struct PersistedMode {
+            #[serde(deserialize_with = "deserialize_static_mode_fwd")]
+            mode: StaticMode,
+        }
+
+        let legacy: PersistedMode =
+            serde_json::from_str(r#"{"mode":"MayLookAtTopOfLibrary"}"#).unwrap();
+        assert_eq!(
+            legacy.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You
+            },
+        );
+        let explicit: PersistedMode = serde_json::from_str(
+            r#"{"mode":{"MayLookAtTopOfLibrary":{"library":{"SpecificPlayer":{"id":1}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.mode,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::SpecificPlayer { id: PlayerId(1) },
+            },
+        );
+        assert_eq!(
+            explicit.mode.to_string().parse::<StaticMode>().unwrap(),
+            explicit.mode
+        );
+        let play = StaticMode::TopOfLibraryCastPermission {
+            library: ControllerRef::SpecificPlayer { id: PlayerId(1) },
+            play_mode: CardPlayMode::Play,
+            frequency: CastFrequency::Unlimited,
+            alt_cost: None,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+        };
+        assert_eq!(play.to_string().parse::<StaticMode>().unwrap(), play);
+    }
+
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -5288,7 +5455,9 @@ mod tests {
             // Carnage chapter I).
             StaticMode::MustAttackAwayFromSource,
             StaticMode::CantCrew,
-            StaticMode::MayLookAtTopOfLibrary,
+            StaticMode::MayLookAtTopOfLibrary {
+                library: ControllerRef::You,
+            },
             // CR 702.170a grant + CR 702.170f permission — nullary plot-from-
             // library markers (Fblthp). Scope rides `StaticDefinition.affected`,
             // not the Display payload, so the bare markers round-trip cleanly.
@@ -5467,6 +5636,74 @@ mod tests {
             let s = mode.to_string();
             assert_eq!(StaticMode::from_str(&s).unwrap(), mode);
         }
+    }
+
+    /// CR 406.2 + CR 122.1 (V-pool-type): the counter-keyed pool scope
+    /// round-trips through Display/FromStr, the `Any` matcher keeps its
+    /// colon-less encoding, unknown `counter:` names fall back to `Generic`
+    /// (still matchable), and the historical 2-segment Maralen form keeps
+    /// parsing with the `ThisTurn` default elided.
+    #[test]
+    fn exile_card_pool_counter_linked_round_trips() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let stash = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::OfType(CounterType::Generic("stash".to_string())),
+        };
+        assert_eq!(stash.to_string(), "counter:stash");
+        assert_eq!(ExileCardPool::from_str(&stash.to_string()).unwrap(), stash);
+
+        let any = ExileCardPool::CounterLinked {
+            matcher: CounterMatch::Any,
+        };
+        assert_eq!(any.to_string(), "counter_any");
+        assert_eq!(ExileCardPool::from_str("counter_any").unwrap(), any);
+
+        // Unknown counter names stay matchable via the `Generic` fallback.
+        assert_eq!(
+            ExileCardPool::from_str("counter:bauble").unwrap(),
+            ExileCardPool::CounterLinked {
+                matcher: CounterMatch::OfType(CounterType::Generic("bauble".to_string())),
+            }
+        );
+
+        // Reach-guard: the historical 2-segment Maralen form still parses with
+        // the default pool elided.
+        assert_eq!(
+            StaticMode::from_str("ExileCastPermission(Cast,unlimited)").unwrap(),
+            StaticMode::ExileCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                cost: ExileCastCost::PayNormalCost,
+                pool: ExileCardPool::ThisTurn,
+                timing: ExileCastTiming::AnyTime,
+                mana_spend_permission: None,
+                grants_flash: false,
+                extra_cost: None,
+                enters_with_counter: None,
+                grantee: ExileCastGrantee::SourceController,
+            }
+        );
+
+        // The counter-linked scope rides the `pool=` segment of the mode form.
+        let mode = StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Play,
+            cost: ExileCastCost::PayNormalCost,
+            pool: stash,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission: None,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+            grantee: ExileCastGrantee::SourceController,
+        };
+        let rendered = mode.to_string();
+        assert!(
+            rendered.contains("pool=counter:stash"),
+            "the non-default pool must be emitted, got {rendered}"
+        );
+        assert_eq!(StaticMode::from_str(&rendered).unwrap(), mode);
     }
 
     #[test]

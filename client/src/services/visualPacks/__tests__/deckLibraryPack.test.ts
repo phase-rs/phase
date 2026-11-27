@@ -4,7 +4,7 @@ import { VisualPackBackendError } from "../backend.ts";
 import { invalidateDeckLibraryPack, planDeckLibraryPack } from "../deckLibraryPack.ts";
 import { packId } from "../types.ts";
 import type { DeckCatalogCandidate } from "../../deckCatalog.ts";
-import type { ParsedDeck } from "../../deckParser.ts";
+import { detectAndParseDeck, type ParsedDeck } from "../../deckParser.ts";
 import type { CuratedMembershipInput } from "../curatedMembership.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import type { DeckMap } from "../../../hooks/useDecks.ts";
@@ -162,6 +162,21 @@ describe("deck-library membership planner", () => {
         { oracleId: GIANT, source: { setCode: "M20", collectorNumber: "1" } },
       ],
     });
+  });
+
+  it("forwards all printings of one imported card", async () => {
+    state.oracleIds.set("Forest", GIANT);
+    state.catalog = [candidate("saved", { type: "saved" }, detectAndParseDeck(
+      "Deck\n4 Forest (ONE) 276\n3 Forest (DMU) 277\n5 Forest (NEO) 292",
+    ))];
+
+    await planDeckLibraryPack(PACK);
+
+    expect(plannedInput().deckPrintings).toEqual([
+      { oracleId: GIANT, source: { setCode: "dmu", collectorNumber: "277" } },
+      { oracleId: GIANT, source: { setCode: "neo", collectorNumber: "292" } },
+      { oracleId: GIANT, source: { setCode: "one", collectorNumber: "276" } },
+    ]);
   });
 
   it("treats an empty catalog as a valid empty membership", async () => {

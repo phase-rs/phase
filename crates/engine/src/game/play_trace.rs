@@ -2451,6 +2451,7 @@ mod tests {
         WaitingFor::RetargetChoice {
             player: PlayerId(0),
             stack_entry_index: 0,
+            stack_entry_id: None,
             scope,
             current_targets: vec![],
             slots: vec![],

@@ -491,7 +491,7 @@ fn torch_legacy_base_resident_rider_is_pruned_on_live_and_replayed_bounce() {
         .expect("the exact Torch rider is live before the simulated legacy write")
         .clone();
     let mut legacy_rider = legacy_rider;
-    legacy_rider.origin = engine::types::ability::ReplacementOrigin::Characteristic;
+    legacy_rider.origin = engine::types::ability::DefinitionOrigin::Characteristic;
     std::sync::Arc::make_mut(
         &mut r
             .state_mut()

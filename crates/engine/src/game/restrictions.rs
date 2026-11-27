@@ -1,3 +1,4 @@
+use crate::game::conditions::eval_is_monarch;
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
@@ -9,6 +10,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
     AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastTimingRoute, CastingVariant,
+    EntryTokenStatus,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -256,6 +258,34 @@ pub(crate) fn open_flash_timing_routes(
     .collect()
 }
 
+/// CR 601.3 + CR 702.62a: could `player` begin to cast the noninstant hand card `object_id` at
+/// instant speed, as things stand now? The begin-to-cast sibling of
+/// [`spell_confined_to_sorcery_timing`], for suspend's "If you could begin to cast this card": a
+/// granted alternative cost counts even if it can't be paid (CR 601.3c), and Sneak counts only in
+/// its own window.
+fn hand_cast_may_begin_at_instant_speed(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    // CR 702.190a + CR 805.4a: "Any time you could cast an instant during your declare blockers
+    // step" (Bobby, Another Dwarf gives sneak to Ith, High Arcanist in hand).
+    let sneak_window = state.phase == Phase::DeclareBlockers
+        && super::players::is_turn_player(state, player)
+        && super::keywords::effective_sneak_cost(state, object_id).is_some();
+    sneak_window
+        || !open_flash_timing_routes(state, player, object_id, CastingVariant::Normal).is_empty()
+        // CR 601.3c: Primal Prayers, with or without {E} to pay.
+        || super::casting::granted_spell_alternative_cost_for(
+            state,
+            player,
+            object_id,
+            false,
+            Some(CastTimingPermission::AsThoughHadFlash),
+        )
+        .is_some()
+}
+
 /// CR 307.5 + CR 602.5d: Is `player`'s activation of ability `ability_index`
 /// of `source_id` confined to sorcery timing now? It is when one of its
 /// activation restrictions confines it (`restriction_confines_to_sorcery_timing`,
@@ -263,8 +293,8 @@ pub(crate) fn open_flash_timing_routes(
 /// timing as `AsSorcery`, the restriction the loyalty authority reads. The
 /// ability is resolved through the activation authority's own lookup, so
 /// runtime-granted abilities are covered. A `MatchesCardCastTiming` ability is
-/// read by the source's card type only, as legality reads it; a flash route
-/// for the card is not consulted. The sorcery window is not tested. A missing
+/// read for beginning the cast (flash routes count, prohibitions don't), as
+/// legality reads its timing. The sorcery window is not tested. A missing
 /// object or ability makes no claim.
 pub fn ability_confined_to_sorcery_timing(
     state: &crate::types::game_state::GameState,
@@ -561,6 +591,11 @@ pub(crate) fn battlefield_entry_record_for(
     obj: &GameObject,
 ) -> crate::types::game_state::BattlefieldEntryRecord {
     crate::types::game_state::BattlefieldEntryRecord {
+        token_status: Some(if obj.is_token {
+            EntryTokenStatus::Token
+        } else {
+            EntryTokenStatus::Nontoken
+        }),
         object_id: obj.id,
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
@@ -701,7 +736,10 @@ fn entry_type_filter_matches(
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
         // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
-        TypeFilter::Instant | TypeFilter::Sorcery => false,
+        // CR 314.1: scheme cards are nontraditional cards that are never
+        // permanents and never enter the battlefield, so a battlefield-entry
+        // record is never a scheme either.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => false,
     }
 }
 
@@ -759,6 +797,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // source context the predicate cannot exclude self, so it stays
                 // false (the prior behavior for this prop on these paths).
                 FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
+                // CR 111.1 + CR 608.2i: use the token identity captured at entry.
+                FilterProp::Token => record.token_status == Some(EntryTokenStatus::Token),
+                FilterProp::NonToken => record.token_status == Some(EntryTokenStatus::Nontoken),
                 _ => false,
             })
         }
@@ -1409,14 +1450,15 @@ fn restriction_confines_to_sorcery_timing(
             };
             !permitted
         }
-        // CR 702.62a: "If you could begin to cast this card": a noninstant
-        // card is confined to its sorcery timing. A missing source makes no
-        // claim; legality refuses it separately. Only the card type is read,
-        // as legality has always read it.
-        ActivationRestriction::MatchesCardCastTiming => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|obj| !obj.card_types.core_types.contains(&CoreType::Instant)),
+        // CR 702.62a: "If you could begin to cast this card": confined unless the card is an
+        // instant (CR 304.1) or its cast could begin at instant speed now. A missing source
+        // makes no claim; legality refuses it separately.
+        ActivationRestriction::MatchesCardCastTiming => {
+            state.objects.get(&source_id).is_some_and(|obj| {
+                !obj.card_types.core_types.contains(&CoreType::Instant)
+                    && !hand_cast_may_begin_at_instant_speed(state, player, source_id)
+            })
+        }
         // Not sorcery timing: other windows, activation counts, conditions
         // and source states.
         ActivationRestriction::AsInstant
@@ -1469,23 +1511,21 @@ fn activation_restriction_applies(
             matches!(state.waiting_for, crate::types::WaitingFor::Priority { player: holder } if holder == player)
                 && state.pending_cast.is_none()
         }
-        // CR 702.62a: "If you could begin to cast this card by putting it onto the
-        // stack from your hand" — defer to the underlying card type's natural
-        // cast timing. Instants activate any time priority is held; sorceries
-        // (and other non-instant card types) require the sorcery-speed window.
-        // Used by Suspend's hand-activated ability so future
-        // cast-timing-mirroring activations (Foretell, etc.) reuse this primitive.
-        // A missing source can't be activated.
+        // CR 702.62a + CR 702.62c: "If you could begin to cast this card by putting it onto the
+        // stack from your hand": its timing, split second, and the prohibitions checked by the cast
+        // proposal. The window is tested first, so the flash scans run only outside it. A missing
+        // source can't be activated.
         ActivationRestriction::MatchesCardCastTiming => {
-            state.objects.contains_key(&source_id)
-                && (!restriction_confines_to_sorcery_timing(
+            (is_sorcery_speed_window(state, player)
+                || !restriction_confines_to_sorcery_timing(
                     state,
                     player,
                     source_id,
                     ability_index,
                     restriction,
                     Some(gates),
-                ) || is_sorcery_speed_window(state, player))
+                ))
+                && super::casting::hand_cast_may_begin(state, player, source_id)
         }
         ActivationRestriction::DuringYourTurn => state.active_player == player,
         ActivationRestriction::DuringYourUpkeep => {
@@ -1783,6 +1823,13 @@ fn evaluate_condition_for_granter(
     condition: &ParsedCondition,
 ) -> bool {
     match condition {
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            let context =
+                super::filter::FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(granting_object);
+            state.objects.contains_key(&source_id)
+                && super::filter::matches_target_filter(state, source_id, filter, &context)
+        }
         ParsedCondition::SourceInZone { zone } => state
             .objects
             .get(&source_id)
@@ -2207,6 +2254,11 @@ fn evaluate_condition_for_granter(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 725.1: "if you're the monarch" reads the monarch designation off
+        // the activating player (CR 109.5), not off the source's controller —
+        // CR 602.2 can let someone else activate the ability. If no player
+        // is the monarch, the leaf is false.
+        ParsedCondition::IsMonarch => eval_is_monarch(state, player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
@@ -2644,14 +2696,30 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 /// active player (or, under the shared team turns option, any player on the
 /// active team — CR 805.5a: "A player may cast a spell, activate an ability,
 /// or take a special action when their team has priority") has priority.
+/// CR 805.4a + CR 805.5a: whether `player` may act on the active turn — the
+/// active player themselves, or any living teammate when the active player's
+/// side takes shared team turns (the turn-structure predicate in
+/// `topology::side_takes_shared_turn`, so a future individual-turn team
+/// format stays correctly excluded).
+/// The single membership authority behind `is_sorcery_speed_window` and the
+/// teammate-aware special-action gates (foretell, ninjutsu-family offers,
+/// room unlocks): one spelling, so offer and enforcement cannot drift.
+pub(crate) fn acts_on_active_turn(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+) -> bool {
+    state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player))
+}
+
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && (state.active_player == player
-            || super::players::teammates(state, state.active_player).contains(&player))
+        && acts_on_active_turn(state, player)
 }
 
 /// CR 506.1: the combat phase a "before <combat step>" window is measured in.
@@ -3052,6 +3120,68 @@ mod tests {
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn suspended_source_restriction_reads_the_grant_on_the_exiled_card() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::ActivationRestriction;
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Suspend", true,
+            "Exile target creature and put two time counters on it. If it doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, they may play it without paying its mana cost. If it's a creature, it has haste.)")
+            .with_mana_cost(ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::Blue] }).id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(bear).resolve();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.",
+            "Greater Gargadon", &["Suspend".into()], &["Creature".into()], &[]);
+        let condition = parsed
+            .abilities
+            .iter()
+            .flat_map(|a| &a.activation_restrictions)
+            .find_map(|r| match r {
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(condition),
+                } => Some(condition),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&bear].counters[&CounterType::Time],
+            2
+        );
+        assert!(crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(evaluate_condition(runner.state(), P0, bear, condition));
+        // A second exile incarnation with time counters does not inherit that grant.
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            crate::game::zones::move_to_zone(runner.state_mut(), bear, zone, &mut vec![]);
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Time, 2);
+        assert!(!crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(!evaluate_condition(runner.state(), P0, bear, condition));
+    }
 
     /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
     /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
@@ -3642,6 +3772,7 @@ mod tests {
     #[test]
     fn entry_type_filter_answers_instant_false_per_cr_403_3() {
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Permanent".to_string(),
             core_types: vec![CoreType::Creature],
@@ -3915,6 +4046,7 @@ mod tests {
         state
             .battlefield_entries_this_turn
             .push_back(BattlefieldEntryRecord {
+                token_status: Some(EntryTokenStatus::Nontoken),
                 object_id: ObjectId(99),
                 name: "Green Creature".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -3985,6 +4117,7 @@ mod tests {
                     state
                         .battlefield_entries_this_turn
                         .push_back(BattlefieldEntryRecord {
+                            token_status: Some(EntryTokenStatus::Nontoken),
                             object_id: ObjectId(next_id),
                             name: "Bear".to_string(),
                             core_types: vec![CoreType::Creature],
@@ -5846,23 +5979,13 @@ mod tests {
     }
 
     /// T23 — the ANTI-DRIFT BINDER for [`ledger_filter_is_evaluable`]'s allow-list.
-    /// It replaces a 98-arm exhaustive `match`: the two functions are driven AS A
-    /// PAIR against one record that positively satisfies every allowed prop, so a
-    /// prop in the allow-list that the matcher does not actually answer fails here.
-    ///
-    /// REVERT-PROBES, both measured:
-    /// - add `FilterProp::NonToken` to the allow-list → the paired matcher drive
-    ///   returns `false` while the guard says `true` → FAIL.
-    /// - delete an allowed prop from the list → its paired row FAILS on the guard side.
+    /// Each supported predicate must have a matching entry snapshot and pass the guard.
     #[test]
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies four of the five answerable props: green, on the
-        // battlefield, flying, and not the ability source. FaceDown is covered by
-        // the separate face-down record below. Also legendary and
-        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Binder Entrant".to_string(),
             core_types: vec![CoreType::Creature],
@@ -5908,6 +6031,7 @@ mod tests {
 
         // FaceDown — test with a face-down record.
         let face_down_record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(11),
             name: "Face Down Creature".to_string(),
             core_types: vec![CoreType::Creature],
@@ -5942,24 +6066,45 @@ mod tests {
             "FaceDown must NOT match a face-up record"
         );
 
-        // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
-        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
-        // for those is the fail-closed arm, not a genuine mismatch.)
-        for prop in [
-            FilterProp::NonToken,
-            FilterProp::Token,
-            FilterProp::Tapped,
-            FilterProp::HasSupertype {
-                value: Supertype::Legendary,
-            },
+        for (prop, expected_status) in [
+            (FilterProp::Token, EntryTokenStatus::Token),
+            (FilterProp::NonToken, EntryTokenStatus::Nontoken),
         ] {
-            assert!(
-                !ledger_filter_is_evaluable(&typed(vec![prop.clone()], None)),
-                "{prop:?} is not answerable from a BattlefieldEntryRecord"
-            );
+            let filter = typed(vec![prop], None);
+            assert!(ledger_filter_is_evaluable(&filter));
+            for status in [
+                Some(EntryTokenStatus::Token),
+                Some(EntryTokenStatus::Nontoken),
+                None,
+            ] {
+                let snapshot = BattlefieldEntryRecord {
+                    token_status: status,
+                    ..record.clone()
+                };
+                assert_eq!(
+                    battlefield_entry_matches_filter(
+                        &snapshot,
+                        &filter,
+                        player,
+                        &[],
+                        Some(source_id)
+                    ),
+                    status == Some(expected_status),
+                    "{filter:?} against {status:?}"
+                );
+                assert_eq!(snapshot.clone(), snapshot);
+                let mut serialized = serde_json::to_value(&snapshot).unwrap();
+                if status.is_none() {
+                    assert_eq!(
+                        serialized.as_object_mut().unwrap().remove("token_status"),
+                        Some(serde_json::Value::Null)
+                    );
+                }
+                let decoded: BattlefieldEntryRecord = serde_json::from_value(serialized).unwrap();
+                assert_eq!(decoded, snapshot);
+            }
         }
 
-        // Structure: monotone connectives recurse; every leaf must be answerable.
         let bare = typed(vec![], None);
         let green = typed(
             vec![FilterProp::HasColor {
@@ -5967,14 +6112,29 @@ mod tests {
             }],
             None,
         );
-        let nontoken = typed(vec![FilterProp::NonToken], None);
         let tapped = typed(vec![FilterProp::Tapped], None);
+        let legendary = typed(
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }],
+            None,
+        );
+        for unsupported in [&tapped, &legendary] {
+            assert!(!ledger_filter_is_evaluable(unsupported));
+            assert!(!battlefield_entry_matches_filter(
+                &record,
+                unsupported,
+                player,
+                &[],
+                Some(source_id)
+            ));
+        }
         assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
         assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
             filters: vec![bare.clone(), green]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
-            filters: vec![bare.clone(), nontoken]
+            filters: vec![bare.clone(), tapped.clone()]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
             filters: vec![bare.clone(), tapped]

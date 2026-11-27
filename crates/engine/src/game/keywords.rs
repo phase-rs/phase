@@ -981,25 +981,39 @@ pub fn protection_prevents_from_with_source_name(
     source: Option<&GameObject>,
     source_name: Option<&str>,
 ) -> bool {
-    for pt in protection_qualities(target) {
-        match pt {
-            ProtectionTarget::ChosenCardName => {
-                if target.chosen_card_name().is_some_and(|chosen| {
-                    crate::game::filter::source_has_chosen_name(source, source_name, chosen)
-                }) {
-                    return true;
-                }
-            }
-            _ => {
-                if let Some(source_obj) = source {
-                    if source_matches_protection_target(pt, target, source_obj) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    protection_prevents_from_source(
+        target,
+        source.map_or(ProtectionSourceRef::NameOnly, ProtectionSourceRef::Live),
+        source_name,
+        None,
+    )
+}
+
+/// CR 608.2b + CR 702.16b: a departed source checks protection with its
+/// characteristics at exit. CR 702.16k checks the controller of the targeting
+/// ability when supplied, independently of those characteristics.
+pub(crate) fn protection_prevents_from_source(
+    target: &GameObject,
+    source: ProtectionSourceRef<'_>,
+    source_name: Option<&str>,
+    stack_ability_controller: Option<PlayerId>,
+) -> bool {
+    let name = match source {
+        ProtectionSourceRef::Lki(lki) => Some(lki.name.as_str()),
+        _ => source_name,
+    };
+    let controller = stack_ability_controller.or_else(|| source.controller());
+    let characteristics = (!matches!(source, ProtectionSourceRef::NameOnly)).then_some(source);
+    protection_qualities(target).any(|quality| {
+        matching_protection_quality_with_controller(
+            quality,
+            ProtectionBearer::Object(target),
+            characteristics,
+            name,
+            controller,
+        )
+        .is_some()
+    })
 }
 
 /// CR 702.16: The bearer a protection quality is evaluated for. Object
@@ -1070,21 +1084,11 @@ impl ProtectionSourceRef<'_> {
     }
 }
 
-/// CR 400.7 + CR 608.2h: the source a damage event's protection matching
-/// reads — the single live-or-exit authority shared by the object-recipient
-/// collector (`replacement::find_applicable_replacements`) and the
-/// player-recipient collector (`static_abilities`), so the two paths can
-/// never disagree about which incarnation shelters a recipient.
-///
-/// The live object answers only while it is still the event's incarnation: a
-/// later object under the id (a Clone back in the graveyard, a flickered
-/// permanent) is a different object and must not supply characteristics.
-/// Otherwise that incarnation's exit last-known information answers (CR
-/// 608.2h: "its last known information is used"); with no surviving exit
-/// record the read is name-only and characteristic arms fail closed. Events
-/// that predate the incarnation field (legacy saves, synthetic events) keep
-/// the legacy live-first read with the broad by-id LKI cache.
-pub fn damage_protection_source(
+/// CR 400.7 + CR 608.2b + CR 608.2h: characteristics for protection from
+/// a source. Read the same incarnation live, or its exact exit record when
+/// it has left. Damage events without an incarnation retain their legacy
+/// live-first lookup. Equip supplies the incarnation captured at activation.
+pub fn protection_source(
     state: &GameState,
     source: Option<ObjectId>,
     incarnation: Option<u64>,
@@ -1174,31 +1178,49 @@ pub fn matching_protection_quality(
     source: ProtectionSourceRef<'_>,
     source_name: Option<&str>,
 ) -> Option<MatchedProtectionQuality> {
-    // CR 709.4b: A split source off the stack has the combined colors of both
-    // halves; on the stack (the usual protection-source case) it is the chosen
-    // half. `effective_colors` no-ops for single-face and on-stack sources.
-    let source_colors = source.colors();
+    matching_protection_quality_with_controller(
+        protection,
+        bearer,
+        Some(source),
+        source_name,
+        source.controller(),
+    )
+}
+
+// CR 702.16k: targeting can supply the stack ability's controller even when
+// its source changed controller or no source characteristics are available.
+fn matching_protection_quality_with_controller(
+    protection: &ProtectionTarget,
+    bearer: ProtectionBearer<'_>,
+    source: Option<ProtectionSourceRef<'_>>,
+    source_name: Option<&str>,
+    controller: Option<PlayerId>,
+) -> Option<MatchedProtectionQuality> {
     let protected = bearer.object();
     match protection {
-        ProtectionTarget::Color(color) => source_colors
+        ProtectionTarget::Color(color) => source?
+            .colors()
             .contains(color)
             .then_some(MatchedProtectionQuality::Color(*color)),
         ProtectionTarget::CardType(type_name) => {
-            matching_card_type_quality(source.core_types(), source.subtypes(), type_name)
+            matching_card_type_quality(source?.core_types(), source?.subtypes(), type_name)
         }
         ProtectionTarget::Quality(quality) => {
-            matching_colorlessness_quality(&source_colors, quality)
+            matching_colorlessness_quality(&source?.colors(), quality)
         }
         ProtectionTarget::Multicolored => {
-            (source_colors.len() > 1).then_some(MatchedProtectionQuality::Multicolored)
+            (source?.colors().len() > 1).then_some(MatchedProtectionQuality::Multicolored)
         }
         // CR 702.16 + CR 105.4: the chosen color is a property of the protected
         // permanent; players carry no chosen attributes, so this arm is inert
         // for a player bearer.
-        ProtectionTarget::ChosenColor => protected
-            .and_then(|object| object.chosen_color())
-            .filter(|color| source_colors.contains(color))
-            .map(MatchedProtectionQuality::Color),
+        ProtectionTarget::ChosenColor => {
+            let color = protected?.chosen_color()?;
+            source?
+                .colors()
+                .contains(&color)
+                .then_some(MatchedProtectionQuality::Color(color))
+        }
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
@@ -1208,34 +1230,37 @@ pub fn matching_protection_quality(
             .and_then(|object| object.chosen_card_type())
             .and_then(|ct| ct.protection_quality_str())
             .and_then(|quality| {
-                matching_card_type_quality(source.core_types(), source.subtypes(), quality)
+                matching_card_type_quality(source?.core_types(), source?.subtypes(), quality)
             }),
         // CR 702.16a + CR 201.2: "Protection from the chosen card
         // name" — resolved from the protected permanent's own chosen card name.
         ProtectionTarget::ChosenCardName => protected
             .and_then(|object| object.chosen_card_name())
             .filter(|name| {
-                crate::game::filter::source_has_chosen_name(source.live(), source_name, name)
+                crate::game::filter::source_has_chosen_name(
+                    source.as_ref().and_then(ProtectionSourceRef::live),
+                    source_name,
+                    name,
+                )
             })
             .map(|name| MatchedProtectionQuality::ChosenName(fnv1a_64(name.as_bytes()))),
         // CR 702.16k: Resolve "the chosen player" from the protected
-        // permanent's persisted choice. Protection covers objects that player
-        // controls and objects they own that no other player controls; CR
-        // 109.4 + CR 108.4a make controller-or-owner the shared authority.
+        // permanent's persisted choice and the controller for this interaction.
         ProtectionTarget::ChosenPlayer => protected
             .and_then(|object| object.chosen_player())
-            .filter(|player| source.controller().is_some_and(|c| c == *player))
+            .filter(|player| controller == Some(*player))
             .map(MatchedProtectionQuality::Player),
         // CR 702.16j: "Protection from everything" — protection from each object
         // regardless of the source's characteristic values.
-        ProtectionTarget::Everything => Some(MatchedProtectionQuality::Everything),
+        ProtectionTarget::Everything => (source.is_some() || controller.is_some())
+            .then_some(MatchedProtectionQuality::Everything),
         // CR 702.16a + CR 202.3: Filter-based protection — the source matches if
         // it satisfies every FilterProp in the typed filter. Only supports
         // object-intrinsic properties (Cmc, HasColor, PowerLE/GE, etc.) that can
         // be evaluated from the source alone without game state. A departed
         // source answers from its exact last-known mana value (CR 608.2h); a
         // source with no known value fails this arm closed.
-        ProtectionTarget::Filter(filter) => match &source {
+        ProtectionTarget::Filter(filter) => match source? {
             ProtectionSourceRef::Live(object) => {
                 matching_filter_fingerprint(object.effective_mana_value(), filter)
             }
@@ -1252,7 +1277,7 @@ pub fn matching_protection_quality(
         // references with no static context fail closed, as does a source
         // with no known controller.
         ProtectionTarget::FromPlayer(scope) => {
-            let controller = source.controller()?;
+            let controller = controller?;
             match scope {
                 crate::types::ability::ControllerRef::Opponent => {
                     (controller != bearer.controller()).then_some(
@@ -1288,33 +1313,46 @@ pub fn matching_protection_quality(
 
 /// CR 702.11d: Check if a source matches a `HexproofFilter` ("hexproof from
 /// [quality]"). Bearer-independent — it reads only the source — so the object
-/// path (`targeting::hexproof_filter_matches`) and the player path
+/// path (`targeting`) and the player path
 /// (`static_abilities::player_has_hexproof_from`) share it.
 pub fn source_matches_hexproof_filter(
     filter: &crate::types::keywords::HexproofFilter,
     source: &GameObject,
 ) -> bool {
-    // CR 709.4b: A split source has its chosen-half colors on the stack (the
-    // usual hexproof-source case) and its combined colors off the stack; no-op
-    // for single-face and on-stack sources.
-    let source_colors = source.effective_colors();
+    source_ref_matches_hexproof_filter(filter, ProtectionSourceRef::Live(source))
+}
+
+pub(crate) fn source_ref_matches_hexproof_filter(
+    filter: &crate::types::keywords::HexproofFilter,
+    source: ProtectionSourceRef<'_>,
+) -> bool {
+    if matches!(source, ProtectionSourceRef::NameOnly) {
+        return false;
+    }
+    let source_colors = source.colors();
     match filter {
         crate::types::keywords::HexproofFilter::Color(color) => source_colors.contains(color),
         crate::types::keywords::HexproofFilter::CardType(type_name) => {
-            source_matches_card_type(source, type_name)
+            matching_card_type_quality(source.core_types(), source.subtypes(), type_name).is_some()
         }
         crate::types::keywords::HexproofFilter::Quality(quality) => {
-            source_matches_quality(source, quality)
+            matching_colorlessness_quality(&source_colors, quality).is_some()
         }
-        // CR 702.11d + CR 702.16 + CR 609.6: `ChosenColor` is normally
-        // resolved to a concrete `Color(_)` at layer application time (see
-        // `layers::apply_continuous_effect`). The intrinsic variant arm
-        // remains for cards whose printed text resolves "the chosen color" on
-        // the same object that chose it — mirrors
-        // `source_matches_protection_target` for `ProtectionTarget::ChosenColor`.
-        crate::types::keywords::HexproofFilter::ChosenColor => source
-            .chosen_color()
-            .is_some_and(|color| source_colors.contains(&color)),
+        crate::types::keywords::HexproofFilter::ChosenColor => {
+            let chosen = match source {
+                ProtectionSourceRef::Live(object) => object.chosen_color(),
+                ProtectionSourceRef::Lki(lki) => {
+                    lki.chosen_attributes
+                        .iter()
+                        .find_map(|choice| match choice {
+                            crate::types::ability::ChosenAttribute::Color(color) => Some(*color),
+                            _ => None,
+                        })
+                }
+                ProtectionSourceRef::NameOnly => None,
+            };
+            chosen.is_some_and(|color| source_colors.contains(&color))
+        }
     }
 }
 
@@ -1652,6 +1690,15 @@ pub fn activate_ninjutsu(
     creature_to_return: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
+    // CR 702.61a + CR 702.61b: while a spell with split second is on the stack, players can't
+    // activate abilities that aren't mana abilities. CR 702.49a: ninjutsu (and every
+    // ninjutsu-family variant routed here) is an activated ability that isn't a mana ability.
+    if stack_has_split_second(state) {
+        return Err(
+            "Can't activate a Ninjutsu-family ability while a spell with split second is on the stack"
+                .to_string(),
+        );
+    }
     // CR 903.8: Commander tax applies to casting, not to ninjutsu activation.
     let p = &state.players[player.0 as usize];
     if !p.hand.contains(&ninjutsu_obj_id) && !state.command_zone.contains(&ninjutsu_obj_id) {

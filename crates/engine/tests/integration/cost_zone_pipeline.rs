@@ -1175,6 +1175,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .description("Prevent the staged mana cost move".to_string())]
     .into();
     state.pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
@@ -1182,6 +1183,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
             cant_regenerate: false,
             applied: Default::default(),
         },
+        token_substitute: None,
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
@@ -5654,6 +5656,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .description("Prevent the staged cost move".to_string())]
     .into();
     runner.state_mut().pending_replacement = Some(PendingReplacement {
+        damage_delivery_owner: None,
         settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
@@ -5661,6 +5664,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
             cant_regenerate: false,
             applied: Default::default(),
         },
+        token_substitute: None,
         sacrifice_provenance: None,
         candidates: vec![ReplacementId { source, index: 0 }],
         search_found_candidates: Vec::new(),
@@ -14214,7 +14218,7 @@ fn targeted_sacrifice_reparks_replacement_before_terminal_effect_resolved() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Any,
-            count: QuantityExpr::Fixed { value: 2 },
+            count: QuantityExpr::Fixed { value: 2 }.into(),
             min_count: 0,
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
@@ -14314,7 +14318,7 @@ fn mandatory_all_sacrifice_completes_synchronously() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 2 },
+            count: QuantityExpr::Fixed { value: 2 }.into(),
             min_count: 0,
         },
         vec![],
@@ -14368,7 +14372,7 @@ fn effect_zone_sacrifice_replacement_preserves_tracked_set_and_tail() {
     let ability = ResolvedAbility::new(
         Effect::Sacrifice {
             target: TargetFilter::Typed(TypedFilter::creature()),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         },
         vec![],

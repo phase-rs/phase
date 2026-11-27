@@ -245,6 +245,8 @@ fn spell_cast_observer_fires_once_per_event() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1434,6 +1436,8 @@ fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
         controller: PlayerId(0),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -1532,6 +1536,8 @@ fn veyran_does_not_double_opponent_cast_trigger() {
         controller: PlayerId(1),
         object_id: spell,
         cast_mana_value: None,
+        cast_mana_spent: None,
+        cast_incarnation: None,
     };
 
     process_triggers(&mut state, &[event]);
@@ -3068,6 +3074,7 @@ fn optional_draw_effect() -> Effect {
 /// than `Effect::Draw`, so it independently exercises the context-ref guard.
 fn optional_create_token_effect() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Sliver".into(),
         power: crate::types::ability::PtValue::Fixed(1),
         toughness: crate::types::ability::PtValue::Fixed(1),
@@ -3096,7 +3103,7 @@ fn optional_create_token_effect() -> Effect {
 fn optional_sacrifice_effect() -> Effect {
     Effect::Sacrifice {
         target: TargetFilter::Typed(TypedFilter::creature()),
-        count: QuantityExpr::Fixed { value: 1 },
+        count: QuantityExpr::Fixed { value: 1 }.into(),
         min_count: 0,
     }
 }

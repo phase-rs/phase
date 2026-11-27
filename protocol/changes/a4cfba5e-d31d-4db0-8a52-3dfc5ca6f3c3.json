@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SpellContext carries the preceding damage instruction's typed direct result (CR 608.2c and CR 614.9) and a defaulted node-local damage delivery owner. Defaulted owner fields on suspended delivery carriers and a state-local monotone counter link resumed producers to the exact waiting result. A legacy record without identity preserves already accumulated values and cannot receive new contributions by position. Older peers discard these links and cannot guarantee correct damage attribution after a pause."
+}

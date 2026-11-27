@@ -6194,7 +6194,9 @@ impl ResolutionStack {
 /// ChoiceSettled stages. Earlier readers would silently drop those stages on
 /// the existing FinishCopyTargetChoiceEntry tag, so they must refuse this wire.
 /// Version 15 retains as-enters dice instructions and parked entry custody.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 15;
+/// Version 16 makes per-batch token-batch `applied` sets authoritative; v15
+/// payloads migrate the event shared set into key-less appended batches.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 16;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -6246,6 +6248,11 @@ const LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION: u64 = 13;
 
 /// Last writer without an explicit prospective-entrant list on logical-zone owners.
 const LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION: u64 = 14;
+
+/// Last writer whose compound token parks carried only the event shared
+/// `applied` set: their appended batches predate the per-batch key, so the
+/// reader copies the event set into each key-less batch.
+const LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION: u64 = 15;
 
 /// Bound random-result branches identify their v11 format, not unrelated
 /// features added to later full-state resolution versions.
@@ -7018,6 +7025,49 @@ fn migrate_legacy_prospective_entrants(value: &mut Value, version: u64) {
     }
 }
 
+/// Pre-v16 compound token parks recorded only the event shared `applied` set:
+/// the released writer never emitted the per-batch key, stamping every batch
+/// view with the shared set instead. Copy the event-level set into each
+/// appended batch that lacks the key (CR 614.5: the shared set already WAS
+/// every batch's set). Batches carrying the key — including malformed values —
+/// stay untouched so the strict typed decoder validates them.
+fn migrate_legacy_token_batch_applied_sets(value: &mut Value, version: u64) {
+    if version > LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION {
+        return;
+    }
+    let Some(create_token) = value
+        .get_mut("pending_replacement")
+        .and_then(|pending| pending.get_mut("proposed"))
+        .and_then(|proposed| proposed.get_mut("CreateToken"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let event_applied = match create_token.get("applied") {
+        None => Vec::new(),
+        Some(Value::Array(keys)) => keys.clone(),
+        // A malformed event set is refused by the strict typed decode; leave
+        // the batches exactly as saved rather than filling from it.
+        Some(_) => return,
+    };
+    let Some(batches) = create_token
+        .get_mut("appended")
+        .and_then(Value::as_array_mut)
+        .filter(|batches| !batches.is_empty())
+    else {
+        return;
+    };
+    for batch in batches {
+        let Some(batch) = batch.as_object_mut() else {
+            continue;
+        };
+        if batch.contains_key("applied") {
+            continue;
+        }
+        batch.insert("applied".to_string(), Value::Array(event_applied.clone()));
+    }
+}
+
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
 /// payload. The only place in the engine permitted to infer a wire version.
 ///
@@ -7448,6 +7498,7 @@ impl ResolutionStateWire {
             | LEGACY_UNCARRIED_WITH_ENTRY_EFFECT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION
             | 14
+            | LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION
                 if version <= latest_supported_version =>
             {
@@ -7503,6 +7554,7 @@ impl ResolutionStateWire {
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         migrate_legacy_change_zone_member_entries(&mut value, version)?;
         migrate_legacy_change_zone_performers(&mut value, version);
+        migrate_legacy_token_batch_applied_sets(&mut value, version);
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -7784,6 +7836,7 @@ impl ResolutionStateWire {
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
+                crate::types::game_state::normalize_damage_delivery_owners(&mut legacy)?;
                 let published = legacy.pending_replacement.is_some()
                     || !matches!(legacy.waiting_for, WaitingFor::Priority { .. });
                 legacy
@@ -7854,6 +7907,7 @@ impl ResolutionStateWire {
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(
                     &mut projected,
                 )?;
+                crate::types::game_state::normalize_damage_delivery_owners(&mut projected)?;
                 let canonical = canonicalize_legacy_resolution_state(&projected)?;
                 if canonical != frames {
                     return Err(
@@ -7963,6 +8017,7 @@ fn migrate_legacy_counter_removal_replacement_pause(state: &mut GameState) {
                 | ProposedEvent::MoveCounter { .. }
                 | ProposedEvent::CreateToken { .. }
                 | ProposedEvent::TokenEntry { .. }
+                | ProposedEvent::OutsideGameCardEntry { .. }
                 | ProposedEvent::Discard { .. }
                 | ProposedEvent::Tap { .. }
                 | ProposedEvent::Untap { .. }
@@ -8899,6 +8954,7 @@ mod tests {
         ReplacementDefinition, SpellContext, TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
+    use crate::types::game_state::replacement_library_placement_wire_tests::state_with_pending;
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput, GameRng,
         GameState, OfferedBatchCustody, PendingBatchDeliveries, PendingChooseOneOf,
@@ -8918,7 +8974,7 @@ mod tests {
         CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
     };
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{EtbTapState, Zone};
     use std::collections::VecDeque;
@@ -13204,6 +13260,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Destroy {
                 object_id: bear,
@@ -13211,6 +13268,7 @@ mod tests {
                 cant_regenerate: false,
                 applied: HashSet::new(),
             },
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: bear,
@@ -13706,7 +13764,7 @@ mod tests {
     fn current_logical_zone_owners_require_prospective_entrants() {
         for batch in [false, true] {
             let mut wire = logical_zone_owner_wire(batch);
-            assert_eq!(wire["resolution_state_version"], Value::from(15));
+            assert_eq!(wire["resolution_state_version"], Value::from(16));
             serde_json::from_value::<ResolutionStateWire>(wire.clone())
                 .expect("reach: the complete current owner restores");
             logical_zone_owner_group(&mut wire, batch).remove("prospective_entrants");
@@ -13731,6 +13789,569 @@ mod tests {
                 assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
             }
         }
+    }
+
+    /// A decode-valid `TokenSpec` payload for migration fixtures: only the
+    /// required keys, since every consumer here reads `applied` sets.
+    fn legacy_token_spec_json(name: &str) -> Value {
+        serde_json::json!({
+            "characteristics": {
+                "display_name": name,
+                "power": 1,
+                "toughness": 1,
+                "core_types": ["Creature"],
+                "subtypes": [name],
+                "supertypes": [],
+                "colors": ["White"],
+                "keywords": [],
+            },
+            "script_name": name,
+            "static_abilities": [],
+            "enter_with_counters": [],
+            "tapped": false,
+            "enters_attacking": false,
+            "sacrifice_at": null,
+            "source_id": 7,
+            "controller": 0,
+        })
+    }
+
+    fn legacy_applied_key_json(source: u64, index: u64) -> Value {
+        serde_json::to_value(AppliedReplacementKey::object(ObjectId(source), index))
+            .expect("an applied key serializes")
+    }
+
+    /// A legacy compound `CreateToken` proposal: the event shared set plus one
+    /// appended payload per `batches` entry (`(name, owner, applied)`, where a
+    /// `None` applied omits the key exactly as the released writer did).
+    fn legacy_compound_proposed_json(
+        event_applied: Option<Value>,
+        batches: Vec<(&str, u8, Option<Value>)>,
+    ) -> Value {
+        let mut create_token = serde_json::Map::new();
+        create_token.insert("owner".to_string(), Value::from(0));
+        create_token.insert("spec".to_string(), legacy_token_spec_json("Soldier"));
+        create_token.insert("count".to_string(), Value::from(2));
+        if let Some(applied) = event_applied {
+            create_token.insert("applied".to_string(), applied);
+        }
+        let appended = batches
+            .into_iter()
+            .map(|(name, owner, applied)| {
+                let mut batch = serde_json::Map::new();
+                batch.insert("owner".to_string(), Value::from(owner));
+                batch.insert("spec".to_string(), legacy_token_spec_json(name));
+                batch.insert("count".to_string(), Value::from(2));
+                if let Some(applied) = applied {
+                    batch.insert("applied".to_string(), applied);
+                }
+                Value::Object(batch)
+            })
+            .collect::<Vec<_>>();
+        create_token.insert("appended".to_string(), Value::Array(appended));
+        let mut proposed = serde_json::Map::new();
+        proposed.insert("CreateToken".to_string(), Value::Object(create_token));
+        Value::Object(proposed)
+    }
+
+    /// A current wire parked on a replacement choice whose proposal is
+    /// `proposed`, stamped with `version`. Prompt and candidates come from the
+    /// shared pending fixture; only the proposal is replaced.
+    fn legacy_compound_wire(proposed: Value, version: u64) -> Value {
+        let mut wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state_with_pending()))
+                .expect("a parked replacement serializes");
+        wire["pending_replacement"]["proposed"] = proposed;
+        wire["resolution_state_version"] = Value::from(version);
+        wire
+    }
+
+    fn restored_pending_create_token(restored: &ResolutionStateWire) -> Value {
+        serde_json::to_value(restored).expect("the restored park writes")["pending_replacement"]
+            ["proposed"]["CreateToken"]
+            .clone()
+    }
+
+    #[test]
+    fn legacy_compound_token_batches_inherit_the_event_shared_applied_set() {
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        let wire = legacy_compound_wire(
+            legacy_compound_proposed_json(Some(event_applied.clone()), vec![("Squirrel", 0, None)]),
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a v15 compound park restores");
+        assert_eq!(
+            restored_pending_create_token(&restored)["appended"][0]["applied"],
+            event_applied,
+            "the key-less batch inherits the event shared set (CR 614.5)"
+        );
+    }
+
+    #[test]
+    fn compound_token_batches_with_an_applied_key_are_untouched() {
+        // Multi-authority hostile: the first batch carries its own set
+        // (current-writer authority) while its sibling omits the key (legacy
+        // authority) — each keeps/fills independently.
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        let own_set = Value::Array(vec![legacy_applied_key_json(11, 3)]);
+        let wire = legacy_compound_wire(
+            legacy_compound_proposed_json(
+                Some(event_applied.clone()),
+                vec![("Squirrel", 0, Some(own_set.clone())), ("Food", 0, None)],
+            ),
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a v15 mixed compound park restores");
+        let create_token = restored_pending_create_token(&restored);
+        assert_eq!(
+            create_token["appended"][0]["applied"], own_set,
+            "a present key keeps its own set"
+        );
+        assert_eq!(
+            create_token["appended"][1]["applied"], event_applied,
+            "the key-less sibling still inherits the event set"
+        );
+    }
+
+    #[test]
+    fn legacy_compound_token_batch_migration_is_idempotent() {
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        let mut value = serde_json::json!({
+            "pending_replacement": {
+                "proposed": legacy_compound_proposed_json(
+                    Some(event_applied),
+                    vec![("Squirrel", 0, None)],
+                ),
+            },
+        });
+        migrate_legacy_token_batch_applied_sets(
+            &mut value,
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        let once = value.clone();
+        assert!(
+            once["pending_replacement"]["proposed"]["CreateToken"]["appended"][0]
+                .get("applied")
+                .is_some(),
+            "reach: the first run fills the key-less batch"
+        );
+        migrate_legacy_token_batch_applied_sets(
+            &mut value,
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        assert_eq!(value, once, "the second run is a fixed point");
+    }
+
+    #[test]
+    fn legacy_compound_token_batches_fill_empty_when_the_event_set_is_absent() {
+        // The migration itself never refuses: an absent event set fills empty.
+        // (The strict typed decode still requires the event key; this row pins
+        // the migration's half only.)
+        let mut value = serde_json::json!({
+            "pending_replacement": {
+                "proposed": legacy_compound_proposed_json(None, vec![("Squirrel", 0, None)]),
+            },
+        });
+        migrate_legacy_token_batch_applied_sets(
+            &mut value,
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        assert_eq!(
+            value["pending_replacement"]["proposed"]["CreateToken"]["appended"][0]["applied"],
+            serde_json::json!([]),
+        );
+    }
+
+    #[test]
+    fn legacy_compound_token_batches_do_not_default_malformed_applied_keys() {
+        for malformed in [Value::Null, Value::Bool(false)] {
+            let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+            let wire = legacy_compound_wire(
+                legacy_compound_proposed_json(
+                    Some(event_applied),
+                    vec![("Squirrel", 0, Some(malformed))],
+                ),
+                LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+            );
+            // A fill would make this decode; the error proves the present key
+            // — however malformed — was left for the strict decoder to refuse.
+            assert!(
+                serde_json::from_value::<ResolutionStateWire>(wire).is_err(),
+                "a malformed present key is refused, not defaulted"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_token_batch_migration_skips_non_compound_parks() {
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        // A non-compound CreateToken (empty appended) restores without batches.
+        let wire = legacy_compound_wire(
+            legacy_compound_proposed_json(Some(event_applied.clone()), vec![]),
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        let create_token = restored_pending_create_token(
+            &serde_json::from_value::<ResolutionStateWire>(wire)
+                .expect("a v15 non-compound park restores"),
+        );
+        assert!(
+            create_token
+                .get("appended")
+                .is_none_or(|batches| { batches.as_array().is_some_and(Vec::is_empty) }),
+            "no batches are invented"
+        );
+        // A missing appended key decodes through its serde default.
+        let mut proposed =
+            legacy_compound_proposed_json(Some(event_applied.clone()), vec![("Squirrel", 0, None)]);
+        proposed["CreateToken"]
+            .as_object_mut()
+            .expect("a CreateToken object")
+            .remove("appended");
+        let wire = legacy_compound_wire(
+            proposed,
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a v15 park without appended restores");
+        // A non-CreateToken proposal is not a compound park.
+        let wire = legacy_compound_wire(
+            serde_json::json!({"Destroy": {
+                "object_id": 7,
+                "source": null,
+                "cant_regenerate": false,
+                "applied": [],
+            }}),
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        serde_json::from_value::<ResolutionStateWire>(wire).expect("a v15 Destroy park restores");
+        // A null or absent pending_replacement has no root to visit.
+        for null_pending in [true, false] {
+            let mut wire = legacy_compound_wire(
+                legacy_compound_proposed_json(Some(event_applied.clone()), vec![]),
+                LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+            );
+            if null_pending {
+                wire["pending_replacement"] = Value::Null;
+            } else {
+                wire.as_object_mut()
+                    .expect("a wire object")
+                    .remove("pending_replacement");
+            }
+            serde_json::from_value::<ResolutionStateWire>(wire)
+                .expect("a v15 wire without a park restores");
+        }
+    }
+
+    #[test]
+    fn the_current_wire_declares_16_and_v15_still_decodes() {
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            GameState::new_two_player(42),
+        ))
+        .expect("wire serializes");
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 16);
+        assert_eq!(
+            wire["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        let mut legacy = wire.clone();
+        legacy["resolution_state_version"] =
+            Value::from(LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION);
+        serde_json::from_value::<ResolutionStateWire>(legacy)
+            .expect("a declared-15 payload still decodes");
+        let mut future = wire;
+        future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
+        let error = serde_json::from_value::<ResolutionStateWire>(future)
+            .expect_err("an unknown version is refused")
+            .to_string();
+        assert!(
+            error.contains("unsupported resolution_state_version"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn decode_mode_for_version_admits_15_as_v4_and_refuses_17() {
+        assert!(matches!(
+            ResolutionStateWire::decode_mode_for_version(
+                LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+                RESOLUTION_STATE_WIRE_VERSION
+            ),
+            Ok(GameStateDecodeMode::ResolutionWireV4)
+        ));
+        let error = ResolutionStateWire::decode_mode_for_version(
+            RESOLUTION_STATE_WIRE_VERSION + 1,
+            RESOLUTION_STATE_WIRE_VERSION,
+        )
+        .expect_err("17 is refused");
+        assert!(
+            error.contains("unsupported resolution_state_version"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn current_compound_parks_with_empty_batch_sets_are_not_rewritten() {
+        // The discriminator protects current data: a v16 payload whose batches
+        // genuinely omit the key (empty sets) keeps them absent.
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        let wire = legacy_compound_wire(
+            legacy_compound_proposed_json(Some(event_applied), vec![("Squirrel", 0, None)]),
+            RESOLUTION_STATE_WIRE_VERSION,
+        );
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a current compound park restores");
+        assert!(
+            restored_pending_create_token(&restored)["appended"][0]
+                .get("applied")
+                .is_none(),
+            "the v16 gate leaves genuinely-empty batch sets absent"
+        );
+    }
+
+    /// A canonical `ZoneChange` event payload: built from the typed
+    /// constructor so the writer's re-emitted default keys are already
+    /// present and byte-identity assertions hold.
+    fn legacy_zone_change_json(object_id: u64) -> Value {
+        serde_json::to_value(ProposedEvent::zone_change(
+            ObjectId(object_id),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        ))
+        .expect("a zone change serializes")
+    }
+
+    #[test]
+    fn sibling_proposal_carriers_pass_the_token_batch_migration_byte_identical() {
+        // Boundedness: the walk visits exactly `pending_replacement.proposed`.
+        // Every other carrier of a ProposedEvent/PendingReplacement below (the
+        // plan's carrier census) is byte-identical after a v15 decode, while
+        // the compound root itself is migrated (the paired positive control).
+        // PendingReplacement WRAPPERS are asserted at their `proposed` subtree:
+        // the writer emits defaulted keys (`is_optional: false`) the legacy
+        // fixture omits, a pre-existing normalization unrelated to this fix.
+        let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
+        let mut wire = legacy_compound_wire(
+            legacy_compound_proposed_json(Some(event_applied.clone()), vec![("Squirrel", 0, None)]),
+            LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
+        );
+        // Post-accept substitute parks carry the compound event at the delivery
+        // boundary too; the migration must not touch it.
+        wire["pending_replacement"]["delivery_boundary"] =
+            serde_json::json!({"Draw": {"player_id": 0, "count": 1, "applied": []}});
+        // DeferredLifeCostResume::PayAmount.pending_entry: entry proposals only.
+        wire["pending_deferred_life_cost_resume"] = serde_json::json!({
+            "type": "PayAmount",
+            "player": 0,
+            "total": 2,
+            "resume_at_resolution_depth": 0,
+            "pending_entry": {
+                "proposed": {"Draw": {"player_id": 0, "count": 1, "applied": []}},
+                "candidates": [],
+                "depth": 0,
+            },
+        });
+        // ReplacementMayCost re-park outer: zone-change accepts only.
+        wire["pending_cost_move_resume"] = serde_json::json!({
+            "ReplacementMayCostInnerChoice": {
+                "outer_replacement": {
+                    "proposed": legacy_zone_change_json(7),
+                    "candidates": [],
+                    "depth": 0,
+                },
+            },
+        });
+        // Combat batch: an Unstarted Damage leg plus a Phase C survivor leg.
+        let combat_ctx = serde_json::json!({
+            "source_id": 7,
+            "controller": 0,
+            "source_is_creature": true,
+            "has_deathtouch": false,
+            "has_lifelink": false,
+            "has_wither": false,
+            "has_infect": false,
+            "combat_damage_poison": 0,
+        });
+        wire["pending_combat_lifelink"] = serde_json::json!({
+            "remaining": [],
+            "batch_events": [],
+            "damage_to_players": [],
+            "prevention_tally": [],
+            "sub_step": "Regular",
+            "replacement": {
+                "entries": [
+                    {
+                        "context": combat_ctx,
+                        "source_is_commander": false,
+                        "target": {"Player": 1},
+                        "lifelink_controller": null,
+                    },
+                ],
+                "resolved": [
+                    {"type": "Unstarted", "data": {
+                        "Damage": {
+                            "source_id": 7,
+                            "target": {"Player": 1},
+                            "amount": 2,
+                            "is_combat": true,
+                            "applied": [],
+                        },
+                    }},
+                ],
+            },
+            "phase_c_remnant": {
+                "remaining": [
+                    {
+                        "ctx": combat_ctx,
+                        "source_is_commander": false,
+                        "target": {"Player": 1},
+                        "survivor": {"Damage": {
+                            "source_id": 7,
+                            "target": {"Player": 1},
+                            "amount": 2,
+                            "is_combat": true,
+                            "applied": [],
+                        }},
+                    },
+                ],
+                "lifelink_by_source": [],
+                "combat_damage_to_players": [],
+                "source_incarnations": [],
+            },
+        });
+        // A BatchDelivery frame carrying a paused zone-change delivery plus two
+        // staged members: a consulting member holding a replacement decision
+        // and an approved member carrying its approved event. A consulting
+        // member cannot carry an approval, and the pause captures the asking
+        // member, so the held decision (with its own boundary) and the
+        // approval live on separate members.
+        let mut frame = serde_json::to_value(batch_delivery_frame(55)).expect("a frame serializes");
+        frame["data"]["paused_current"] = serde_json::json!({
+            "member": {"object_id": 8, "incarnation": 1},
+            "expected_event": legacy_zone_change_json(8),
+            "delivery_events": [],
+            "terminal_completion": null,
+            "count": "NeedsCount",
+        });
+        frame["data"]["attempted"] = serde_json::json!([7, 8]);
+        frame["data"]["staged"] = serde_json::json!({
+            "stage": "Approving",
+            "members": [
+                {
+                    "announcement_index": 0,
+                    "request": {
+                        "object_id": 7,
+                        "destination": "Graveyard",
+                        "cause": {"type": "state_based_action"},
+                    },
+                    "identity": {"object_id": 7, "incarnation": 1},
+                    "owner": 0,
+                    "state": "InnerConsulting",
+                    "held_decision": {
+                        "pending": {
+                            "proposed": {"Draw": {"player_id": 0, "count": 1, "applied": []}},
+                            "candidates": [],
+                            "depth": 0,
+                        },
+                        "chooser": 0,
+                        "prompt": "Replacement",
+                        "boundary": {
+                            "member": {"object_id": 7, "incarnation": 1},
+                            "expected_event": legacy_zone_change_json(7),
+                            "delivery_events": [],
+                            "terminal_completion": null,
+                            "count": "NeedsCount",
+                        },
+                    },
+                },
+                {
+                    "announcement_index": 1,
+                    "request": {
+                        "object_id": 8,
+                        "destination": "Graveyard",
+                        "cause": {"type": "state_based_action"},
+                    },
+                    "identity": {"object_id": 8, "incarnation": 1},
+                    "owner": 0,
+                    "state": "Approved",
+                    "approved_event": legacy_zone_change_json(8),
+                },
+            ],
+            "cursor": 2,
+            "asking": {"object_id": 8, "incarnation": 1},
+            "arrangements": [],
+            "arrangement_cursor": 0,
+        });
+        wire["resolution_frames"]["frames"]
+            .as_array_mut()
+            .expect("a typed frame stack")
+            .push(frame);
+
+        let boundary = wire["pending_replacement"]["delivery_boundary"].clone();
+        let pending_entry =
+            wire["pending_deferred_life_cost_resume"]["pending_entry"]["proposed"].clone();
+        let outer = wire["pending_cost_move_resume"]["ReplacementMayCostInnerChoice"]
+            ["outer_replacement"]["proposed"]
+            .clone();
+        let combat_replacement = wire["pending_combat_lifelink"]["replacement"].clone();
+        let combat_remnant = wire["pending_combat_lifelink"]["phase_c_remnant"].clone();
+        let paused = wire["resolution_frames"]["frames"][0]["data"]["paused_current"].clone();
+        let staged_members =
+            wire["resolution_frames"]["frames"][0]["data"]["staged"]["members"].clone();
+        let approved = staged_members[1]["approved_event"].clone();
+        let held = staged_members[0]["held_decision"]["pending"]["proposed"].clone();
+        let held_boundary = staged_members[0]["held_decision"]["boundary"].clone();
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("a v15 wire with sibling carriers restores");
+        let rewritten = serde_json::to_value(restored).expect("the restored wire writes");
+        assert_eq!(
+            rewritten["pending_replacement"]["proposed"]["CreateToken"]["appended"][0]["applied"],
+            event_applied,
+            "reach: the compound root itself is migrated"
+        );
+        assert_eq!(
+            rewritten["pending_replacement"]["delivery_boundary"], boundary,
+            "delivery_boundary is untouched"
+        );
+        assert_eq!(
+            rewritten["pending_deferred_life_cost_resume"]["pending_entry"]["proposed"],
+            pending_entry,
+            "PayAmount.pending_entry is untouched"
+        );
+        assert_eq!(
+            rewritten["pending_cost_move_resume"]["ReplacementMayCostInnerChoice"]
+                ["outer_replacement"]["proposed"],
+            outer,
+            "the MayCost outer is untouched"
+        );
+        assert_eq!(
+            rewritten["pending_combat_lifelink"]["replacement"], combat_replacement,
+            "the combat Unstarted leg is untouched"
+        );
+        assert_eq!(
+            rewritten["pending_combat_lifelink"]["phase_c_remnant"], combat_remnant,
+            "the Phase C survivor leg is untouched"
+        );
+        let frame = &rewritten["resolution_frames"]["frames"][0]["data"];
+        assert_eq!(
+            frame["paused_current"], paused,
+            "paused_current is untouched"
+        );
+        assert_eq!(
+            frame["staged"]["members"][1]["approved_event"], approved,
+            "the staged approved_event is untouched"
+        );
+        assert_eq!(
+            frame["staged"]["members"][0]["held_decision"]["pending"]["proposed"], held,
+            "the staged held_decision is untouched"
+        );
+        assert_eq!(
+            frame["staged"]["members"][0]["held_decision"]["boundary"], held_boundary,
+            "the held decision's boundary is untouched"
+        );
     }
 
     #[test]

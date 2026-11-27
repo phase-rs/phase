@@ -82,9 +82,7 @@ impl AiDecisionContract {
     pub fn issue(state: &GameState, semantic_owner: PlayerId) -> Self {
         Self {
             semantic_owner,
-            authorized_actor: resolve_all_frozen_actor(state, semantic_owner).unwrap_or_else(
-                || turn_control::authorized_submitter_for_player(state, semantic_owner),
-            ),
+            authorized_actor: turn_control::contract_actor_for_owner(state, semantic_owner),
             state_revision: state.state_revision,
             // The engine's candidate enumerator is the authoritative finite
             // domain for this prompt. Combat and search continuations remain
@@ -109,9 +107,13 @@ impl AiDecisionContract {
     /// opaque proposal token (WASM/server), because a restored state resets its
     /// serialized revision.
     pub fn permits(&self, state: &GameState, actor: PlayerId, action: &GameAction) -> bool {
-        let semantic_owner_is_active = state
-            .waiting_for
-            .acting_players()
+        // CR 805.5a: the semantic owner is whoever owns this decision. On a
+        // shared-turn Priority window that is every living teammate — the
+        // window is parked on the representative, but any member may act —
+        // not just the single holder named by `acting_players`. Gating on
+        // the holder here rejected every AI teammate action, so the AI
+        // driver stopped with ApplyFailed and allies never acted.
+        let semantic_owner_is_active = turn_control::decision_owners(state)
             .contains(&self.semantic_owner)
             || matches!(
                 action,
@@ -165,22 +167,6 @@ impl AiDecisionContract {
                 .any(|candidate| candidate_action_matches(&candidate.action, action)),
         }
     }
-}
-
-fn resolve_all_frozen_actor(state: &GameState, representative: PlayerId) -> Option<PlayerId> {
-    let epoch = match &state.waiting_for {
-        WaitingFor::ResolveAllConsent { epoch, .. } | WaitingFor::ResolveAllReady { epoch } => {
-            *epoch
-        }
-        _ => return None,
-    };
-    turn_control::resolve_all_granted_submitter(state, epoch, representative).or_else(|| {
-        state
-            .resolve_all_consent_run
-            .as_ref()
-            .filter(|run| run.epoch == epoch)
-            .and_then(|run| run.authorized_submitter_for(representative))
-    })
 }
 
 pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) -> bool {
@@ -308,6 +294,7 @@ mod tests {
         ability::{Effect, ResolvedAbility},
         actions::GameAction,
         card_type::CoreType,
+        format::FormatConfig,
         game_state::{StackEntry, StackEntryKind, StackResolutionBudget, StackResolutionPolicy},
         identifiers::{CardId, ObjectId},
         player::PlayerId,
@@ -405,6 +392,54 @@ mod tests {
                 card_id: CardId(1),
             },
         ));
+    }
+
+    /// CR 805.5a: on a shared team turn parked on the representative, the
+    /// decision contract covers a non-representative teammate, so the AI
+    /// driver may act for them. Before the team-aware owner check, `permits`
+    /// required the semantic owner to be the single holder named by
+    /// `acting_players`, every AI ally action was rejected, and the driver
+    /// stopped with `ApplyFailed` — allies never acted.
+    #[test]
+    fn teammate_action_passes_decision_contract_on_shared_team_turn() {
+        let rep = PlayerId(0);
+        // 2HG teams are adjacent seat pairs: P1 is P0's teammate, while P2
+        // heads the opposing team.
+        let ally = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        let land = create_object(
+            &mut state,
+            CardId(1),
+            ally,
+            "Ally Land".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land)
+            .expect("created land must exist")
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state.players[1].hand.push_back(land);
+
+        let contract = AiDecisionContract::issue(&state, ally);
+        let issued = GameAction::PlayLand {
+            object_id: land,
+            card_id: CardId(1),
+        };
+        assert!(
+            contract.contains_action(&state, &issued),
+            "the ally's land must be enumerated on the shared turn"
+        );
+        assert!(
+            contract.permits(&state, ally, &issued),
+            "a teammate owns the shared-turn decision, not just the holder"
+        );
     }
 
     #[test]

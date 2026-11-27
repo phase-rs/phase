@@ -207,7 +207,7 @@ fn shipped_self_attached_role_cards_keep_their_role() {
         ),
     ] {
         if db.get_face_by_name(card).is_none() {
-            eprintln!("skipping: {card} is not in integration_cards.json.gz");
+            eprintln!("skipping: {card} is not in integration_cards/");
             continue;
         }
         let mut scenario = GameScenario::new();
@@ -262,9 +262,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
         return;
     };
     if db.get_face_by_name("Asinine Antics").is_none() {
-        eprintln!(
-            "skipping the shipped replay: Asinine Antics is not in integration_cards.json.gz"
-        );
+        eprintln!("skipping the shipped replay: Asinine Antics is not in integration_cards/");
         return;
     }
     let mut scenario = GameScenario::new();
@@ -288,6 +286,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
 
 fn role_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Monster Role".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -320,6 +319,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
 /// restriction the Aura has no stated player host and cannot legally enchant one.
 fn curse_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Selenia's Curse".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -666,7 +666,7 @@ fn selenias_curse_enchants_the_targeted_opponent() {
     };
     let card = "Selenia, the Cursed Heart";
     if db.get_face_by_name(card).is_none() {
-        eprintln!("skipping: {card} is not in integration_cards.json.gz");
+        eprintln!("skipping: {card} is not in integration_cards/");
         return;
     }
 

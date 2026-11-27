@@ -14,6 +14,8 @@ use crate::types::zones::Zone;
 use super::casting::{self, SpecialActionManaPayment};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 
+pub(super) const DOOR_NAME_SEPARATOR: &str = " // ";
+
 /// An engine-authored Room-door unlock announcement for Priority preflight.
 /// The Room identity and locked door stay private to the Room authority until
 /// the facade reconstructs the ordinary special-action primer.
@@ -39,38 +41,50 @@ impl PriorityUnlockRoomDoorAnnouncement {
     }
 }
 
-/// Enumerates the active holder's locked Room doors during the normal
-/// main-phase, empty-stack special-action window.
+/// Enumerates the holding team's locked Room doors during the normal
+/// main-phase, empty-stack special-action window: every living teammate's
+/// controlled doors on a shared-team window, otherwise the holder's.
+/// CR 805.5a: the preflight must see each member's doors, not just the
+/// holder's, or it wrongly reads a team window actionless past a teammate's
+/// unlock. The probe applies as the holder, so a teammate's door reads
+/// Indeterminate (fail-closed via the controller check in
+/// `validate_unlock_room_door`), never Actionable-by-the-wrong-seat.
 pub(in crate::game) fn priority_unlock_room_door_announcements(
     state: &GameState,
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityUnlockRoomDoorAnnouncement> {
-    let player = principal.semantic_holder();
-    if state.active_player != player
-        || !state.stack.is_empty()
-        || !matches!(
-            state.phase,
-            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-        )
-    {
-        return Vec::new();
-    }
-    state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|object_id| {
+    let holder = principal.semantic_holder();
+    let members = if super::topology::side_takes_shared_turn(state, holder) {
+        super::topology::team_members(state, holder)
+    } else {
+        vec![holder]
+    };
+    let mut out = Vec::new();
+    for player in members {
+        if !super::restrictions::is_sorcery_speed_window(state, player) {
+            continue;
+        }
+        out.extend(
             state
-                .objects
-                .get(object_id)
-                .is_some_and(|object| object.controller == player)
-        })
-        .flat_map(|object_id| {
-            eligible_doors(state, object_id, DoorLockOp::Unlock)
-                .into_iter()
-                .map(move |(_, door)| PriorityUnlockRoomDoorAnnouncement::new(object_id, door))
-        })
-        .collect()
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|object_id| {
+                    state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|object| object.controller == player)
+                })
+                .flat_map(|object_id| {
+                    eligible_doors(state, object_id, DoorLockOp::Unlock)
+                        .into_iter()
+                        .map(move |(_, door)| {
+                            PriorityUnlockRoomDoorAnnouncement::new(object_id, door)
+                        })
+                }),
+        );
+    }
+    out
 }
 
 /// CR 709.5 + CR 709.5a: does this type line have the two shared halves? The
@@ -79,7 +93,11 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
 /// printed-form reader `transform::stored_double_face`, cannot drift apart — they
 /// differ only in WHICH type line they hand it.
 pub(crate) fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
-    types.subtypes.iter().any(|s| s == "Room")
+    has_room_subtype(&types.subtypes)
+}
+
+pub(super) fn has_room_subtype(subtypes: &[String]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Room")
 }
 
 /// The object IS a Room right now — its current, post-copy card types. Every
@@ -315,6 +333,17 @@ pub(crate) fn effective_room_halves(
 pub(crate) fn door_gated_battlefield_name(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<String> {
+    let [left, right] = door_gated_battlefield_names(obj)?;
+    Some(match (left, right) {
+        (Some(left), Some(right)) => format!("{left}{DOOR_NAME_SEPARATOR}{right}"),
+        (Some(half), None) | (None, Some(half)) => half,
+        (None, None) => String::new(),
+    })
+}
+
+fn door_gated_battlefield_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[Option<String>; 2]> {
     if obj.zone != Zone::Battlefield || !is_room(obj) {
         return None;
     }
@@ -322,17 +351,27 @@ pub(crate) fn door_gated_battlefield_name(
     let unlocks = obj.room_unlocks.unwrap_or_default();
     let left = unlocks
         .is_unlocked(RoomDoor::Left)
-        .then_some(halves.left.name.as_str());
+        .then_some(halves.left.name);
     let right = halves
         .right
-        .as_ref()
         .filter(|_| unlocks.is_unlocked(RoomDoor::Right))
-        .map(|half| half.name.as_str());
-    Some(match (left, right) {
-        (Some(left), Some(right)) => format!("{left} // {right}"),
-        (Some(half), None) | (None, Some(half)) => half.to_string(),
-        (None, None) => String::new(),
-    })
+        .map(|half| half.name);
+    Some([left, right])
+}
+
+/// CR 201.2a + CR 709.5: Read two effective names from a fully unlocked
+/// Room. A name-changing effect may have replaced both with one name.
+pub(crate) fn effective_battlefield_door_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[String; 2]> {
+    if obj.face_down {
+        return None;
+    }
+    let [Some(left), Some(right)] = door_gated_battlefield_names(obj)? else {
+        return None;
+    };
+    let [left, right] = super::stickers::apply_name_stickers_to_room_doors(obj, [left, right]);
+    (obj.name == format!("{left}{DOOR_NAME_SEPARATOR}{right}")).then_some([left, right])
 }
 
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door
@@ -419,13 +458,10 @@ fn validate_unlock_room_door(
     object_id: ObjectId,
     door: RoomDoor,
 ) -> Result<crate::types::mana::ManaCost, EngineError> {
-    if state.active_player != player
-        || !matches!(
-            state.phase,
-            crate::types::phase::Phase::PreCombatMain | crate::types::phase::Phase::PostCombatMain
-        )
-        || !state.stack.is_empty()
-    {
+    // CR 709.5e + CR 805.5a: a main-phase, empty-stack window on the acting
+    // seat's team's turn — any living teammate of the active player, through
+    // the shared sorcery-speed authority, matching the candidate offer.
+    if !super::restrictions::is_sorcery_speed_window(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "Room doors can be unlocked only as a main-phase special action with an empty stack"
                 .to_string(),

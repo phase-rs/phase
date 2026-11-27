@@ -25,13 +25,14 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
-    effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
-    AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, InstructionJoin, LibraryPosition,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    effect_has_stack_target_declaration, effect_variant_name, AbilityCondition, AbilityCost,
+    AbilityDefinition, AbilityKind, AggregateFunction, CastFromZoneDriver, CastingPermission,
+    ChoiceType, ChosenGroupId, Comparator, ControllerRef, DamageChannel, DelayedTriggerCondition,
+    DigRestOrder, DigRestRemainder, DigSource, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, InstructionJoin, LibraryPosition, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality, SharedQualityRelation,
+    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2310,9 +2311,382 @@ fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
     )
 }
 
+/// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: retain a delayed source-zone
+/// intervening-if on the delayed payload only when every leaf in its Boolean
+/// tree is the source-zone predicate. Mixed trees must remain on the ordinary
+/// wrapper path, where the exhaustive condition bridge rejects unsupported
+/// source-zone semantics instead of checking them at the wrong time.
+fn is_delayed_source_zone_condition(condition: &StaticCondition) -> bool {
+    match condition {
+        StaticCondition::SourceInZone { .. } => true,
+        StaticCondition::Not { condition } => is_delayed_source_zone_condition(condition),
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
+            !conditions.is_empty() && conditions.iter().all(is_delayed_source_zone_condition)
+        }
+        StaticCondition::DevotionGE { .. }
+        | StaticCondition::IsPresent { .. }
+        | StaticCondition::ChosenColorIs { .. }
+        | StaticCondition::ChosenLabelIs { .. }
+        | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
+        | StaticCondition::HasMaxSpeed
+        | StaticCondition::SpeedGE { .. }
+        | StaticCondition::DayNightIs { .. }
+        | StaticCondition::HasCounters { .. }
+        | StaticCondition::CastVariantPaid { .. }
+        | StaticCondition::RecipientHasCounters { .. }
+        | StaticCondition::ClassLevelGE { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::IsDefendingPlayer { .. }
+        | StaticCondition::SourceAttackingAlone
+        | StaticCondition::SourceIsAttacking
+        | StaticCondition::SourceIsBlocking
+        | StaticCondition::SourceIsBlocked
+        | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
+        | StaticCondition::IsInitiative
+        | StaticCondition::NoMonarch
+        | StaticCondition::HasCityBlessing
+        | StaticCondition::HasEnduringStory
+        | StaticCondition::CompletedADungeon
+        | StaticCondition::WasStartingPlayer { .. }
+        | StaticCondition::SpellCastWithVariantThisTurn { .. }
+        | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
+        | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
+        | StaticCondition::UnlessPay { .. }
+        | StaticCondition::Unrecognized { .. }
+        | StaticCondition::DuringYourTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
+        | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
+        | StaticCondition::SourceEnteredThisTurn
+        | StaticCondition::SourceHasDealtDamage { .. }
+        | StaticCondition::SourceExertedThisTurn
+        | StaticCondition::WasCast { .. }
+        | StaticCondition::IsRingBearer
+        | StaticCondition::RingLevelAtLeast { .. }
+        | StaticCondition::ControlsCommander { .. }
+        | StaticCondition::SourceIsTapped
+        | StaticCondition::IsTapped { .. }
+        | StaticCondition::SourceIsFaceUp
+        | StaticCondition::SourceIsSaddled
+        | StaticCondition::SourceControllerEquals { .. }
+        | StaticCondition::SourceIsEquipped
+        | StaticCondition::SourceIsEnchanted
+        | StaticCondition::SourceIsMonstrous
+        | StaticCondition::SourceIsHarnessed
+        | StaticCondition::SourceAttachedToCreature
+        | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
+        | StaticCondition::RecipientMatchesFilter { .. }
+        | StaticCondition::RecipientAttackingOwnerTarget { .. }
+        | StaticCondition::SourceIsPaired
+        | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::AdditionalCostPaid
+        | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::None => false,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     assemble_effect_chain_with_provenance(ir).value
+}
+
+// CR 400.7j + CR 603.7c: on decline the optional move does not happen.
+// The delayed return follows the public-zone arrival of the preceding exile.
+fn optional_decline_exile_origin(
+    defs: &[AbilityDefinition],
+    arena: &Arena,
+    pending: ClauseId,
+    installer: &AbilityDefinition,
+) -> Option<Zone> {
+    let [.., exile, optional] = defs else {
+        return None;
+    };
+    let NodeProvenance {
+        origin: Some(exile_id),
+        role: NodeRole::Primary,
+    } = arena.prov_at(defs.len() - 2)?
+    else {
+        return None;
+    };
+    let NodeProvenance {
+        origin: Some(optional_id),
+        role: NodeRole::Primary,
+    } = arena.prov_at(defs.len() - 1)?
+    else {
+        return None;
+    };
+    if exile_id.0.checked_add(1) != Some(optional_id.0)
+        || optional_id.0.checked_add(1) != Some(pending.0)
+        || optional.sub_link != SubAbilityLink::SequentialSibling
+        || installer.sub_link != SubAbilityLink::SequentialSibling
+        || exile.optional
+        || exile.condition.is_some()
+        || exile.multi_target.is_some()
+        || exile.sub_ability.is_some()
+        || optional.sub_ability.is_some()
+        || optional.multi_target.is_some()
+        || optional.condition.is_some()
+    {
+        return None;
+    }
+    match exile.effect.as_ref() {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target,
+            ..
+        } if matches!(target, TargetFilter::Typed(_))
+            && effect_has_stack_target_declaration(&exile.effect) =>
+        {
+            Some(Zone::Exile)
+        }
+        Effect::StartYourEngines { .. }
+        | Effect::ChangeSpeed { .. }
+        | Effect::DealDamage { .. }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::Pump { .. }
+        | Effect::PairWith { .. }
+        | Effect::Destroy { .. }
+        | Effect::Regenerate { .. }
+        | Effect::RemoveAllDamage { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::Token { .. }
+        | Effect::GainLife { .. }
+        | Effect::LoseLife { .. }
+        | Effect::SetTapState { .. }
+        | Effect::RemoveCounter { .. }
+        | Effect::Sacrifice { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZone { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControl { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::Bounce { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::BecomeMonarch { .. }
+        | Effect::NoOp
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::ExileTopCardContest { .. }
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::PutCounter { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Shuffle { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::TargetOnly { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::NoteNumber { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::AbandonScheme
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::Exploit { .. }
+        | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::LoseAllPlayerCounters { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::ExtraTurn { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextTurn { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::HordePlayCard { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::SetLifeTotal { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::ExchangeLifeTotals { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseOneOf { .. }
+        | Effect::SetSchemeInMotion { .. }
+        | Effect::Unimplemented { .. } => None,
+    }
 }
 
 pub(crate) fn assemble_effect_chain_with_provenance(
@@ -3577,6 +3951,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             def.optional_player = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
+            let has_delayed_copy_cleanup =
+                matches!(def.effect.as_ref(), Effect::CopyTokenOf { .. })
+                    && matches!(ir.clauses.as_slice(), [_, cleanup]
+                    if cleanup.prefix_delayed_condition.is_some()
+                        && cleanup.source.fragment().is_some_and(|fragment| {
+                            let lower = fragment.to_lowercase();
+                            super::imperative::starts_with_countless_plural_sacrifice(
+                                super::lower::strip_temporal_prefix(&lower).0,
+                            )
+                        }));
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
                 if let Some(sub) = def.sub_ability.as_mut() {
                     sub.repeat_for = Some(qty.clone());
@@ -3585,20 +3969,20 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     def.repeat_for = Some(qty.clone());
                     def.repeat_timing = clause_ir.repeat_timing;
                 }
-            } else if ir.clauses.len() == 1
+            } else if (ir.clauses.len() == 1 || has_delayed_copy_cleanup)
                 && clause_ir.parsed.sub_ability.is_none()
                 && try_fold_token_repeat_into_count(def.effect.as_mut(), qty)
             {
                 // CR 111.1 + CR 616.1: bare "for each X, create a token" folded
                 // into one batched CreateToken event — no loop. Conservatively
-                // restricted to a single-clause ability: a trailing sibling may
+                // restricted to a single-clause ability or a copy batch whose
+                // only sibling is its delayed plural sacrifice. Other siblings may
                 // reference the created tokens (a tracked set or "those tokens"
                 // anaphor — e.g. Ezuri's Predation's fight pairing depends on the
                 // per-iteration creation), and we do not yet distinguish such
                 // token-referencing siblings from independent ones (e.g. Moogles'
-                // Valor's "creatures you control gain indestructible"), so we keep
-                // the loop for all multi-clause cases. The chained-body guard
-                // reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
+                // Valor's "creatures you control gain indestructible"). The
+                // chained-body guard reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
                 // attaches it after this point via `clause_sub`, so
                 // `def.sub_ability` is not yet populated here).
             } else {
@@ -3999,6 +4383,19 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 let lifted_repeat_for = std::mem::take(&mut inner.repeat_for);
                 let lifted_repeat_timing = std::mem::take(&mut inner.repeat_timing);
                 let lifted_player_scope = std::mem::take(&mut inner.player_scope);
+                // CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: a source-zone
+                // intervening-if names the delayed source at fire and resolution
+                // time. Keep only
+                // the exact `SourceMatchesFilter { Typed([InZone]) }` bridge
+                // on the delayed payload; every other condition retains the
+                // established outer-wrapper lift above.
+                let keep_source_zone_condition_on_payload = lifted_condition
+                    .as_ref()
+                    .and_then(ability_condition_to_static_condition)
+                    .is_some_and(|condition| is_delayed_source_zone_condition(&condition));
+                if keep_source_zone_condition_on_payload {
+                    inner.condition = lifted_condition.clone();
+                }
                 // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
                 // is the node that occupies this clause's slot in the parent's
                 // `sub_ability` chain, so it must carry the clause's `sub_link`
@@ -4024,7 +4421,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     },
                 );
                 current.reads_return_result = delayed_return_reader;
-                current.condition = lifted_condition;
+                current.condition = (!keep_source_zone_condition_on_payload)
+                    .then_some(lifted_condition)
+                    .flatten();
                 current.optional = lifted_optional;
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
@@ -4312,9 +4711,64 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     Effect::ExileTop { .. } => Some(Zone::Exile),
                     _ => None,
                 };
-                if let Some(zone) = prev_zone {
-                    for current in &mut current_defs {
+                for current in &mut current_defs {
+                    let decline_inferred_return = defs.last().is_some_and(|prev| {
+                        prev.optional
+                            && matches!(
+                                prev.effect.as_ref(),
+                                Effect::ChangeZone {
+                                    destination: Zone::Battlefield,
+                                    ..
+                                }
+                            )
+                    }) && matches!(
+                        current.condition.as_ref(),
+                        Some(AbilityCondition::Not { condition }) if matches!(
+                            condition.as_ref(),
+                            AbilityCondition::EffectOutcome {
+                                signal: EffectOutcomeSignal::OptionalEffectPerformed
+                            }
+                        )
+                    ) && matches!(
+                        current.effect.as_ref(),
+                        Effect::CreateDelayedTrigger {
+                            condition: DelayedTriggerCondition::AtNextPhase {
+                                phase: crate::types::phase::Phase::End,
+                            },
+                            effect,
+                            uses_tracked_set: false,
+                        } if matches!(
+                            effect.effect.as_ref(),
+                            Effect::ChangeZone {
+                                target: TargetFilter::ParentTarget,
+                                destination: Zone::Battlefield,
+                                origin: None,
+                                ..
+                            }
+                        )
+                    );
+                    let zone = if decline_inferred_return {
+                        if !matches!(
+                            prev_eff,
+                            Effect::ChangeZone {
+                                target: TargetFilter::ParentTarget,
+                                ..
+                            }
+                        ) {
+                            None
+                        } else {
+                            optional_decline_exile_origin(&defs, &env.arena, clause_ir.id, current)
+                        }
+                    } else {
+                        prev_zone
+                    };
+                    if let Some(zone) = zone {
                         stamp_delayed_returns(&mut current.effect, zone);
+                    } else if decline_inferred_return {
+                        *current.effect = Effect::unimplemented(
+                            "unproved_optional_decline_return",
+                            clause_ir.source.fragment().unwrap_or_default(),
+                        );
                     }
                 }
             }
@@ -4328,6 +4782,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             if plural_recall_delayed_payload {
                 for current in &mut current_defs {
                     rebind_plural_recall_delayed_payload_to_tracked_set(&mut current.effect);
+                }
+            }
+            let sacrifice_body = if clause_ir.prefix_delayed_condition.is_some() {
+                super::lower::strip_temporal_prefix(&source_text_lower).0
+            } else {
+                &source_text_lower
+            };
+            if super::imperative::starts_with_countless_plural_sacrifice(sacrifice_body) {
+                for current in &mut current_defs {
+                    super::lower::bind_plural_token_sacrifice(current, &defs);
                 }
             }
         }
@@ -4929,6 +5393,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // CR 608.2d: gate the whole "if they guessed wrong/right" branch, including
     // any "and ..." continuation steps.
     super::propagate_guess_branch_condition_to_continuations(&mut result);
+    // CR 110.2 + CR 608.2c: "an opponent gains control of them" — fail closed
+    // where the runtime cannot hand control to the chosen player.
+    super::fail_closed_chosen_recipient_gain_control(&mut result);
 
     // CR 608.2d + CR 202.3 + CR 115.1: the assembled tree is where both halves of
     // an aggregate-budget clause first exist together — the typed constraint the
@@ -5376,6 +5843,69 @@ mod arena_tests {
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::EtbTapState;
+
+    /// CR 603.4 + CR 603.7c + CR 603.7e + CR 400.7: the production assembly
+    /// path keeps a pure source-zone Boolean tree on the delayed payload, while
+    /// adding a static-only leaf keeps the whole tree on the strict wrapper path.
+    #[test]
+    fn delayed_source_zone_boolean_tree_assembly_is_payload_scoped() {
+        let source_filter = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Battlefield,
+            }],
+            ..Default::default()
+        });
+        let source_condition = AbilityCondition::SourceMatchesFilter {
+            filter: source_filter,
+        };
+        let pure_tree = AbilityCondition::And {
+            conditions: vec![
+                source_condition.clone(),
+                AbilityCondition::Not {
+                    condition: Box::new(source_condition.clone()),
+                },
+            ],
+        };
+        let mixed_tree = AbilityCondition::And {
+            conditions: vec![
+                source_condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Fixed { value: 2 },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+            ],
+        };
+
+        let assemble = |condition: AbilityCondition| {
+            let mut chain = EffectChainIr::single_clause(
+                "synthetic delayed condition",
+                AbilityKind::Spell,
+                parsed_clause(shuffle_effect()),
+                None,
+                None,
+                false,
+            );
+            chain.clauses[0].condition = Some(condition);
+            chain.clauses[0].delayed_condition =
+                Some(DelayedTriggerCondition::AtNextPhase { phase: Phase::End });
+            assemble_effect_chain(&chain)
+        };
+
+        let pure = assemble(pure_tree.clone());
+        let Effect::CreateDelayedTrigger { effect, .. } = pure.effect.as_ref() else {
+            panic!("pure delayed condition must assemble a delayed trigger");
+        };
+        assert_eq!(effect.condition, Some(pure_tree));
+        assert_eq!(pure.condition, None);
+
+        let mixed = assemble(mixed_tree.clone());
+        let Effect::CreateDelayedTrigger { effect, .. } = mixed.effect.as_ref() else {
+            panic!("mixed delayed condition must assemble a delayed trigger");
+        };
+        assert_eq!(effect.condition, None);
+        assert_eq!(mixed.condition, Some(mixed_tree));
+    }
 
     #[cfg(feature = "cli")]
     #[derive(Clone)]
@@ -6353,6 +6883,87 @@ mod arena_tests {
             ),
             None,
             "T-PLoc control: a non-zone predecessor must not receive a hard-coded origin"
+        );
+    }
+
+    #[test]
+    fn optional_decline_origin_requires_the_contiguous_same_referent_edges() {
+        const BODY: &str = "Exile another target creature you control. You may return that card to the battlefield under its owner's control. If you don't, at the beginning of the next end step, return that card to the battlefield under its owner's control with a vigilance counter and a lifelink counter on it.";
+        let parse = |text: &str| {
+            parse_effect_chain_ir(text, AbilityKind::Activated, &mut ParseContext::default())
+        };
+        let ir = parse(BODY);
+        assert_eq!(ir.clauses.len(), 3);
+        let assembled = assemble_effect_chain(&ir);
+        let optional = assembled.sub_ability.as_deref().expect("optional return");
+        let installer = optional.sub_ability.as_deref().expect("decline installer");
+        assert!(optional.optional && optional.forward_result);
+        assert_eq!(installer.sub_link, SubAbilityLink::SequentialSibling);
+        assert!(matches!(
+            installer.condition.as_ref(),
+            Some(AbilityCondition::Not { condition }) if matches!(
+                condition.as_ref(), AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed
+                }
+            )
+        ));
+        assert_eq!(delayed_payload_origin(installer), Some(Zone::Exile));
+
+        for changed in [
+            BODY.replace(
+                "Exile another target creature you control.",
+                "Exile another target creature you control. Exile the top card of your library.",
+            ),
+            BODY.replacen(
+                "return that card",
+                "return target creature card from your graveyard",
+                1,
+            ),
+        ] {
+            let result = assemble_effect_chain(&parse(&changed));
+            let mut node = Some(&result);
+            let mut refused = false;
+            while let Some(def) = node {
+                refused |= matches!(
+                    def.effect.as_ref(),
+                    // allow-noncombinator: test assertion on the emitted diagnostic id.
+                    Effect::Unimplemented { name, .. } if name == "unproved_optional_decline_return"
+                );
+                node = def.sub_ability.as_deref();
+            }
+            assert!(refused, "{changed}");
+        }
+
+        let mut explicit = ir;
+        let changed = crate::types::ability_visit::effects_mut::visit_effect(
+            &mut explicit.clauses[2].parsed.effect,
+            &mut |effect: &mut Effect| {
+                if let Effect::ChangeZone {
+                    origin,
+                    destination: Zone::Battlefield,
+                    ..
+                } = effect
+                {
+                    *origin = Some(Zone::Graveyard);
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+        assert!(changed.is_break(), "expected delayed return operand");
+        let result = assemble_effect_chain(&explicit);
+        assert_eq!(
+            delayed_payload_origin(
+                result
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+                    .sub_ability
+                    .as_deref()
+                    .unwrap()
+            ),
+            Some(Zone::Graveyard),
         );
     }
 

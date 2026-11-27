@@ -39,6 +39,7 @@ pub(crate) fn evidence_candidates(
                 .filter(|&id| {
                     Some(id) != spell_being_priced
                         && !super::super::casting::is_spell_being_cast(state, id)
+                        && !super::super::casting::is_held_by_payment_probe(state, id)
                 })
                 .collect()
         })

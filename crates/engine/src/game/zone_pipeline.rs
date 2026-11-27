@@ -21,15 +21,16 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     BatchCompletion, BatchDeliveryStage, ChangeZoneArrangementPlan, EnteringAuraAuthority,
     ExileLinkKind, GameState, HeldDecisionPrompt, HeldReplacementDecision,
-    LibraryPlacementContinuation, LiminalEntryKind, LogicalZoneChangeGroup,
-    LogicalZoneChangeTerminalOutcome, MassLibraryOrderBatch, MassLibraryOrderMember,
-    MergedCardComponentRoute, PendingBatchDeliveries, PendingBatchZoneChangeCause,
-    PendingBatchZoneMoveRequest, PendingComponentDeliveryParent, PendingCounterPostAction,
-    PendingLiminalEntryResume, PendingReplacement, PendingZoneChangeDelivery,
-    PostReplacementDrainOwner, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
-    StagedBatchMemberState, StagedDestroyOperation, StagedDestroyOuterApproval,
-    StagedLibraryArrangement, StagedMemberOperation, StagedMemberOutcome, WaitingFor,
-    ZoneChangeAnnouncement, ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    LibraryPlacementContinuation, LiminalEntrant, LiminalEntry, LiminalEntryKind,
+    LogicalZoneChangeGroup, LogicalZoneChangeTerminalOutcome, MassLibraryOrderBatch,
+    MassLibraryOrderMember, MergedCardComponentRoute, PendingBatchDeliveries,
+    PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
+    PendingCounterPostAction, PendingLiminalEntryResume, PendingReplacement,
+    PendingZoneChangeDelivery, PostReplacementDrainOwner, ReplacementSubtreeBoundary,
+    StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember, StagedBatchMemberState,
+    StagedDestroyOperation, StagedDestroyOuterApproval, StagedLibraryArrangement,
+    StagedMemberOperation, StagedMemberOutcome, WaitingFor, ZoneChangeAnnouncement,
+    ZoneDeliveryExileTracking, ZoneMoveCompletion,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -38,8 +39,8 @@ use crate::types::identifiers::{LogicalZoneChangeGroupId, ObjectId, ObjectIncarn
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, ProposedEvent,
-    WithEntryEffect,
+    AppliedReplacementKey, CoEntrants, EnterWithGrants, EntrantAbilities, EntryChoices,
+    ProposedEvent, WithEntryEffect,
 };
 use crate::types::resolution::RetainedBatchOwner;
 use crate::types::zones::{EtbTapState, Zone};
@@ -47,6 +48,300 @@ use crate::types::zones::{EtbTapState, Zone};
 use crate::game::effects::change_zone::shuffle_library;
 use crate::game::game_object::{AttachTarget, GameObject};
 use crate::types::ability::FaceDownProfile;
+
+/// CR 400.11b + CR 614.12: reserve the drafted card's identity while its entry
+/// is proposed. Its projected body is visible only to entry consultation.
+pub(crate) fn propose_outside_game_card_entry(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    card: GameObject,
+    tapped: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    let entry_ref = card.id;
+    let boundary = ReplacementSubtreeBoundary::at(&state.resolution_stack);
+    let enter_with_counters = crate::game::printed_cards::intrinsic_etb_counters(&card, None);
+    let enter_tapped = if tapped {
+        EtbTapState::Tapped
+    } else {
+        EtbTapState::Unspecified
+    };
+    state.last_created_token_ids.clear();
+    state.liminal_entries.insert(
+        entry_ref,
+        LiminalEntry {
+            blocking_attacker: None,
+            name: card.name.clone(),
+            object: LiminalEntrant::Card(card),
+            source_id,
+            controller,
+            enters_attacking: false,
+            attack_destination: Default::default(),
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids: Vec::new(),
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped,
+            enter_with_counters: Vec::new(),
+            kind: LiminalEntryKind::OutsideGameCard {
+                boundary,
+                original: None,
+                superseded_replacements: 0,
+            },
+            replacement_applied: HashSet::new(),
+            copy_settlement: None,
+        },
+    );
+    crate::game::engine_replacement::settle_outside_game_entry(
+        state,
+        entry_ref,
+        ProposedEvent::OutsideGameCardEntry {
+            entry_ref,
+            destination: Zone::Battlefield,
+            enter_tapped,
+            enter_with_counters,
+            enter_with_choices: None,
+            controller_override: None,
+            enter_as_copy: None,
+            applied: HashSet::new(),
+        },
+        true,
+        events,
+    );
+}
+
+/// CR 707.5 + CR 614.12: consult the acquired copy body at the same reserved
+/// identity. The original remains available for the actual card's base values.
+pub(crate) fn stage_outside_game_entry_copy(
+    state: &mut GameState,
+    object_id: ObjectId,
+    copy: &crate::types::proposed_event::CopyTokenSpec,
+) {
+    let Some(entry) = state.liminal_entries.get_mut(&object_id) else {
+        return;
+    };
+    let (
+        LiminalEntryKind::OutsideGameCard {
+            original,
+            superseded_replacements,
+            ..
+        },
+        LiminalEntrant::Card(card),
+    ) = (&mut entry.kind, &mut entry.object)
+    else {
+        return;
+    };
+    let previous = card.replacement_definitions.clone();
+    original.get_or_insert_with(|| Box::new(card.clone()));
+    crate::game::effects::token::apply_copiable_values_to_liminal_object(
+        card,
+        &copy.values,
+        &copy.display,
+    );
+    crate::game::effects::token_copy::apply_immediate_copy_token_modifications_to_object(
+        card,
+        &copy.additional_modifications,
+        &state.all_creature_types,
+    );
+    *superseded_replacements = previous.len();
+    card.replacement_definitions = previous
+        .iter_all()
+        .chain(card.replacement_definitions.iter_all())
+        .cloned()
+        .collect();
+}
+
+pub(crate) fn prevent_outside_game_card_entry(
+    state: &mut GameState,
+    entry_ref: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(source_id) = state
+        .outside_game_card_entry(entry_ref)
+        .map(|entry| entry.source_id)
+    {
+        state.liminal_entries.remove(&entry_ref);
+        finalize_outside_game_card_entry(state, None, source_id, events);
+    }
+}
+
+/// CR 614.6 + CR 303.4f: settle any required pre-entry host before delivery.
+pub(crate) fn deliver_outside_game_card_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    host: Option<TargetRef>,
+    events: &mut Vec<GameEvent>,
+) {
+    let ProposedEvent::OutsideGameCardEntry {
+        entry_ref,
+        destination,
+        enter_tapped,
+        enter_with_counters,
+        enter_with_choices,
+        controller_override,
+        enter_as_copy,
+        ..
+    } = &event
+    else {
+        return;
+    };
+    let entry_ref = *entry_ref;
+    let Some(entry) = state.outside_game_card_entry(entry_ref) else {
+        return;
+    };
+    let LiminalEntryKind::OutsideGameCard { boundary, .. } = entry.kind else {
+        return;
+    };
+    let source_id = entry.source_id;
+    let controller = controller_override.unwrap_or(entry.controller);
+    let mut host = host;
+    let mut projected_authority = None;
+    if *destination == Zone::Battlefield {
+        let mut entrant = entry.object.projected().clone();
+        entrant.controller = controller;
+        if let EnteringAuraHosts::Hosts {
+            legal_targets,
+            entrant,
+            ..
+        } = entering_aura_hosts_projected(state, entry_ref, &entrant)
+        {
+            host = match (host, legal_targets.as_slice()) {
+                (Some(host), targets) if targets.contains(&host) => Some(host),
+                (None, [host]) => Some(host.clone()),
+                (None, [_, _, ..]) => {
+                    state.pending_liminal_entry_resume =
+                        Some(PendingLiminalEntryResume::OutsideGameCard {
+                            source_id: entry_ref,
+                            player: controller,
+                            event,
+                            boundary,
+                        });
+                    state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                        player: controller,
+                        source_id,
+                        returned_id: entry_ref,
+                        legal_targets,
+                        pending_effect: Box::new(ResolvedAbility::new(
+                            Effect::DraftFromSpellbook {
+                                destination: Zone::Battlefield,
+                                tapped: false,
+                                selection: crate::types::ability::SpellbookSelection::Chosen,
+                            },
+                            Vec::new(),
+                            source_id,
+                            controller,
+                        )),
+                    };
+                    return;
+                }
+                _ => {
+                    prevent_outside_game_card_entry(state, entry_ref, events);
+                    return;
+                }
+            };
+            projected_authority = Some(entrant);
+        }
+    }
+    let entry = state
+        .liminal_entries
+        .remove(&entry_ref)
+        .expect("the consulted entrant is present");
+    let LiminalEntryKind::OutsideGameCard { original, .. } = entry.kind else {
+        unreachable!()
+    };
+    // CR 607.2d + CR 614.12a: a chained as-enters answer binds to the
+    // liminal entrant. Carry that entrant's choices alongside the proposal's
+    // pre-entry answers across the reset and the copy effect's installation.
+    let mut entrant = entry.object.into_projected();
+    let mut choices = EntryChoices(std::mem::take(&mut entrant.chosen_attributes));
+    choices
+        .0
+        .extend(EntryChoices::of(enter_with_choices).iter().cloned());
+    let mut card = original.map_or(entrant, |card| *card);
+    card.zone = *destination;
+    card.controller = card.owner;
+    if *destination == Zone::Battlefield {
+        card.reset_for_battlefield_entry(state.turn_number, state.next_timestamp());
+        card.controller = controller;
+        card.tapped = enter_tapped.resolve(false);
+        card.entered_via_ability_source = Some(source_id);
+    }
+    let owner = card.owner;
+    zones::place_new_object(state, card);
+
+    if *destination == Zone::Battlefield {
+        crate::game::layers::mark_layers_entered(state, entry_ref);
+        install_battlefield_entry_characteristics(
+            state,
+            entry_ref,
+            None,
+            Default::default(),
+            (!choices.0.is_empty()).then_some(&choices),
+            enter_as_copy.as_deref(),
+            events,
+        );
+        if let (Some(host), Some(entrant)) = (host, projected_authority) {
+            apply_entering_aura_hosts(
+                state,
+                entry_ref,
+                EnteringAuraHosts::Hosts {
+                    controller,
+                    legal_targets: vec![host],
+                    entrant,
+                },
+                events,
+            );
+        }
+        let counters = crate::game::effects::counters::coalesce_entry_counters(
+            enter_with_counters
+                .iter()
+                .cloned()
+                .chain(entry.enter_with_counters),
+        );
+        if !crate::game::engine_replacement::apply_etb_counters(state, entry_ref, &counters, events)
+        {
+            crate::game::effects::counters::append_pending_counter_post_actions(
+                state,
+                vec![PendingCounterPostAction::FinalizeOutsideGameCardEntry {
+                    object_id: entry_ref,
+                    source_id,
+                    name: entry.name,
+                }],
+            );
+            return;
+        }
+    } else if *destination == Zone::Graveyard {
+        zones::record_descend_on_graveyard_arrival(state, entry_ref, owner);
+    }
+    finalize_outside_game_card_entry(state, Some((entry_ref, entry.name)), source_id, events);
+}
+
+pub(crate) fn finalize_outside_game_card_entry(
+    state: &mut GameState,
+    entered: Option<(ObjectId, String)>,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    state.last_created_token_ids.clear();
+    if let Some((object_id, name)) = entered {
+        let entry_event_start = events.len();
+        crate::game::layers::flush_layers(state);
+        if zones::record_and_emit_entry_from_no_zone(state, object_id, events).is_some() {
+            // The LastCreated slot also names conjured cards.
+            crate::game::effects::token::record_last_created_token(state, object_id);
+            events.push(GameEvent::ObjectConjured { object_id, name });
+            zones::settle_battlefield_entry_observations(state, &events[entry_event_start..]);
+        }
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Conjure,
+        source_id,
+        subject: None,
+    });
+}
 
 /// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
 /// and is carried onto `ProposedEvent::ZoneChange.cause` / `ZoneChangeRecord`.
@@ -1891,8 +2186,26 @@ fn deliver_simultaneous_batch(
             to: r.to,
         })
         .collect();
-    let logical_zone_change_group =
+    let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &announced);
+    // CR 730.3: component routing delivers the announcing parent's
+    // permanent departure. Use its combat snapshot for the surviving object.
+    if let Some(snapshot) = merged_departure
+        .and_then(|identity| zones::simultaneous_departure_combat(state, identity))
+        .filter(|snapshot| {
+            logical_zone_change_group
+                .prospective_battlefield_members
+                .iter()
+                .any(|member| member.identity == snapshot.identity)
+        })
+    {
+        logical_zone_change_group
+            .departure_combat
+            .retain(|member| member.identity != snapshot.identity);
+        logical_zone_change_group
+            .departure_combat
+            .push(snapshot.clone());
+    }
     let group_id = logical_zone_change_group.logical_group_id;
     let staged_parent = if staged_entry.is_some() {
         component_delivery_parent.take()
@@ -2139,6 +2452,7 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
             | ProposedEvent::MoveCounter { .. }
             | ProposedEvent::CreateToken { .. }
             | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::OutsideGameCardEntry { .. }
             | ProposedEvent::Discard { .. }
             | ProposedEvent::Tap { .. }
             | ProposedEvent::Untap { .. }
@@ -2182,33 +2496,46 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
 /// so an as-enters roll made during that delivery is not observed by a
 /// co-entrant (`simultaneous_entrants_of`). A delivery loop collects them once,
 /// before its first member, and every member's delivery reuses that one list.
-pub(crate) struct SimultaneousEntrants(Vec<ObjectId>);
+/// CR 603.10a: the same delivery window publishes the departing member's
+/// combat snapshot before the physical move writes its record.
+pub(crate) struct SimultaneousEntrants {
+    entrants: Vec<ObjectId>,
+    departure_combat: Vec<crate::types::game_state::DepartureCombatSnapshot>,
+}
 
 impl SimultaneousEntrants {
-    /// The entrants `group` announced.
+    /// The group's delivery-time observations.
     pub(crate) fn of(group: &LogicalZoneChangeGroup) -> Self {
-        Self(
-            group
+        Self {
+            entrants: group
                 .prospective_entrants
                 .iter()
                 .map(|member| member.identity.object_id)
                 .collect(),
-        )
+            departure_combat: group.departure_combat.clone(),
+        }
     }
 
-    /// Deliver one member of the change with its entrants published. The list
-    /// is swapped in and back, so publishing it takes constant time per member,
-    /// and
-    /// the outer publication is restored: a member's own continuation can run
-    /// a nested simultaneous change, which publishes and restores its own.
+    /// Deliver one member with its group's observations published. Swapping
+    /// the entrants preserves the existing allocation. A nested delivery
+    /// publishes its own observations and restores the outer window.
     pub(crate) fn deliver_member<R>(
         &mut self,
         state: &mut GameState,
+        member: ObjectId,
         deliver: impl FnOnce(&mut GameState) -> R,
     ) -> R {
-        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.entrants);
+        let previous = std::mem::replace(
+            &mut state.active_departure_combat,
+            self.departure_combat
+                .iter()
+                .find(|snapshot| snapshot.identity.object_id == member)
+                .cloned(),
+        );
         let result = deliver(state);
-        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        state.active_departure_combat = previous;
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.entrants);
         result
     }
 }
@@ -2361,7 +2688,7 @@ fn deliver_batch(
             });
         // CR 508.4: the batch owner resumes a paused member and takes its stamp.
         // CR 603.6a: the member is delivered as part of the batch's one event.
-        match entrants.deliver_member(state, |state| {
+        match entrants.deliver_member(state, object_id, |state| {
             move_batch_member_with_terminal(
                 state,
                 req,
@@ -4888,6 +5215,19 @@ fn deliver_staged_members(
     events: &mut Vec<GameEvent>,
 ) -> StagedStop {
     let segment_start = events.len();
+    if owner.paused_current.is_none()
+        && owner.staged.as_ref().is_some_and(|staged| {
+            staged.cursor == 0
+                && staged
+                    .members
+                    .first()
+                    .is_some_and(|member| member.merged_departure.is_none())
+        })
+    {
+        // CR 603.10a: consultation side effects happened before this event.
+        // After delivery starts, retain the same view across any pauses.
+        zones::capture_batch_departure_combat(state, &mut owner.logical_zone_change_group);
+    }
     let mut entrants = SimultaneousEntrants::of(&owner.logical_zone_change_group);
     loop {
         let Some(member) = owner
@@ -4989,7 +5329,7 @@ fn deliver_staged_members(
             approved_post_replacement,
             inherited_arrangements,
         });
-        match entrants.deliver_member(state, |state| {
+        match entrants.deliver_member(state, member.identity.object_id, |state| {
             deliver_replaced_zone_change_with_aura_host(
                 state,
                 member.identity.object_id,
@@ -5272,6 +5612,14 @@ pub(crate) fn deliver_staged_destroy_batch(
     let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged, None);
     owner.completion = Some(BatchCompletion::DestroyPopulationSettled {
         ability: Box::new(ability.clone()),
+        pending_return_result_producer: ability.declares_return_result.map(|id| {
+            (
+                state
+                    .active_return_result_occurrence
+                    .expect("destroy result has an active occurrence"),
+                id,
+            )
+        }),
         settled_destroyed: None,
     });
     let boundary = state.resolution_stack.capture_child_boundary();
@@ -6486,6 +6834,42 @@ fn settle_batch_owner(
         Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled { .. })
     );
     if let Some(mut completion) = completion {
+        if let BatchCompletion::DestroyPopulationSettled {
+            pending_return_result_producer: Some((occurrence_id, result_id)),
+            ..
+        } = &completion
+        {
+            // CR 400.7j + CR 614.6 + CR 730.3c/e: publish the actual arrivals
+            // before the following instruction reads them. A merged permanent
+            // can produce component arrivals with a different destination.
+            let group = &pending.logical_zone_change_group;
+            let mut records = crate::types::game_state::settled_logical_zone_change_records(group);
+            let announced_successors: HashSet<_> = records
+                .iter()
+                .filter_map(|record| record.recorded_zone_change_successor())
+                .collect();
+            records.extend(
+                group
+                    .all_origin_occurrences
+                    .iter()
+                    .filter_map(|occurrence| {
+                        let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                            return None;
+                        };
+                        let successor = record.recorded_zone_change_successor()?;
+                        let object = state.objects.get(&successor.object_id)?;
+                        let survivor = object.split_from_merge_survivor?;
+                        (record.from_zone.is_none()
+                            && !announced_successors.contains(&successor)
+                            && announced_successors.contains(&survivor)
+                            && object.incarnation == successor.incarnation
+                            && object.zone == record.to_zone)
+                            .then(|| (**record).clone())
+                    }),
+            );
+            crate::game::effects::publish_return_result(state, *occurrence_id, *result_id, records)
+                .expect("destroy publishes to its retained occurrence exactly once");
+        }
         crate::types::game_state::settle_batch_delivery_outcome(
             &mut completion,
             state,
@@ -7144,8 +7528,10 @@ mod paused_search_audience_tests {
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
 
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: original.clone(),
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -18218,6 +18604,7 @@ mod staged_batch_tests {
                     source,
                     PlayerId(0),
                 )),
+                pending_return_result_producer: None,
                 settled_destroyed: None,
             }
         } else {
@@ -19782,6 +20169,7 @@ mod staged_batch_tests {
                 source,
                 PlayerId(0),
             )),
+            pending_return_result_producer: None,
             settled_destroyed: None,
         };
         crate::types::game_state::settle_batch_delivery_outcome(
@@ -20238,10 +20626,10 @@ mod simultaneous_entry_tests {
 
         let mut nested_entrants = SimultaneousEntrants::of(&empty);
         let (outer, nested, restored) =
-            SimultaneousEntrants::of(&group).deliver_member(&mut state, |state| {
+            SimultaneousEntrants::of(&group).deliver_member(&mut state, b, |state| {
                 let outer = simultaneous_entrants_of(state, b);
                 let nested = nested_entrants
-                    .deliver_member(state, |state| simultaneous_entrants_of(state, b));
+                    .deliver_member(state, b, |state| simultaneous_entrants_of(state, b));
                 (outer, nested, simultaneous_entrants_of(state, b))
             });
         assert_eq!(outer, vec![a, b]);
@@ -20312,15 +20700,16 @@ mod simultaneous_entry_tests {
         let empty = state.allocate_logical_zone_change_group(&[]);
         let mut entrants = SimultaneousEntrants::of(&group);
         let mut nested_entrants = SimultaneousEntrants::of(&empty);
-        let allocation = entrants.0.as_ptr();
+        let allocation = entrants.entrants.as_ptr();
 
         for member in members {
             let (published, during, nested, restored) =
-                entrants.deliver_member(&mut state, |state| {
+                entrants.deliver_member(&mut state, member, |state| {
                     let during = state.active_simultaneous_entrants.as_ptr();
                     let published = simultaneous_entrants_of(state, member);
-                    let nested = nested_entrants
-                        .deliver_member(state, |state| simultaneous_entrants_of(state, member));
+                    let nested = nested_entrants.deliver_member(state, member, |state| {
+                        simultaneous_entrants_of(state, member)
+                    });
                     let restored = state.active_simultaneous_entrants.as_ptr();
                     (published, during, nested, restored)
                 });
@@ -20335,7 +20724,7 @@ mod simultaneous_entry_tests {
                 "the nested change restores the loop's list"
             );
             assert_eq!(
-                entrants.0.as_ptr(),
+                entrants.entrants.as_ptr(),
                 allocation,
                 "the loop gets the same list back after member {member:?}"
             );
@@ -20345,7 +20734,7 @@ mod simultaneous_entry_tests {
             );
         }
         assert_eq!(
-            entrants.0,
+            entrants.entrants,
             members.to_vec(),
             "the list is intact after the loop"
         );
@@ -20399,6 +20788,7 @@ mod simultaneous_entry_tests {
             state.liminal_entries.insert(
                 b,
                 LiminalEntry {
+                    blocking_attacker: None,
                     copy_settlement: None,
                     object,
                     name: "Card 2".to_string(),
@@ -20418,8 +20808,9 @@ mod simultaneous_entry_tests {
                     replacement_applied: HashSet::new(),
                 },
             );
-            let published = SimultaneousEntrants::of(&group)
-                .deliver_member(&mut state, |state| simultaneous_entrants_of(state, b));
+            let published =
+                SimultaneousEntrants::of(&group)
+                    .deliver_member(&mut state, b, |state| simultaneous_entrants_of(state, b));
             let outside = simultaneous_entrants_of(&state, b);
             if is_token {
                 assert_eq!(

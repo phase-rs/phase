@@ -6,7 +6,7 @@ use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -258,6 +258,40 @@ fn is_search_result_put_onto_battlefield_restatement(lower: &str) -> bool {
     parse_search_result_put_onto_battlefield_restatement(bare)
         .map(|(rest, _)| rest.trim().is_empty())
         .unwrap_or(false)
+}
+
+/// CR 608.2c: True when `before_lower` contains "draft a card from " followed by
+/// "spellbook" as its terminal noun phrase before " and ".
+fn is_spellbook_draft_bare_and_prefix(before_lower: &str) -> bool {
+    (
+        take_until::<_, _, OracleError<'_>>("draft a card from "),
+        tag("draft a card from "),
+        take_until("spellbook"),
+        tag("spellbook"),
+        eof,
+    )
+        .parse(before_lower.trim_end())
+        .is_ok()
+}
+
+/// CR 608.2c: Parses the destination rider for a compound spellbook draft:
+/// "put it onto the battlefield[ tapped]" or "exile it". Unmodeled riders like
+/// "exile it face down" fail to match so they fall through honestly.
+fn parse_spellbook_draft_destination_rider(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = alt((
+        value(
+            (),
+            pair(
+                tag::<_, _, OracleError<'_>>("put it onto the battlefield"),
+                opt(tag(" tapped")),
+            ),
+        ),
+        value((), tag("exile it")),
+    ))
+    .parse(input)?;
+    let (input, _) =
+        alt((value((), eof), value((), tag(".")), value((), tag(",")))).parse(input)?;
+    Ok((input, ()))
 }
 
 /// CR 701.24b + CR 608.2c: Parse a later search-result instruction that puts
@@ -1080,6 +1114,101 @@ pub(super) fn patch_reveal_until_for_library_category_exile(def: &mut AbilityDef
     }
 }
 
+/// CR 701.20a + CR 608.2c: a reveal-until whose revealed set is immediately
+/// chosen from ("Choose one of the revealed creature cards", Dance, Pathetic
+/// Marionette) reveals in place — the choose reads the library-resident
+/// cards, and a later sweep ("Put all other cards revealed this way …")
+/// places the rest. Flip the construction defaults (`KeepEach` + into-hand +
+/// shuffled-into-library, which would phantom-move the kept match and shuffle
+/// the rest) to `RevealOnly` + Library/Library, mirroring the Sanar patch
+/// above.
+///
+/// Fires only on the untouched default tuple (`KeepEach`, kept Hand, rest
+/// Library, `Random` order): any printed placement differs in at least one
+/// slot — except a card printing exactly the default tuple, which is
+/// indistinguishable and accepted as the documented residual risk. A
+/// `Direct` zone scan does not read the revealed set, so only a `Legacy`-pool
+/// choose (the reveal-pool anaphor's lowering) triggers the flip.
+pub(super) fn patch_reveal_until_for_tracked_set_choose(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        patch_reveal_until_for_tracked_set_choose(sub);
+        if let (
+            Effect::RevealUntil {
+                matched_disposition,
+                kept_destination,
+                rest_destination,
+                rest_order,
+                ..
+            },
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            },
+        ) = (&mut *def.effect, &*sub.effect)
+        {
+            let is_default_tuple = matches!(
+                (
+                    &*matched_disposition,
+                    &*kept_destination,
+                    &*rest_destination,
+                    &*rest_order
+                ),
+                (
+                    RevealUntilDisposition::KeepEach,
+                    Zone::Hand,
+                    Zone::Library,
+                    crate::types::ability::DigRestOrder::Random,
+                )
+            );
+            if is_default_tuple {
+                *matched_disposition = RevealUntilDisposition::RevealOnly;
+                *kept_destination = Zone::Library;
+                *rest_destination = Zone::Library;
+            }
+        }
+    }
+}
+
+/// CR 701.20a + CR 608.2c + CR 608.2d: "all OTHER cards revealed this way"
+/// after a choice FROM the revealed set ("Choose one of the revealed
+/// creature cards", Dance, Pathetic Marionette) excludes the PICK, not the
+/// ability's source. The target parser lowers "other" to `FilterProp::Another`
+/// (source exclusion — vacuous here, the source is never revealed), so
+/// rewrite it to `DistinctFrom{ParentTarget}` (the Radiance exclusion, which
+/// reads the resolving ability's targets) whenever a `Legacy`-pool choose —
+/// the reveal-pool anaphor's lowering — precedes the sweep in the chain.
+///
+/// `Legacy`-only on purpose: a `Direct` zone-scan pick is not a member of
+/// the reveal set, so excluding it would be wrong (and a no-choose sweep
+/// keeps its vacuous `Another`, byte-identical to today). Sweeps without an
+/// "other" carry no `Another` and pass through untouched.
+pub(super) fn rewrite_revealed_sweep_other_as_pick_exclusion(def: &mut AbilityDefinition) {
+    fn walk(node: &mut AbilityDefinition, seen_legacy_choose: bool) {
+        let mut seen = seen_legacy_choose;
+        if matches!(
+            &*node.effect,
+            Effect::ChooseFromZone {
+                candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
+                ..
+            }
+        ) {
+            seen = true;
+        }
+        if seen {
+            if let Effect::ChangeZoneAll { target, .. } = &mut *node.effect {
+                crate::parser::oracle_target::exclude_parent_target_from_others(target);
+            }
+        }
+        if let Some(sub) = node.sub_ability.as_mut() {
+            walk(sub, seen);
+        }
+        if let Some(else_ability) = node.else_ability.as_mut() {
+            walk(else_ability, seen);
+        }
+    }
+    walk(def, false);
+}
+
 /// CR 608.2c + CR 205.2a: A bare "choose land or nonland" is an opaque
 /// labeled choice. It becomes a library-card-kind choice only when a later
 /// clause consumes "the chosen kind" through `MatchesLastChosenCardPredicate`.
@@ -1515,6 +1644,73 @@ fn parse_exile_n_of_them_face_down(lower: &str) -> Option<(u32, Vec<(CounterType
     }
 }
 
+// CR 603.7b + CR 608.2c: keep both life instructions in the creature-entry
+// watcher. The recursive body split sees no event head and splits them normally.
+fn keeps_delayed_entry_life_body(before: TextPair<'_>, after: &str) -> bool {
+    if terminated(
+        tag::<_, _, OracleError<'_>>("whenever"),
+        nom::character::complete::space1,
+    )
+    .parse(before.lower)
+    .is_err()
+    {
+        return false;
+    }
+    let Some((head, loss)) = super::parse_delayed_this_turn_head(before) else {
+        return false;
+    };
+    if !super::super::oracle_trigger::is_singular_controlled_creature_entry_head(head) {
+        return false;
+    }
+    let gain = take_until::<_, _, OracleError<'_>>(". ")
+        .parse(after)
+        .map_or(after, |(_, sentence)| sentence);
+    // allow-noncombinator: remove sentence punctuation after isolating the clause.
+    let gain = gain.strip_suffix('.').unwrap_or(gain);
+    let (scope, loss) = super::lower::strip_player_scope_subject(loss, false);
+    scope == Some(PlayerFilter::Opponent)
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("lose "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(loss.trim())
+        .is_ok()
+        && all_consuming(preceded(
+            nom::bytes::complete::tag_no_case("you gain "),
+            super::imperative::parse_fixed_life_amount,
+        ))
+        .parse(gain.trim())
+        .is_ok()
+}
+
+// CR 603.7b + CR 608.2c: the installer owns the complete damage-trigger body,
+// including unsupported instructions that must prevent a partial installation.
+fn keeps_delayed_player_damage_body(text: TextPair<'_>) -> bool {
+    use super::{delayed_player_damage_admission, DelayedPlayerDamageAdmission};
+
+    super::parse_delayed_this_turn_head(text).is_some_and(|(head, _)| {
+        !matches!(
+            delayed_player_damage_admission(head),
+            DelayedPlayerDamageAdmission::OutsideFamily
+        )
+    })
+}
+
+pub(super) fn parse_delayed_body_separator(input: &str) -> OracleResult<'_, ClauseBoundary> {
+    alt((
+        value(
+            ClauseBoundary::Then,
+            preceded(opt(tag(",")), preceded(tag(" "), parse_then_connector)),
+        ),
+        value(
+            ClauseBoundary::Comma,
+            alt((tag(", and "), tag(", "), tag(" and "))),
+        ),
+        value(ClauseBoundary::Sentence, tag(". ")),
+    ))
+    .parse(input)
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -1612,9 +1808,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 // each draw a card, then discard a card" — every named player does
                 // both), so it is not a clause boundary. Splitting would strand the
                 // trailing verb on the controller alone.
+                let lower = current.to_ascii_lowercase();
                 let comma_split =
                     split_comma_clause_boundary(&current, &remainder).filter(|(boundary, _)| {
                         !(compound_subject_each_sticky && matches!(boundary, ClauseBoundary::Then))
+                            && !keeps_delayed_player_damage_body(TextPair::new(&current, &lower))
                     });
                 if let Some((boundary, chars_to_skip)) = comma_split {
                     push_clause_chunk(&mut chunks, &current, Some(boundary));
@@ -1761,6 +1959,20 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // so the follow-up absorber's library-only arm misses them.
                         let search_put_destination = has_search_prefix
                             && is_search_result_put_onto_battlefield_restatement(remainder_trimmed);
+                        // CR 608.2c: "draft a card from [X]'s spellbook and put it
+                        // onto the battlefield [tapped]" (Brood Astronomer) /
+                        // "draft a card from [X]'s spellbook and exile it"
+                        // (Kayla's Kindling) — the destination rider completes the
+                        // draft action and must NOT be bisected into a separate
+                        // clause. The draft parser (`try_parse_spellbook_draft`)
+                        // owns this compound action; bisecting it creates a
+                        // destination-less DraftFromSpellbook (defaulting to Hand)
+                        // plus an unanchored ChangeZone that erroneously targets
+                        // the source permanent.
+                        let spellbook_draft_continuation =
+                            is_spellbook_draft_bare_and_prefix(&before_lower)
+                                && parse_spellbook_draft_destination_rider(remainder_trimmed)
+                                    .is_ok();
                         // CR 707.9: ", except <body> and <body> [and …]" — inside
                         // a copy-effect except clause, " and " is an internal
                         // delimiter between recognised body shapes (SetName, P/T,
@@ -1978,6 +2190,11 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         let suppress = (nom_primitives::scan_contains(&before_lower, "from among")
                         && !sacrifice_rest_remainder)
                         || is_inside_temporal_prefix(&before_lower)
+                        || keeps_delayed_entry_life_body(
+                            TextPair::new(before_and, &before_lower),
+                            remainder_trimmed,
+                        )
+                        || keeps_delayed_player_damage_body(TextPair::new(before_and, &before_lower))
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
                         || search_with_that_name
@@ -1995,7 +2212,8 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || mass_exile_union_continuation
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
-                        || inside_prefix_comma_and_continuation;
+                        || inside_prefix_comma_and_continuation
+                        || spellbook_draft_continuation;
                         if !suppress
                             && (starts_bare_and_clause(remainder_trimmed)
                                 || reveal_hand_continues_with_conjugated_verb(
@@ -2322,7 +2540,16 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
 /// subject. The split and the carry share one classifier, so a bare imperative or a
 /// new subject ("… and you choose a nonland card from it") stays fused for the
 /// reveal's own continuation grammar.
+///
+/// CR 608.2c + CR 603.12: inside an "if/when …, " prefix clause the conjunct
+/// belongs to that clause's body (for "when you do," the reflexive trigger's
+/// effect), which the conditional handler re-splits; splitting it here orphans
+/// it from the body's gate and subject (Cabal Therapist), mirroring the
+/// prefix-clause rule in `split_comma_clause_boundary`.
 fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
+    if starts_prefix_clause(before_lower.trim_start()) {
+        return false;
+    }
     nom_primitives::scan_at_word_boundaries(before_lower, |input| {
         all_consuming(preceded(
             tag::<_, _, OracleError<'_>>("reveals "),
@@ -2746,15 +2973,15 @@ fn is_for_each_copy_token_continuation(
     )
 }
 
+fn parse_then_connector(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("then, "), tag("then "))).parse(input)
+}
+
 fn strip_sequence_connector_lower(input: &str) -> &str {
     let trimmed = input.trim();
-    alt((
-        tag::<_, _, OracleError<'_>>("then, "),
-        tag::<_, _, OracleError<'_>>("then "),
-    ))
-    .parse(trimmed)
-    .map(|(rest, _)| rest.trim_start())
-    .unwrap_or(trimmed)
+    parse_then_connector(trimmed)
+        .map(|(rest, _)| rest.trim_start())
+        .unwrap_or(trimmed)
 }
 
 /// CR 120.2b: True when the closing chunk text contains a `damage to `
@@ -3298,6 +3525,8 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("seek ")),
         value((), tag("connive")),
         value((), tag("they ")),
+        // CR 701.33a-b + CR 608.2c: "abandon ..." starts its own clause (', then abandon this scheme' tails on ongoing schemes). Placed in this 20-arm group to stay within nom's 21-tuple limit.
+        value((), tag("abandon ")),
     )))
     .parse(s)
     .is_ok()
@@ -4852,6 +5081,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: a_room_door,
         granting_object: a_granting_object,
         bound_actor: a_bound_actor,
+        origin: a_origin,
     } = a;
     let StaticDefinition {
         mode: b_mode,
@@ -4872,6 +5102,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         room_door: b_room_door,
         granting_object: b_granting_object,
         bound_actor: b_bound_actor,
+        origin: b_origin,
     } = b;
     a_mode == b_mode
         && a_affected == b_affected
@@ -4890,6 +5121,7 @@ fn static_same_consumption(a: &StaticDefinition, b: &StaticDefinition) -> bool {
         && a_room_door == b_room_door
         && a_granting_object == b_granting_object
         && a_bound_actor == b_bound_actor
+        && a_origin == b_origin
 }
 
 /// Do two parses CONSUME the same thing? Compares everything the ENGINE READS and
@@ -9081,6 +9313,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -11747,6 +11980,15 @@ mod tests {
             assert_eq!(chunks[0].text, head, "{text}");
             assert_eq!(chunks[1].text, tail, "{text}");
         }
+        // CR 608.2c: inside an "if you do, …" prefix clause the conjunct stays in
+        // the clause's body (the conditional handler re-splits it there with the
+        // gate and subject); the same body without the prefix splits as above.
+        let gated = "if you do, choose a card name, then that player reveals their hand and discards a creature card at random";
+        assert_eq!(split_clause_sequence(gated).len(), 1, "{gated}");
+        let body = "choose a card name, then that player reveals their hand and discards a creature card at random";
+        let body_chunks = split_clause_sequence(body);
+        assert_eq!(body_chunks.len(), 3, "{body}: {body_chunks:?}");
+        assert_eq!(body_chunks[2].text, "discards a creature card at random");
         for text in [
             "target opponent reveals their hand and you choose a nonland card from it",
             "Target player reveals their hand and the top card of their library",
@@ -13733,6 +13975,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13767,6 +14010,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -13799,6 +14043,7 @@ mod tests {
             attach_to: None,
             enters_attacking: false,
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
+            enters_blocking: None,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -16469,6 +16714,30 @@ mod tests {
     }
 
     #[test]
+    fn delayed_entry_life_body_shape_preserves_only_a_singular_complete_watcher() {
+        let admitted = "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life.";
+        assert_eq!(split_clause_sequence(admitted).len(), 1);
+        assert_eq!(
+            split_clause_sequence("each opponent loses 1 life and you gain 1 life.").len(),
+            2
+        );
+        for refused in [
+            "Whenever one or more creatures you control enter this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters from your hand this turn, each opponent loses 1 life and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life instead and you gain 1 life.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life instead.",
+            "Whenever a creature you control enters this turn, each opponent loses 1 life and you gain 1 life for each player.",
+            "Whenever a Berserker attacks this turn, you draw a card and you lose 1 life.",
+        ] {
+            assert_eq!(split_clause_sequence(refused).len(), 2, "{refused}");
+        }
+        assert_eq!(
+            split_clause_sequence("Whenever a creature you control enters this turn, put a +1/+1 counter on it and it gains haste until end of turn.").len(),
+            2
+        );
+    }
+
+    #[test]
     fn bare_and_splits_lose_and_you_gain() {
         // Blood Artist drain pattern: "target opponent loses 1 life and you gain 1 life"
         let chunks = clause_texts("target opponent loses 1 life and you gain 1 life");
@@ -18910,5 +19179,50 @@ mod loyalty_symbol_clause_start_tests {
             "{def:#?}"
         );
         assert!(removal.sub_ability.is_none(), "{def:#?}");
+    }
+
+    /// CR 608.2c: "draft a card from the Planets Spellbook and put it onto the battlefield tapped"
+    /// (Brood Astronomer) must NOT be bisected at bare ` and ` into a draft node and a separate
+    /// put-onto-battlefield node. The draft destination rider belongs to the draft effect.
+    #[test]
+    fn spellbook_draft_destination_rider_is_not_bisected_at_bare_and() {
+        // Brood Astronomer (un-apostrophized spellbook name, tapped rider)
+        let astronomer = split_clause_sequence(
+            "If you do, draft a card from the Planets Spellbook and put it onto the battlefield tapped.",
+        );
+        assert_eq!(
+            astronomer.len(),
+            1,
+            "draft and put tapped must stay one chunk: {astronomer:?}"
+        );
+
+        // Adaptive Armorer / Dragon Typhoon (put onto battlefield without tapped)
+        let armorer = split_clause_sequence(
+            "draft a card from Adaptive Armorer's spellbook and put it onto the battlefield.",
+        );
+        assert_eq!(
+            armorer.len(),
+            1,
+            "draft and put must stay one chunk: {armorer:?}"
+        );
+
+        // Kayla's Kindling (" and exile it")
+        let kindling =
+            split_clause_sequence("draft a card from this creature's spellbook and exile it.");
+        assert_eq!(
+            kindling.len(),
+            1,
+            "draft and exile it must stay one chunk: {kindling:?}"
+        );
+
+        // Negative reach-guard: an unmodeled rider like "face down" is NOT suppressed.
+        let face_down = split_clause_sequence(
+            "draft a card from this creature's spellbook and exile it face down.",
+        );
+        assert_eq!(
+            face_down.len(),
+            2,
+            "unmodeled rider must split: {face_down:?}"
+        );
     }
 }

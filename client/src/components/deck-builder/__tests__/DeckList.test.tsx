@@ -1,21 +1,30 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { GameFormat } from "../../../adapter/types";
 import { DeckList } from "../DeckList";
 
 const mocks = vi.hoisted(() => ({
   canonicalCardNames: vi.fn(
     async (names: string[]): Promise<(string | null)[]> => names.map(() => null),
   ),
+  inferCommander: vi.fn<typeof import("../../../services/engineRuntime").inferCommander>(),
 }));
 
 vi.mock("../../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({ canonicalCardNames: mocks.canonicalCardNames }),
 }));
 
+vi.mock("../../../services/engineRuntime", () => ({
+  inferCommander: mocks.inferCommander,
+  sideboardPolicyForFormat: async () => ({ type: "Forbidden" }),
+}));
+
 beforeEach(() => {
   mocks.canonicalCardNames.mockReset();
   mocks.canonicalCardNames.mockImplementation(async (names: string[]) => names.map(() => null));
+  mocks.inferCommander.mockReset();
+  mocks.inferCommander.mockResolvedValue(null);
 });
 
 afterEach(cleanup);
@@ -124,6 +133,99 @@ describe("DeckList import modal", () => {
     expect(onImport.mock.calls[0][0].main).toEqual([
       { count: 1, name: "Revival // Revenge" },
     ]);
+  });
+});
+
+describe("DeckList commander inference on paste", () => {
+  const gollum = { name: "Gollum, Silent Slinker", count: 1 };
+  const sengir = { name: "Sengir Vampire", count: 1 };
+  const filler = [
+    { name: "Relentless Rats", count: 58 },
+    { name: "Swamp", count: 40 },
+  ];
+  const rows = [gollum, sengir, ...filler];
+  const paste = rows.map(({ count, name }) => `${count} ${name}`).join("\n");
+
+  beforeEach(() => {
+    // Same counted rows and answers as the real-WASM Commander integration.
+    mocks.inferCommander.mockImplementation(async (_rows, format) =>
+      format === "PauperCommander" ? sengir.name : gollum.name,
+    );
+  });
+
+  function renderList(selectedFormat?: GameFormat) {
+    const onImport = vi.fn();
+    const list = (format?: GameFormat) => (
+      <DeckList
+        deck={emptyDeck}
+        onRemoveCard={vi.fn()}
+        onIncrementCard={vi.fn()}
+        canIncrementCard={() => true}
+        onMoveCard={vi.fn()}
+        onImport={onImport}
+        format={format ?? "Standard"}
+        commanderInferenceFormat={format}
+        cardDataCache={new Map()}
+        groupMode="type"
+      />
+    );
+    const { rerender } = render(list(selectedFormat));
+    return { onImport, selectFormat: (format: GameFormat) => rerender(list(format)) };
+  }
+
+  function pasteCountedDeck() {
+    fireEvent.click(screen.getByRole("button", { name: /^import$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/paste deck list/i), {
+      target: { value: paste },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^parse$/i }));
+  }
+
+  it("imports the inferred commander for the selected format", async () => {
+    const { onImport } = renderList("PauperCommander");
+    pasteCountedDeck();
+
+    await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
+    expect.soft(mocks.inferCommander.mock.calls).toEqual([[rows, "PauperCommander"]]);
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
+      commander: [sengir.name],
+      main: [gollum, ...filler],
+    }));
+  });
+
+  it("discovers an ordinary commander without an inference context", async () => {
+    const { onImport } = renderList();
+    pasteCountedDeck();
+
+    await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
+    expect(mocks.inferCommander.mock.calls).toEqual([[rows]]);
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
+      commander: [gollum.name],
+      main: [sengir, ...filler],
+    }));
+  });
+
+  it("retires a pending inference when the selected format changes", async () => {
+    let resolveInference!: (name: string) => void;
+    mocks.inferCommander.mockReturnValueOnce(new Promise((resolve) => {
+      resolveInference = resolve;
+    }));
+    const { onImport, selectFormat } = renderList("PauperCommander");
+    pasteCountedDeck();
+    await waitFor(() => expect(mocks.inferCommander.mock.calls).toEqual([[rows, "PauperCommander"]]));
+
+    selectFormat("Commander");
+    await act(async () => resolveInference(sengir.name));
+
+    expect(onImport).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText(/paste deck list/i)).toHaveValue(paste);
+    fireEvent.click(screen.getByRole("button", { name: /^parse$/i }));
+    await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
+    expect(mocks.inferCommander.mock.calls).toEqual([[rows, "PauperCommander"], [rows, "Commander"]]);
+    expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
+      commander: [gollum.name],
+      main: [sengir, ...filler],
+    }));
   });
 });
 

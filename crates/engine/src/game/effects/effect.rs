@@ -13,6 +13,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
 
 pub use crate::types::ability::{
     generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
@@ -396,6 +397,26 @@ fn bind_transient_effect(
     end_permission: Option<&EndEffectPermission>,
     modifications: Vec<ContinuousModification>,
 ) {
+    // CR 608.2c + CR 500.7: "that turn" names the extra turn the preceding
+    // instruction of this resolution granted
+    // (`last_granted_extra_turn_ids`). When none was granted (no recipient,
+    // a count of zero) no such turn exists and no prohibition is installed.
+    // The anaphor is singular, so several granted turns are not a reading of
+    // the text either, and also install nothing. An already-bound window
+    // (defensive; the parser never emits one) passes through.
+    let bound_duration: Duration;
+    let duration: &Duration = match duration {
+        Duration::UntilEndOfGrantedTurn { turn: None } => {
+            let [granted] = state.last_granted_extra_turn_ids.as_slice() else {
+                return;
+            };
+            bound_duration = Duration::UntilEndOfGrantedTurn {
+                turn: Some(*granted),
+            };
+            &bound_duration
+        }
+        _ => duration,
+    };
     // CR 109.5: resolve the def's bound subject role once — every arm below
     // installs the same def, so the resolved actor is identical for all of
     // them. `controller_ref_player` is the shared single-ref resolver; an
@@ -409,6 +430,53 @@ fn bind_transient_effect(
             role,
         )
     });
+
+    // CR 608.2b + CR 611.2c: bind the library owner while the announced
+    // target is available. The grantee and duration live on the player-scoped
+    // effect, whose permission follows the top card even after the source leaves.
+    let mut modifications = modifications;
+    let original_modification_count = modifications.len();
+    let mut has_library_permission = false;
+    modifications.retain_mut(|modification| {
+        let ContinuousModification::AddStaticMode {
+            mode:
+                StaticMode::MayLookAtTopOfLibrary { library }
+                | StaticMode::TopOfLibraryCastPermission { library, .. },
+        } = modification
+        else {
+            return true;
+        };
+        let Some(id) = filter::controller_ref_player(
+            state,
+            ability.source_id,
+            Some(ability.controller),
+            Some(ability),
+            library,
+        ) else {
+            return false;
+        };
+        *library = ControllerRef::SpecificPlayer { id };
+        has_library_permission = true;
+        true
+    });
+    if modifications.is_empty() && original_modification_count != 0 {
+        return;
+    }
+    if has_library_permission {
+        install_transient(
+            state,
+            end_permission,
+            ability,
+            duration.clone(),
+            TargetFilter::SpecificPlayer {
+                id: ability.controller,
+            },
+            modifications,
+            static_def.condition.clone(),
+            bound_actor,
+        );
+        return;
+    }
 
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
@@ -618,6 +686,42 @@ fn bind_transient_effect(
         }
     }
 
+    // CR 701.32a + CR 904.9 + CR 611.2c: A duration-bound "schemes can't be
+    // set in motion" prohibition (All in Good Time) modifies the rules of the
+    // game, and its population — the scheme deck plus the face-up scheme —
+    // lives in the command zone, which the battlefield broadcast below cannot
+    // reach (it would match zero objects and install nothing). Keep the
+    // affected filter INTACT on one TCE so the archenemy gate
+    // (`scheme_setting_in_motion_prohibited`) reads it via
+    // `transient_grants_static_mode_to_object`, which evaluates intact
+    // filters against the queried object. Mirrors the
+    // `MustAttackAwayFromSource` branch above; like `ReduceAbilityCost` (and
+    // unlike `MustAttackAwayFromSource`) it is never grafted onto objects —
+    // schemes sit outside the layer population — so it stays out of the layer
+    // skip list for the opposite reason: there is nothing to graft to.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::CantSetSchemeInMotion,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            install_transient(
+                state,
+                end_permission,
+                ability,
+                duration.clone(),
+                affected,
+                modifications,
+                static_def.condition.clone(),
+                bound_actor,
+            );
+            return;
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
@@ -706,7 +810,7 @@ fn bind_transient_effect(
         // CR 400.7 + CR 608.2k: a grant mutates its referent, so it binds only
         // the incarnation the trigger event recorded (the shared authority).
         if let Some(obj_id) =
-            crate::game::targeting::triggering_source_mutation_referent(state, ability.source_id)
+            crate::game::targeting::triggering_source_mutation_referent(state, ability)
         {
             install_transient(
                 state,
@@ -1052,10 +1156,10 @@ fn bind_transient_effect(
         // trigger that pinned its referent into `targets` (CR 603.7c) keeps the
         // existing path.
         Some(TargetFilter::EventTarget) if ability.targets.is_empty() => {
-            for obj_id in crate::game::targeting::resolve_event_referent_permanents(
+            for obj_id in crate::game::targeting::resolve_event_referent_permanents_for(
                 state,
+                ability,
                 &TargetFilter::EventTarget,
-                ability.source_id,
             ) {
                 install_transient(
                     state,
@@ -1075,16 +1179,11 @@ fn bind_transient_effect(
             }
             let filter = crate::game::effects::resolved_object_filter(state, ability, filter);
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
-            // Broadcast filter: find matching objects at resolution time and bind each.
+            // Broadcast filter: find the permanents and the library or graveyard cards it
+            // names at resolution time and bind each.
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = filter::FilterContext::from_ability(ability);
-            let matching: Vec<ObjectId> = state
-                .battlefield
-                .iter()
-                .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
-                .copied()
-                .collect();
-            for obj_id in matching {
+            for obj_id in affected_object_ids(state, &filter, &ctx) {
                 install_transient(
                     state,
                     end_permission,
@@ -1098,6 +1197,41 @@ fn bind_transient_effect(
             }
         }
     }
+}
+
+/// CR 611.2c + CR 109.2a: the objects `filter` names when an untargeted continuous effect begins.
+fn affected_object_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+    ctx: &filter::FilterContext<'_>,
+) -> Vec<ObjectId> {
+    let permanents = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|obj_id| filter::matches_target_filter(state, *obj_id, filter, ctx));
+    // CR 400.1: only the per-player zones whose keyword grants the layer pass does not
+    // materialize (library, graveyard); the pass owns the rest and resets them each pass.
+    let cards = filter
+        .population_zones()
+        .into_iter()
+        .filter(|zone| {
+            filter::is_owner_scoped_zone(*zone)
+                && !crate::game::layers::layer_pass_materializes_keywords(*zone)
+        })
+        .flat_map(|zone| {
+            // CR 109.2a: only a clause that names this zone can admit a card in it, so a
+            // bare sibling clause ("creatures you control") never admits a graveyard card.
+            let clauses = filter.clauses_naming_zone(zone);
+            crate::game::targeting::zone_object_ids(state, zone)
+                .into_iter()
+                .filter(move |obj_id| {
+                    clauses.iter().any(|clause| {
+                        filter::matches_target_filter_for_zone(state, *obj_id, zone, clause, ctx)
+                    })
+                })
+        });
+    permanents.chain(cards).collect()
 }
 
 /// An application filter that `bind_transient_effect`'s non-targeted match binds to players.
@@ -2759,6 +2893,123 @@ mod tests {
         );
     }
 
+    /// CR 611.2c + CR 109.2a + CR 400.1: a broadcast over an `Or` binds the permanents the
+    /// whole filter names and, per clause, the cards of a per-player zone the layer pass
+    /// does not own; a bare clause never admits a graveyard card, and hand, exile and
+    /// the opponent's graveyard bind nothing. SYNTHETIC: no printed card mixes a zone-less
+    /// branch with a zone-naming one in a `GenericEffect`; the nearest is Past in Flames,
+    /// whose branches both name the graveyard.
+    #[test]
+    fn broadcast_binds_each_clause_only_in_the_zone_it_names() {
+        use crate::types::ability::{FilterProp, TypeFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Stack,
+        );
+        let mut add = |card: u64, owner: u8, zone: Zone, core_type: CoreType| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(owner),
+                format!("Card {card}"),
+                zone,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core_type);
+            id
+        };
+        let creature = add(2, 0, Zone::Battlefield, CoreType::Creature);
+        let battlefield_instant = add(3, 0, Zone::Battlefield, CoreType::Instant);
+        let graveyard_creature = add(4, 0, Zone::Graveyard, CoreType::Creature);
+        let graveyard_instant = add(5, 0, Zone::Graveyard, CoreType::Instant);
+        let opposing_instant = add(6, 1, Zone::Graveyard, CoreType::Instant);
+        let hand_card = add(7, 0, Zone::Hand, CoreType::Creature);
+        let exile_card = add(8, 0, Zone::Exile, CoreType::Creature);
+        assert!(
+            state.exile.contains(&exile_card),
+            "the exile card is in exile"
+        );
+        assert!(
+            state.players[0].hand.contains(&hand_card),
+            "the hand card is in hand"
+        );
+
+        let in_zone = |zone| vec![FilterProp::InZone { zone }];
+        let affected = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant)
+                        .controller(ControllerRef::You)
+                        .properties(in_zone(Zone::Graveyard)),
+                ),
+                TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(in_zone(Zone::Hand)),
+                ),
+                TargetFilter::Typed(TypedFilter::card().properties(in_zone(Zone::Exile))),
+            ],
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Trample,
+                    }])],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        let mut bound: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .map(|effect| effect.affected.clone())
+            .collect();
+        let mut expected = vec![
+            TargetFilter::SpecificObject { id: creature },
+            TargetFilter::SpecificObject {
+                id: graveyard_instant,
+            },
+        ];
+        let key = |filter: &TargetFilter| format!("{filter:?}");
+        bound.sort_by_key(key);
+        expected.sort_by_key(key);
+        // Reach-guards: the battlefield pass and the graveyard clause both bound a card.
+        assert_eq!(bound, expected, "bound: {bound:?}");
+        for unbound in [
+            battlefield_instant,
+            graveyard_creature,
+            opposing_instant,
+            hand_card,
+            exile_card,
+        ] {
+            assert!(
+                !bound.contains(&TargetFilter::SpecificObject { id: unbound }),
+                "{unbound:?} must not be bound"
+            );
+        }
+    }
+
     #[test]
     fn generic_effect_target_player_affected_filter_binds_matching_objects_not_player() {
         let mut state = GameState::new_two_player(42);
@@ -3225,6 +3476,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()
@@ -3511,6 +3764,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: cast_spell,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let static_def = StaticDefinition::continuous()

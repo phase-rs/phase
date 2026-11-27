@@ -220,6 +220,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // re-check, and each returns only itself (disjoint graveyard referents).
     // The death-count read × zone-change write conflict is conservative.
     "darklight phoenix",
+    // Spellpyre Phoenix: the hand write conservatively overlaps JournalCards.
+    // Each trigger returns its own card and leaves both players' cycle counts
+    // intact, so the intervening-if rechecks give the same result in either order.
+    "spellpyre phoenix",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -1307,6 +1311,7 @@ fn put_counter_all(count: QuantityExpr) -> Effect {
 }
 fn token_power_src() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Elemental".into(),
         power: crate::types::ability::PtValue::Fixed(1),
         toughness: crate::types::ability::PtValue::Fixed(1),
@@ -1853,7 +1858,7 @@ fn creatures_of(cr: ControllerRef) -> TargetFilter {
 fn sacrifice_self() -> Effect {
     Effect::Sacrifice {
         target: TargetFilter::SelfRef,
-        count: qfix(1),
+        count: qfix(1).into(),
         min_count: 0,
     }
 }
@@ -2285,7 +2290,8 @@ fn sacrifice_all_own_creatures() -> ResolvedAbility {
         target: creatures_of(ControllerRef::You),
         count: qref(QuantityRef::ObjectCount {
             filter: creatures_of(ControllerRef::You),
-        }),
+        })
+        .into(),
         min_count: 0,
     })
 }

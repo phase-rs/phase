@@ -508,6 +508,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         // bottom of its owner's scheme deck — whether that is good depends on
         // the scheme (ongoing pressure vs. cycling to the next scheme).
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing a face-up scheme's abilities — whether that is
+        // good depends on the scheme being set in motion again.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -1060,7 +1063,11 @@ fn type_filter_domain(tf: &TypeFilter) -> TypeDomain {
         // combines Instant or Sorcery with Creature, and this engine's
         // `core_types` set does not carry both at once for any live object.
         // Provably creature-excluding, unlike the permanent types below.
-        TypeFilter::Instant | TypeFilter::Sorcery => TypeDomain::NON_CREATURE_ONLY,
+        // CR 314.1: schemes are nontraditional command-zone cards, never
+        // creatures — provably creature-excluding for the same reason.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => {
+            TypeDomain::NON_CREATURE_ONLY
+        }
 
         // These five permanent types are NOT structurally creature-excluding
         // — real printed cards double them with Creature (Dryad Arbor is a
@@ -2544,10 +2551,210 @@ fn effect_has_no_value_outside_combat(effect: &Effect) -> bool {
 fn modification_rides_a_trick(modification: &ContinuousModification) -> bool {
     modification_is_bound_to_combat(modification)
         || modification_is_creature_type_rider(modification)
-        || matches!(
-            modification,
-            ContinuousModification::AddStaticMode { mode } if static_mode_is_bound_to_combat(mode)
-        )
+        || match modification {
+            ContinuousModification::AddStaticMode { mode } => static_mode_is_bound_to_combat(mode),
+            ContinuousModification::GrantStaticAbility { definition } => {
+                definition.has_legacy_static_mode_shape() && quoted_static_rides_a_trick(definition)
+            }
+            // Exhaustive: the remaining modifications qualify only through the predicates above.
+            ContinuousModification::CopyValues { .. }
+            | ContinuousModification::CopyChosen
+            | ContinuousModification::SetName { .. }
+            | ContinuousModification::SetTextName { .. }
+            | ContinuousModification::SubstituteTextWord { .. }
+            | ContinuousModification::AddPower { .. }
+            | ContinuousModification::AddToughness { .. }
+            | ContinuousModification::SetPower { .. }
+            | ContinuousModification::SetToughness { .. }
+            | ContinuousModification::AddKeyword { .. }
+            | ContinuousModification::RemoveKeyword { .. }
+            | ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
+            | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+            | ContinuousModification::GrantTrigger { .. }
+            | ContinuousModification::GrantReplacement { .. }
+            | ContinuousModification::RemoveAllAbilities
+            | ContinuousModification::AddType { .. }
+            | ContinuousModification::RemoveType { .. }
+            | ContinuousModification::AddSubtype { .. }
+            | ContinuousModification::RemoveSubtype { .. }
+            | ContinuousModification::SetCardTypes { .. }
+            | ContinuousModification::RemoveAllSubtypes { .. }
+            | ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetDynamicToughness { .. }
+            | ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. }
+            | ContinuousModification::AddDynamicPower { .. }
+            | ContinuousModification::AddDynamicToughness { .. }
+            | ContinuousModification::AddDynamicKeyword { .. }
+            | ContinuousModification::AddKeywordWithDerivedCost { .. }
+            | ContinuousModification::AddAllCreatureTypes
+            | ContinuousModification::AddAllBasicLandTypes
+            | ContinuousModification::AddAllLandTypes
+            | ContinuousModification::AddChosenSubtype { .. }
+            | ContinuousModification::AddChosenColor { .. }
+            | ContinuousModification::RemoveChosenKeyword
+            | ContinuousModification::AddChosenKeyword
+            | ContinuousModification::SetColor { .. }
+            | ContinuousModification::AddColor { .. }
+            | ContinuousModification::SwitchPowerToughness
+            | ContinuousModification::AssignDamageFromToughness
+            | ContinuousModification::AssignDamageAsThoughUnblocked
+            | ContinuousModification::AssignNoCombatDamage
+            | ContinuousModification::ChangeController
+            | ContinuousModification::ChangeControllerToDesignation { .. }
+            | ContinuousModification::SetBasicLandType { .. }
+            | ContinuousModification::SetChosenBasicLandType
+            | ContinuousModification::SetChosenName
+            | ContinuousModification::RetainPrintedTriggerFromSource { .. }
+            | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+            | ContinuousModification::RetainAllOtherAbilitiesFromSource
+            | ContinuousModification::AddSupertype { .. }
+            | ContinuousModification::RemoveSupertype { .. }
+            | ContinuousModification::AddCounterOnEnter { .. }
+            | ContinuousModification::SetStartingLoyalty { .. }
+            | ContinuousModification::RemoveManaCost => false,
+        }
+}
+
+/// CR 508.1c + CR 509.1b: the quoted static grants that only matter as attackers and blockers
+/// are declared. A quoted "can't attack" rides a trick only when it names the creature's owner
+/// (Elrond of the White Council).
+fn quoted_static_rides_a_trick(definition: &StaticDefinition) -> bool {
+    use engine::types::triggers::AttackTargetFilter;
+
+    match &definition.mode {
+        StaticMode::CantAttack => {
+            matches!(&definition.attack_defended, Some(AttackTargetFilter::Owner))
+        }
+        StaticMode::CantBlock
+        | StaticMode::MustAttack
+        | StaticMode::BlockRestriction { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CanAttackWithDefender => true,
+        // Exhaustive: classify each new StaticMode explicitly here to decide
+        // whether it rides a trick.
+        StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::LethalDamageDeterminedByPower
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::ModifyCost { .. }
+        | StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::ReduceAbilityCost { .. }
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { .. }
+        | StaticMode::MustBeBlockedByAll { .. }
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary { .. }
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::CantSetSchemeInMotion
+        | StaticMode::Other(..) => false,
+    }
 }
 
 /// CR 508.1c + CR 508.1d + CR 509.1b + CR 509.1c: the restrictions and requirements read as
@@ -3387,7 +3594,7 @@ mod temporary_combat_modifier_tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 0,
         }
     }
@@ -3417,6 +3624,42 @@ mod temporary_combat_modifier_tests {
 
     fn beside_a_pump(effect: &Effect) -> CombatBinding {
         CombatBinding::of_resolution(&[&bare_pump(), effect])
+    }
+
+    #[test]
+    fn printed_backup_grant_is_not_a_combat_only_rider() {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::ability::AbilityTag;
+
+        let mut scenario = GameScenario::new();
+        let kavu = scenario.add_creature_from_oracle(
+            P0,
+            "Chomping Kavu",
+            3,
+            3,
+            r#"Backup 1 (When this creature enters, put a +1/+1 counter on target creature. If that's another creature, it gains the following ability until end of turn.)
+This creature can't be blocked by creatures with power 2 or less."#,
+        ).id();
+        let runner = scenario.build();
+        let backup = runner.state().objects[&kavu]
+            .base_trigger_definitions
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find(|ability| ability.ability_tag == Some(AbilityTag::Backup))
+            .expect("synthesized Backup trigger");
+        let rider = backup.sub_ability.as_deref().expect("Backup grant");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = rider.effect.as_ref()
+        else {
+            panic!("expected Backup's continuous grant");
+        };
+        assert!(static_abilities.iter().flat_map(|definition| &definition.modifications).any(
+            |modification| matches!(modification, ContinuousModification::GrantStaticAbility { definition }
+                if definition.affected == Some(TargetFilter::SelfRef)
+                    && matches!(definition.mode, StaticMode::CantBeBlockedBy { .. }))
+        ));
+        assert_eq!(beside_a_pump(&rider.effect), CombatBinding::Partial);
     }
 
     /// The riders read in full: every attack and block static of CR 508.1c, CR 508.1d, CR 509.1b
@@ -6530,4 +6773,18 @@ mod controller_value_tests {
         let pump = r#"{"kind":"Spell","effect":{"type":"Pump","power":{"type":"Fixed","value":2},"toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}},"duration":"UntilEndOfTurn"}"#;
         assert_eq!(reading(value_at(pump, 20)), Reading::Nothing);
     }
+}
+
+#[test]
+fn full_steam_ahead_reaches_the_combat_rider_reader() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        r#"Until end of turn, each creature you control gets +2/+2 and gains trample and "This creature can't be blocked by more than one creature.""#,
+        "Full Steam Ahead",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let effect = &parsed.abilities.first().expect("parsed spell").effect;
+    assert!(!effect_is_combat_trick_payload(effect));
+    assert!(effect_has_no_value_outside_combat(effect));
 }

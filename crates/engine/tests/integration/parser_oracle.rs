@@ -604,7 +604,7 @@ fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
 /// the already-merged unmodified class (Worldgorger Dragon) must still report
 /// ZERO coverage gaps after the modifier-unsupported path was added — proving
 /// the coverage-honesty fix did not regress the supported class. Oracle text
-/// verbatim from `crates/engine/tests/fixtures/integration_cards.json.gz` (2026-07).
+/// verbatim from `crates/engine/tests/fixtures/integration_cards/` (2026-07).
 #[test]
 fn mass_exile_ltb_return_unmodified_class_reports_no_gaps() {
     use engine::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
@@ -795,7 +795,9 @@ fn render_net_effect_carrier_census() {
     // 241: + `Effect::ResumeDamageBatch` (internal paused damage batch; its portions carry
     // `DamageContextSnapshot`, `TargetRef`, `ObjectId` and `EffectKind`, none of which reaches a
     // `description`, so no RENDER_DESCEND arm).
-    const EFFECT_VARIANT_PIN: usize = 241;
+    // 242: + `Effect::SetSchemeInMotion` (single `TargetFilter`, reaches no `description`, so
+    // no RENDER_DESCEND arm).
+    const EFFECT_VARIANT_PIN: usize = 242;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),

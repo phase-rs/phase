@@ -28,17 +28,26 @@
 //! next priority. The rows below drive one
 //! member of that class each through real card data.
 
+use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{Effect, ResolvedAbility, TargetRef};
-use engine::types::actions::GameAction;
+use engine::game::triggers::PendingTriggerContext;
+use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
+use engine::types::ability::{
+    DelayedTriggerCondition, Effect, ResolvedAbility, TargetFilter, TargetRef,
+};
+use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    GameState, LoopDetectionMode, StackEntry, StackEntryKind, WaitingFor,
+    CastPaymentMode, GameState, LoopDetectionMode, StackEntry, StackEntryKind, WaitingFor,
+    ZoneDeparture,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolution::ResolutionFrame;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -1682,6 +1691,961 @@ fn elimination_keeps_the_survivors_batch_whole() {
             "{mode:?}"
         );
         assert_eq!(life(&r, P0), 22, "{mode:?}");
+    }
+}
+
+fn loss_seats(events: &[GameEvent]) -> Vec<PlayerId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+// Preserve the exact action receipts up to the first real choice.
+fn pass_stack_to_choice(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..24 {
+        if runner.state().stack.is_empty()
+            || !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            return events;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority")
+                .events,
+        );
+    }
+    panic!("stack did not resolve or open a choice");
+}
+
+#[test]
+fn magma_jet_keeps_the_victim_alive_until_scry_settles() {
+    for mode in MODES {
+        for initial_life in [2, 3] {
+            let db = shared_card_db().expect("card db");
+            let mut sc = GameScenario::new_n_player(3, 42);
+            sc.at_phase(Phase::PreCombatMain)
+                .with_life(P1, initial_life);
+            let calling = sc.add_real_card(P0, "Lost Isle Calling", Zone::Battlefield, db);
+            let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+            let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+            let top = sc.add_real_card(P0, "Island", Zone::Library, db);
+            let second = sc.add_real_card(P0, "Forest", Zone::Library, db);
+            let third = sc.add_real_card(P0, "Mountain", Zone::Library, db);
+            let mut mana = pool(1, ManaType::Red);
+            mana.extend(pool(1, ManaType::Colorless));
+            sc.with_mana_pool(P0, mana);
+            let mut r = start(sc, mode);
+            drop(r.cast(jet).target_player(P1).commit());
+
+            let events = pass_stack_to_choice(&mut r);
+            assert!(events.iter().any(|event| matches!(
+                event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(P1), amount: 2, .. } if *source_id == jet
+            )));
+            let WaitingFor::ScryChoice { player, cards } = &r.state().waiting_for else {
+                panic!(
+                    "expected Magma Jet's ScryChoice, got {:?}",
+                    r.state().waiting_for
+                );
+            };
+            assert_eq!((*player, cards.as_slice()), (P0, [top, second].as_slice()));
+            assert_eq!(life(&r, P1), initial_life - 2);
+            assert!(
+                !eliminated(&r, P1),
+                "the victim remains live at the caster's scry"
+            );
+            assert!(loss_seats(&events).is_empty());
+            assert!(r.state().pending_trigger_order.is_none());
+
+            let answer = r
+                .act(GameAction::SelectCards {
+                    cards: vec![second, top],
+                })
+                .expect("accept the caster's nonidentity scry order");
+            assert_eq!(
+                r.state().players[0]
+                    .library
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [second, top, third]
+            );
+            if initial_life == 2 {
+                assert_eq!(loss_seats(&answer.events), [P1]);
+                let WaitingFor::OrderTriggers { player, triggers } = &r.state().waiting_for else {
+                    panic!("scry and loss must lead to a single order prompt");
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(
+                    sorted(triggers.iter().map(|t| t.source_name.clone()).collect()),
+                    names(&["Lost Isle Calling", "Withengar Unbound"])
+                );
+                let order = vec![1, 0];
+                let ordered_sources: Vec<_> = order
+                    .iter()
+                    .map(|&index| triggers[index].source_id)
+                    .collect();
+                r.act(GameAction::OrderTriggers { order })
+                    .expect("order the two triggers");
+                assert_eq!(
+                    r.state()
+                        .stack
+                        .iter()
+                        .map(|entry| (entry.source_id, entry.controller))
+                        .collect::<Vec<_>>(),
+                    ordered_sources
+                        .into_iter()
+                        .map(|id| (id, P0))
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                assert!(loss_seats(&answer.events).is_empty());
+                assert!(!eliminated(&r, P1));
+                assert_eq!(
+                    r.state().stack.front().expect("scry trigger").source_id,
+                    calling
+                );
+                assert_eq!(r.state().stack.len(), 1);
+            }
+            assert!(pass_stack_to_choice(&mut r)
+                .iter()
+                .all(|event| !matches!(event, GameEvent::PlayerLost { .. })));
+            assert!(r.state().stack.is_empty());
+            assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+            assert_eq!(
+                r.state().objects[&calling]
+                    .counters
+                    .get(&CounterType::Generic("verse".to_owned())),
+                Some(&1)
+            );
+            assert_eq!(
+                r.state().objects[&withengar]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or_default(),
+                if initial_life == 2 { 13 } else { 0 }
+            );
+        }
+    }
+}
+
+#[test]
+fn magma_jet_loss_respects_the_stolen_observer_controller() {
+    let db = shared_card_db().expect("card db");
+    let other = PlayerId(2);
+    for victim in [P1, other] {
+        let mut sc = GameScenario::new_n_player(3, 42);
+        sc.at_phase(Phase::PreCombatMain).with_life(victim, 2);
+        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+        let aura = sc.add_real_card(P1, "Control Magic", Zone::Battlefield, db);
+        let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+        let island = sc.add_real_card(P0, "Island", Zone::Library, db);
+        let forest = sc.add_real_card(P0, "Forest", Zone::Library, db);
+        let mut mana = pool(1, ManaType::Red);
+        mana.extend(pool(1, ManaType::Colorless));
+        sc.with_mana_pool(P0, mana);
+        let mut r = start(sc, LoopDetectionMode::Off);
+        engine::game::effects::attach::attach_to(r.state_mut(), aura, withengar);
+        assert_eq!(r.state().objects[&withengar].controller, P1);
+        drop(r.cast(jet).target_player(victim).commit());
+        let events = pass_stack_to_choice(&mut r);
+        assert!(loss_seats(&events).is_empty());
+        assert!(
+            matches!(&r.state().waiting_for, WaitingFor::ScryChoice { player: P0, cards } if cards == &[island, forest])
+        );
+        let answer = r
+            .act(GameAction::SelectCards {
+                cards: vec![forest, island],
+            })
+            .expect("settle the real Scry choice");
+        assert_eq!(loss_seats(&answer.events), [victim]);
+        if victim == P1 {
+            assert_eq!(r.state().objects[&withengar].controller, P0);
+            assert!(
+                r.state().stack.is_empty(),
+                "the old controller's trigger leaves with P1"
+            );
+        } else {
+            let entry = r
+                .state()
+                .stack
+                .front()
+                .expect("the surviving controller's trigger");
+            assert_eq!((entry.source_id, entry.controller), (withengar, P1));
+            assert_eq!(r.state().stack.len(), 1);
+        }
+        pass_stack_to_choice(&mut r);
+        assert!(r.state().stack.is_empty());
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        let expected = if victim == other { 13 } else { 0 };
+        assert_eq!(
+            r.state().objects[&withengar]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn terminal_magma_jet_loss_does_not_place_the_winners_trigger() {
+    let db = shared_card_db().expect("card db");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain).with_life(P1, 2);
+    let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+    let jet = sc.add_real_card(P0, "Magma Jet", Zone::Hand, db);
+    let island = sc.add_real_card(P0, "Island", Zone::Library, db);
+    let forest = sc.add_real_card(P0, "Forest", Zone::Library, db);
+    let mut mana = pool(1, ManaType::Red);
+    mana.extend(pool(1, ManaType::Colorless));
+    sc.with_mana_pool(P0, mana);
+    let mut r = start(sc, LoopDetectionMode::Off);
+    drop(r.cast(jet).target_player(P1).commit());
+    let events = pass_stack_to_choice(&mut r);
+    assert!(loss_seats(&events).is_empty());
+    assert!(
+        matches!(&r.state().waiting_for, WaitingFor::ScryChoice { player: P0, cards } if cards == &[island, forest])
+    );
+    let answer = r
+        .act(GameAction::SelectCards {
+            cards: vec![forest, island],
+        })
+        .expect("settle the real Scry choice");
+    assert_eq!(loss_seats(&answer.events), [P1]);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::GameOver { winner: Some(P0) }
+    ));
+    assert!(r.state().deferred_triggers.is_empty());
+    assert!(r.state().pending_trigger_order.is_none());
+    assert!(r.state().stack.is_empty());
+    assert!(!r.state().objects[&withengar]
+        .counters
+        .contains_key(&CounterType::Plus1Plus1));
+}
+
+#[test]
+fn bowmasters_waits_to_eliminate_the_victim_until_amass_finishes() {
+    for initial_life in [1, 2] {
+        let db = shared_card_db().expect("card db");
+        let mut sc = GameScenario::new_n_player(3, 42);
+        sc.at_phase(Phase::PreCombatMain)
+            .with_life(P1, initial_life);
+        let bowmasters = sc.add_real_card(P0, "Orcish Bowmasters", Zone::Hand, db);
+        let scales = sc.add_real_card(P0, "Hardened Scales", Zone::Battlefield, db);
+        let season = sc.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+        let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+        let army = sc
+            .add_creature(P0, "Orc Army", 0, 0)
+            .with_subtypes(vec!["Orc", "Army"])
+            .with_plus_counters(1)
+            .id();
+        let mut mana = pool(1, ManaType::Black);
+        mana.extend(pool(1, ManaType::Colorless));
+        sc.with_mana_pool(P0, mana);
+        let mut r = start(sc, LoopDetectionMode::Off);
+        drop(r.cast(bowmasters).commit());
+
+        pass_stack_to_choice(&mut r);
+        let WaitingFor::TriggerTargetSelection { player, .. } = &r.state().waiting_for else {
+            panic!(
+                "expected Bowmasters' enters trigger target, got {:?}",
+                r.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        r.act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("target P1 with the Bowmasters trigger");
+        let events = pass_stack_to_choice(&mut r);
+        assert!(events.iter().any(|event| matches!(
+            event, GameEvent::DamageDealt { source_id, target: TargetRef::Player(P1), amount: 1, .. } if *source_id == bowmasters
+        )));
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &r.state().waiting_for
+        else {
+            panic!(
+                "expected amass counter order, got {:?}",
+                r.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [scales, season].into_iter().collect()
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == scales)
+            .expect("Hardened Scales is a candidate");
+        assert_eq!(life(&r, P1), initial_life - 1);
+        assert!(
+            !eliminated(&r, P1),
+            "the victim remains live at the amass replacement"
+        );
+        assert!(loss_seats(&events).is_empty());
+        assert_eq!(
+            r.state().objects[&army].counters[&CounterType::Plus1Plus1],
+            1
+        );
+
+        let answer = r
+            .act(GameAction::ChooseReplacement { index })
+            .expect("apply Hardened Scales before Doubling Season");
+        assert_eq!(
+            r.state().objects[&army].counters[&CounterType::Plus1Plus1],
+            5
+        );
+        assert!(
+            matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+            "starting life {initial_life}, post-amass wait: {:?}, lost seats: {:?}",
+            r.state().waiting_for,
+            loss_seats(&answer.events),
+        );
+        if initial_life == 1 {
+            assert_eq!(loss_seats(&answer.events), [P1]);
+            assert_eq!(r.state().stack.len(), 1);
+            assert_eq!(
+                r.state().stack.front().expect("loss trigger").source_id,
+                withengar
+            );
+        } else {
+            assert!(loss_seats(&answer.events).is_empty());
+            assert!(!eliminated(&r, P1));
+            assert!(r.state().stack.is_empty());
+        }
+        pass_stack_to_choice(&mut r);
+        if initial_life == 1 {
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &r.state().waiting_for
+            else {
+                panic!(
+                    "Withengar's thirteen counters also consult both replacements, got {:?}",
+                    r.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.source_id)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [scales, season].into_iter().collect()
+            );
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.source_id == scales)
+                .expect("Hardened Scales");
+            let result = r
+                .act(GameAction::ChooseReplacement { index })
+                .expect("settle the one Withengar trigger");
+            assert!(loss_seats(&result.events).is_empty());
+        }
+        assert!(r.state().stack.is_empty());
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            r.state().objects[&withengar]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or_default(),
+            if initial_life == 1 { 28 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn terminal_loss_still_runs_during_a_parked_sandbox_entry() {
+    let db = shared_card_db().expect("card db");
+    for create in [false, true] {
+        let mut sc = GameScenario::new_n_player(3, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        let season = sc.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+        let vorinclex = sc.add_real_card(P1, "Vorinclex, Monstrous Raider", Zone::Battlefield, db);
+        let existing =
+            (!create).then(|| sc.add_real_card(P0, "Comet, Stellar Pup", Zone::Graveyard, db));
+        let mut r = start(sc, LoopDetectionMode::Off);
+        r.state_mut().debug_mode = true;
+        if let Some(comet) = existing {
+            apply(
+                r.state_mut(),
+                P0,
+                GameAction::Debug(DebugAction::MoveToZone {
+                    object_id: comet,
+                    to_zone: Zone::Battlefield,
+                    library_position: None,
+                    simulate: true,
+                }),
+            )
+            .expect("simulate the printed planeswalker's entry");
+        } else {
+            let face = db
+                .get_face_by_name("Comet, Stellar Pup")
+                .expect("printed fixture");
+            create_debug_cards(
+                r.state_mut(),
+                DebugCardCreateRequest {
+                    actor: P0,
+                    source: debug_card_entry_source(db, face),
+                    owner: P0,
+                    zone: Zone::Battlefield,
+                    count: 1,
+                    attach_to: None,
+                    run_etb: true,
+                    nonlegendary: false,
+                    creation_kind: DebugCardCreationKind::Card,
+                },
+            )
+            .expect("create the printed planeswalker");
+        }
+        let state = r.state();
+        let before = state.waiting_for.clone();
+        let WaitingFor::ReplacementChoice {
+            player: P0,
+            candidates,
+            ..
+        } = &before
+        else {
+            panic!("expected Comet's two intrinsic loyalty replacements, got {before:?}");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [season, vorinclex].into_iter().collect()
+        );
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == season)
+            .expect("Doubling Season is offered");
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(!state.resolution_stack.is_empty());
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .any(|frame| matches!(frame, ResolutionFrame::DebugCardEntries(_))),
+            create
+        );
+        let victim = PlayerId(2);
+        let result = apply(
+            r.state_mut(),
+            P0,
+            GameAction::Debug(DebugAction::SetLife {
+                player_id: victim,
+                life: 0,
+            }),
+        )
+        .expect("authorized sandbox loss");
+        assert_eq!(loss_seats(&result.events), [victim]);
+        assert_eq!(r.state().waiting_for, before);
+        assert!(eliminated(&r, victim));
+
+        r.act(GameAction::ChooseReplacement { index })
+            .expect("put doubled loyalty first");
+        let state = r.state();
+        let comet = state
+            .objects
+            .values()
+            .find(|object| object.name == "Comet, Stellar Pup")
+            .expect("Comet remains");
+        assert_eq!(comet.zone, Zone::Battlefield);
+        assert_eq!(comet.counters.get(&CounterType::Loyalty), Some(&5));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+}
+
+struct CleanupLossBoard {
+    runner: GameRunner,
+    chieftain: ObjectId,
+    goblin: ObjectId,
+    reaper: ObjectId,
+    withengar: ObjectId,
+    delayed_source: ObjectId,
+    goblin_incarnation: u64,
+    konrad: Option<ObjectId>,
+    aura: ObjectId,
+    aura_owner: PlayerId,
+    older: Option<PendingTriggerContext>,
+}
+
+fn cleanup_loss_board(commander: bool, seed_older: bool) -> CleanupLossBoard {
+    let db = shared_card_db().expect("card db");
+    let mut sc = GameScenario::new_n_player(3, 42);
+    sc.at_phase(Phase::End);
+    for _ in 0..8 {
+        sc.add_real_card(P1, "Grizzly Bears", Zone::Hand, db);
+    }
+    for seat in [P0, P1, PlayerId(2)] {
+        for _ in 0..6 {
+            sc.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let chieftain = sc.add_real_card(P0, "Goblin Chieftain", Zone::Battlefield, db);
+    // Chieftain is the Aura's only legal host on entry.
+    // Keep the cleanup chooser alive when inspecting a previously deferred context.
+    let aura_owner = if seed_older { PlayerId(2) } else { P1 };
+    let aura = sc.add_real_card(aura_owner, "Holy Strength", Zone::Battlefield, db);
+    let goblin = sc.add_real_card(
+        P0,
+        if commander {
+            "Grenzo, Dungeon Warden"
+        } else {
+            "Mogg Fanatic"
+        },
+        Zone::Battlefield,
+        db,
+    );
+    sc.with_counter(chieftain, CounterType::Minus1Minus1, 2)
+        .with_counter(
+            goblin,
+            CounterType::Minus1Minus1,
+            if commander { 2 } else { 1 },
+        );
+    // Structural control derived from Together Forever, the nearest printed precedent.
+    // Removing "this turn" keeps the legacy watcher installed across cleanup.
+    let delayed_source = sc.add_enchantment_from_oracle(
+        P0,
+        "Unwindowed cleanup watcher",
+        "{1}: Choose target creature with a counter on it. When that creature dies, return that card to its owner's hand.",
+    ).id();
+    let seed_kill = seed_older.then(|| {
+        (
+            sc.add_real_card(P0, "Shock", Zone::Hand, db),
+            sc.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db),
+        )
+    });
+    let mut mana = pool(1, ManaType::Colorless);
+    if seed_older {
+        mana.extend(pool(1, ManaType::Red));
+    }
+    sc.with_mana_pool(P0, mana);
+    let reaper = sc.add_real_card(P0, "Midnight Reaper", Zone::Battlefield, db);
+    let withengar = sc.add_real_card(P0, "Withengar Unbound", Zone::Battlefield, db);
+    let konrad =
+        commander.then(|| sc.add_real_card(P0, "Syr Konrad, the Grim", Zone::Battlefield, db));
+    let mut runner = start(sc, LoopDetectionMode::Off);
+    runner.state_mut().debug_mode = true;
+    engine::game::layers::mark_layers_full(runner.state_mut());
+    engine::game::layers::flush_layers(runner.state_mut());
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(chieftain.into())
+    );
+    assert_eq!(runner.state().objects[&aura].owner, aura_owner);
+    assert_eq!(runner.state().objects[&chieftain].toughness, Some(2));
+    assert_eq!(runner.state().objects[&goblin].toughness, Some(1));
+
+    if commander {
+        make_commander(&mut runner, goblin);
+    }
+
+    let older = if let Some((shock, bear)) = seed_kill {
+        drop(runner.cast(shock).target_object(bear).commit());
+        let events = pass_stack_to_choice(&mut runner);
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. } if *object_id == bear
+        )));
+        let WaitingFor::OrderTriggers {
+            player: P0,
+            triggers,
+        } = &runner.state().waiting_for
+        else {
+            panic!("the real Shock death must ask P0 to order Reaper and Konrad");
+        };
+        assert_eq!(triggers.len(), 2);
+        let context = runner
+            .state()
+            .pending_trigger_order
+            .as_ref()
+            .expect("in-flight setup order")
+            .groups
+            .iter()
+            .flat_map(|group| &group.triggers)
+            .find(|context| context.pending.source_id == reaper)
+            .expect("a real Reaper context for the prior death")
+            .clone();
+        runner
+            .act(GameAction::OrderTriggers { order: vec![1, 0] })
+            .expect("order the prior two triggers");
+        pass_stack_to_choice(&mut runner);
+        assert!(runner.state().stack.is_empty());
+        // CR 603.3b: the clone came out of a live ordering prompt, so it is
+        // marked as a member of that (now finished) placement process. A real
+        // parked Ordinary leftover was never admitted to placement, so restore
+        // it without the mark, which deserializes as a fresh context.
+        let mut saved = serde_json::to_value(context).expect("serialize setup context");
+        saved
+            .as_object_mut()
+            .expect("a context is a JSON object")
+            .remove(engine::game::triggers::PLACEMENT_PROCESS_FIELD);
+        Some(
+            serde_json::from_value::<PendingTriggerContext>(saved)
+                .expect("deserialize the fresh setup context"),
+        )
+    } else {
+        None
+    };
+
+    let goblin_incarnation = runner.state().objects[&goblin].incarnation;
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: delayed_source,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the cleanup watcher");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(goblin)),
+        })
+        .expect("the watcher chooses the other Goblin with its marker");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay the watcher's cost");
+    }
+    pass_stack_to_choice(&mut runner);
+    let delayed = &runner.state().delayed_triggers;
+    let [watcher] = delayed.as_slice() else {
+        panic!("the cleanup control must install exactly one live WhenDies watcher");
+    };
+    assert_eq!(
+        (watcher.source_id, watcher.controller),
+        (delayed_source, P0)
+    );
+    assert!(
+        matches!(
+            watcher.condition,
+            DelayedTriggerCondition::WhenDies { filter: TargetFilter::SpecificObject { id } }
+                if id == goblin
+        ),
+        "the installed watcher must name the selected Goblin"
+    );
+    let saved_context =
+        serde_json::to_value(&watcher.ability.context).expect("serialize legacy watcher");
+    assert!(saved_context.get("delayed_watch_incarnation").is_none());
+    assert_eq!(
+        runner.state().objects[&goblin].incarnation,
+        goblin_incarnation
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert_eq!(runner.state().objects[&chieftain].toughness, Some(2));
+    assert_eq!(runner.state().objects[&goblin].toughness, Some(1));
+
+    // Start the real End-to-Cleanup transition with P1 holding priority.
+    let state = runner.state_mut();
+    state.active_player = P1;
+    state.priority_player = P1;
+    state.waiting_for = WaitingFor::Priority { player: P1 };
+    state.priority_passes.clear();
+    for _ in 0..3 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass to cleanup");
+    }
+    assert_eq!(runner.state().phase, Phase::Cleanup);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DiscardToHandSize {
+            player: P1,
+            count: 1,
+            ..
+        }
+    ));
+    assert!(runner.state().resolving_stack_entry.is_none());
+    if let Some(prefix) = &older {
+        assert!(serde_json::to_value(prefix)
+            .expect("serialize setup context")
+            .get("batch_origin")
+            .is_none());
+        runner.state_mut().deferred_triggers.push(prefix.clone());
+    }
+    assert_eq!(runner.state().delayed_triggers.len(), 1);
+    CleanupLossBoard {
+        runner,
+        chieftain,
+        goblin,
+        reaper,
+        withengar,
+        delayed_source,
+        goblin_incarnation,
+        konrad,
+        aura,
+        aura_owner,
+        older,
+    }
+}
+
+fn lose_during_cleanup(board: &mut CleanupLossBoard) {
+    let result = apply(
+        board.runner.state_mut(),
+        P0,
+        GameAction::Debug(DebugAction::SetLife {
+            player_id: board.aura_owner,
+            life: 0,
+        }),
+    )
+    .expect("authorized debug SetLife of the Aura's owner during cleanup");
+    assert_eq!(loss_seats(&result.events), [board.aura_owner]);
+    assert_eq!(eliminated(&board.runner, P1), board.aura_owner == P1);
+    let debug = result
+        .events
+        .iter()
+        .position(|event| matches!(event, GameEvent::DebugActionUsed { player_id: P0, .. }))
+        .expect("real debug action");
+    let loss = result
+        .events
+        .iter()
+        .position(|event| {
+            matches!(event, GameEvent::PlayerLost { player_id, .. } if *player_id == board.aura_owner)
+        })
+        .expect("real terminal departure");
+    assert!(debug < loss);
+    assert!(
+        result.events.iter().any(|event| matches!(event,
+            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), record, .. }
+                if *object_id == board.aura && record.departure == ZoneDeparture::LeftGame
+        )),
+        "the losing owner's Holy Strength leaves"
+    );
+    assert!(!board.runner.state().battlefield.contains(&board.aura));
+    assert!(!result.events.iter().any(|event| matches!(
+        event,
+        GameEvent::ZoneChanged {
+            from: Some(Zone::Hand),
+            to: Zone::Graveyard,
+            ..
+        }
+    )));
+    assert!(result.events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, record }
+            if *object_id == board.goblin && record.trigger_source_context.as_ref().is_some_and(|context|
+                context.identity.reference.incarnation == board.goblin_incarnation)
+    )));
+    let deaths = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record,
+            } if [board.chieftain, board.goblin].contains(object_id) => {
+                Some((*object_id, record.toughness, record.turn_zone_change_index))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(first, Some(0), first_index), (second, Some(0), second_index)] = deaths.as_slice() else {
+        panic!("two real zero-toughness deaths after Holy Strength leaves, got {deaths:?}");
+    };
+    // The lord buffs the second Goblin while alive. The second Goblin's
+    // zero-toughness LKI can therefore only come after the lord's own check.
+    assert_eq!((*first, *second), (board.chieftain, board.goblin));
+    assert!(first_index < second_index);
+}
+
+#[test]
+fn terminal_cleanup_loss_batches_later_sba_deaths_and_delayed_triggers() {
+    let mut board = cleanup_loss_board(false, false);
+    let life_before = life(&board.runner, P0);
+    let hand_before = board.runner.state().players[0].hand.len();
+    let old_incarnation = board.runner.state().objects[&board.goblin].incarnation;
+    lose_during_cleanup(&mut board);
+
+    let WaitingFor::OrderTriggers { player, triggers } = &board.runner.state().waiting_for else {
+        panic!(
+            "terminal loss and later deaths must share one ordering prompt, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let mut sources = triggers
+        .iter()
+        .map(|trigger| trigger.source_id)
+        .collect::<Vec<_>>();
+    sources.sort_unstable();
+    let mut expected = [
+        board.withengar,
+        board.reaper,
+        board.reaper,
+        board.delayed_source,
+    ];
+    expected.sort_unstable();
+    assert_eq!(sources, expected);
+    board
+        .runner
+        .act(GameAction::OrderTriggers {
+            order: (0..triggers.len()).rev().collect(),
+        })
+        .expect("order the complete terminal batch");
+    pass_stack_to_choice(&mut board.runner);
+    let state = board.runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert_eq!(
+        state.objects[&board.withengar].counters[&CounterType::Plus1Plus1],
+        13
+    );
+    assert_eq!(life(&board.runner, P0), life_before - 2);
+    assert_eq!(state.players[0].hand.len(), hand_before + 3);
+    assert_eq!(state.objects[&board.chieftain].zone, Zone::Graveyard);
+    let returned = &state.objects[&board.goblin];
+    assert_eq!(returned.zone, Zone::Hand);
+    assert!(state.players[0].hand.contains(&board.goblin));
+    assert!(returned.incarnation > old_incarnation);
+    assert!(!returned.counters.contains_key(&CounterType::Minus1Minus1));
+}
+
+#[test]
+fn terminal_cleanup_loss_parks_the_exact_sba_batch_for_the_commander_answer() {
+    for seeded in [false, true] {
+        let mut board = cleanup_loss_board(true, seeded);
+        lose_during_cleanup(&mut board);
+        let state = board.runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::CommanderZoneChoice {
+            player: P0, commander_id, current_zone: Zone::Graveyard,
+        } if commander_id == board.goblin)
+        );
+        assert!(state.pending_trigger_order.is_none());
+        let konrad = board.konrad.expect("commander setup");
+        let mut captured = state.deferred_triggers.as_slice();
+        if let Some(older) = &board.older {
+            let (prefix, tail) = captured
+                .split_first()
+                .expect("ordinary prefix still present");
+            assert_eq!(
+                prefix, older,
+                "previous ordinary context has not been relabeled"
+            );
+            assert!(serde_json::to_value(prefix)
+                .expect("serialize prefix")
+                .get("batch_origin")
+                .is_none());
+            captured = tail;
+        }
+        let mut sources = captured
+            .iter()
+            .map(|context| context.pending.source_id)
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        let mut expected = [
+            board.withengar,
+            board.reaper,
+            board.reaper,
+            konrad,
+            konrad,
+            board.delayed_source,
+        ];
+        expected.sort_unstable();
+        assert_eq!(sources, expected);
+        assert!(captured.iter().all(|context| serde_json::to_value(context)
+            .expect("serialize parked context")["batch_origin"]
+            == "StateBasedActionChoice"));
+        for watcher in [board.reaper, konrad] {
+            let mut victims = captured
+                .iter()
+                .filter(|context| context.pending.source_id == watcher)
+                .filter_map(|context| match &context.pending.trigger_event {
+                    Some(GameEvent::ZoneChanged {
+                        object_id,
+                        from: Some(Zone::Battlefield),
+                        to: Zone::Graveyard,
+                        ..
+                    }) => Some(*object_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            victims.sort_unstable();
+            let mut expected = [board.chieftain, board.goblin];
+            expected.sort_unstable();
+            assert_eq!(victims, expected, "one context for each real death");
+        }
+        board
+            .runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept Grenzo's commander-zone choice");
+        let state = board.runner.state();
+        assert_eq!(state.objects[&board.goblin].zone, Zone::Command);
+        let WaitingFor::OrderTriggers {
+            player: P0,
+            triggers,
+        } = &state.waiting_for
+        else {
+            panic!("the commander answer and parked triggers must be ordered together");
+        };
+        let mut sources = triggers
+            .iter()
+            .map(|trigger| trigger.source_id)
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.push(konrad);
+        if let Some(older) = &board.older {
+            expected.push(older.pending.source_id);
+            let occurrences = state
+                .pending_trigger_order
+                .as_ref()
+                .expect("in-flight commander answer order")
+                .groups
+                .iter()
+                .flat_map(|group| &group.triggers)
+                .filter(|context| {
+                    context.pending.source_id == older.pending.source_id
+                        && context.pending.trigger_event == older.pending.trigger_event
+                })
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "one placement of the older Ordinary trigger"
+            );
+        }
+        expected.sort_unstable();
+        assert_eq!(
+            sources, expected,
+            "the answer adds one Konrad trigger and drains any older Ordinary context"
+        );
+        board
+            .runner
+            .act(GameAction::OrderTriggers {
+                order: (0..triggers.len()).rev().collect(),
+            })
+            .expect("order the full commander answer batch");
+        pass_stack_to_choice(&mut board.runner);
+        let state = board.runner.state();
+        assert_eq!(state.objects[&board.goblin].zone, Zone::Command);
+        assert_eq!(
+            state.objects[&board.withengar].counters[&CounterType::Plus1Plus1],
+            13
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.deferred_triggers.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 }
 

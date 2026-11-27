@@ -1,9 +1,7 @@
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::{quantity_ref_object_scope, resolve_quantity_with_targets};
 use crate::game::replacement::EventModifiers;
-use crate::game::targeting::{
-    resolve_event_context_target, triggering_spell, triggering_spell_identity, TriggeringSpell,
-};
+use crate::game::targeting::{triggering_spell, triggering_spell_identity, TriggeringSpell};
 use crate::types::ability::{
     expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
     replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
@@ -446,6 +444,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::EventContextPlayerCount { .. }
@@ -648,7 +647,7 @@ fn replacement_targets(
             .collect();
     }
 
-    resolve_event_context_target(state, target, ability.source_id)
+    crate::game::targeting::affected_event_context_target(state, ability, target)
         .into_iter()
         .collect()
 }
@@ -1977,6 +1976,8 @@ mod tests {
 
         // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Treasure".to_string(),
                 power: None,
@@ -2075,6 +2076,8 @@ mod tests {
         // Opponent's Rabblemaster-style "create a 1/1 Goblin that's tapped
         // and attacking" — `enters_attacking: true`, `spec.controller: P1`.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Goblin".to_string(),
                 power: Some(1),
@@ -2168,6 +2171,8 @@ mod tests {
 
         // Our own token creation — must not be intercepted.
         let token_spec = TokenSpec {
+            blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Saproling".to_string(),
                 power: Some(1),
@@ -2336,6 +2341,8 @@ mod tests {
             controller: PlayerId(1),
             object_id: entering,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {

@@ -440,6 +440,25 @@ impl LookedBackDeparture {
     }
 }
 
+/// CR 810.8a: a living loss root departs first, followed by its living
+/// shared-life teammates. A seat already out of the game adds no departure.
+pub(crate) fn living_loss_departure_seats(
+    state: &GameState,
+    root: PlayerId,
+) -> impl Iterator<Item = PlayerId> + '_ {
+    players::is_alive(state, root)
+        .then_some(root)
+        .into_iter()
+        .flat_map(move |root| {
+            let teammates = super::topology::has_shared_life(state, root)
+                .then(|| players::teammates(state, root))
+                .into_iter()
+                .flatten()
+                .filter(move |&seat| players::is_alive(state, seat));
+            std::iter::once(root).chain(teammates)
+        })
+}
+
 pub(crate) fn eliminate_players(
     state: &mut GameState,
     losses: &BTreeMap<PlayerId, BTreeSet<LossReason>>,
@@ -479,19 +498,8 @@ pub(crate) fn eliminate_players(
     };
 
     for (&player, reasons) in losses {
-        if !players::is_alive(state, player) {
-            continue;
-        }
-        record(player, reasons);
-        // Team loss rides with shared life: CR 810.8a in 2HG (CR 810.8b for a
-        // concession), and CR 810.8a-via-904.13b for Archenemy Commander heroes
-        // (the archenemy has no teammates, so the fold is a no-op there).
-        if super::topology::has_shared_life(state, player) {
-            for teammate in players::teammates(state, player) {
-                if players::is_alive(state, teammate) {
-                    record(teammate, reasons);
-                }
-            }
+        for seat in living_loss_departure_seats(state, player) {
+            record(seat, reasons);
         }
     }
     let leaving_set: HashSet<PlayerId> = leaving.iter().map(|&(player, _)| player).collect();
@@ -1070,6 +1078,7 @@ pub(crate) fn eliminate_players(
         {
             debug_assert!(false, "scoped search elimination resume failed: {error}");
         }
+        super::effects::finish_player_scope_reveal_if_complete(state, events);
 
         // CR 800.4a + CR 800.4g: a copy announcement is reconciled with the
         // players still in the game: its prefix is replayed on the current
@@ -2201,6 +2210,14 @@ fn do_eliminate(
             }
             true
         });
+    if let Err(error) =
+        super::effects::settle_player_scope_reveal_after_departure(state, player, events)
+    {
+        debug_assert!(
+            false,
+            "player-scope reveal elimination resume failed: {error}"
+        );
+    }
     if let Some(pending) = state.pending_scoped_library_search.as_mut() {
         match &mut pending.phase {
             crate::types::game_state::ScopedLibrarySearchPhase::CollectAcceptance {
@@ -2256,6 +2273,12 @@ fn do_eliminate(
                 search_keys.retain(|searcher| *searcher != player);
             }
         }
+    }
+    if let Some(pending) = state.pending_player_scope_reveal.as_mut() {
+        pending.players.retain(|participant| *participant != player);
+        pending
+            .selections
+            .retain(|(participant, _)| *participant != player);
     }
     // CR 800.4a: "all objects … owned by that player leave the game", so a
     // departed seat has no hand left to discard and iterating it can only be a
@@ -2326,6 +2349,24 @@ fn do_eliminate(
             state
                 .take_active_batch_delivery()
                 .expect("eliminated search batch must own the active frame");
+        }
+    }
+    // CR 800.4b + CR 800.4d + CR 608.2f: prune the parked token-creation
+    // event's departed batches for every leaving player — not only the
+    // latched chooser, so no later prompt is ever raised for a departed
+    // owner. On `Survives` the pruned record stands for the
+    // departure-boundary repair (and for `settle_replacement_after_departure`,
+    // which cedes token-creation parks to that repair); on `NoSurvivor` the
+    // whole prompt is abandoned with its companions, the paused clause, and
+    // an empty created referent. Any other parked event is untouched by the
+    // prune: the settle dispatcher below owns its reconsult-or-abandon
+    // decision, so nothing is abandoned here.
+    if let Some(pending) = state.pending_replacement.as_mut() {
+        if matches!(
+            super::replacement::prune_departed_token_batches(pending, leaving_set),
+            super::replacement::TokenPruneOutcome::NoSurvivor
+        ) {
+            super::replacement::abandon_survivorless_token_park(state, leaving_set);
         }
     }
 
@@ -2447,14 +2488,12 @@ fn do_eliminate(
             state.active_player = member;
         }
     }
-    // CR 800.4a + CR 117.4 + CR 805.5b: a player who has left is not among the players who pass
-    // in succession; a side still in the game keeps its pass under its living representative.
-    if state.priority_passes.remove(&player) {
-        let representative = super::topology::priority_pass_representative(state, player);
-        if representative != player && players::is_alive(state, representative) {
-            state.priority_passes.insert(representative);
-        }
-    }
+    // CR 800.4a + CR 117.4: a player who has left is not among the players who pass in
+    // succession, so only the departed seat's own pass record is dropped.
+    // CR 805.5b: a team passes only when no player on it wishes to act; pass records are per
+    // seat, so a surviving teammate keeps exactly the record it made, and one player's pass is
+    // never moved to a teammate (or to the team's representative), which has decided nothing.
+    state.priority_passes.remove(&player);
     state.planar_die_actions_this_turn.remove(&player);
 
     // CR 725.4: If the monarch leaves the game, the active player becomes the monarch.
@@ -3057,6 +3096,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_damage_post_counter = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
+    state.pending_player_scope_reveal = None;
     state.pending_library_search_delivery = None;
     state.pending_search_found_batch = None;
     state.pending_die_roll_instruction = None;
@@ -3361,8 +3401,10 @@ mod tests {
 
     fn pending_replacement_for(expected_event: ProposedEvent) -> PendingReplacement {
         PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: expected_event,
+            token_substitute: None,
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
@@ -5275,6 +5317,7 @@ mod tests {
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
@@ -5303,6 +5346,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
@@ -5341,13 +5385,6 @@ mod tests {
             .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_target = Some(TargetRef::Object(o));
-        // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
-        // seed, owned by this same abandoned continuation, must be abandoned
-        // alongside its siblings — this field was added after the teardown
-        // block below was written and was missed until this regression.
-        state.post_replacement_token_choice_applied = Some(HashSet::from([
-            crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
-        ]));
         // Make the real atomic paused-drain/draw pair.
         // The dispatch handle proves that the parent is Paused, rather than the
         // Ready-parent approximation that cannot exercise child-before-parent
@@ -5395,11 +5432,6 @@ mod tests {
         assert!(state.post_replacement_event_source().is_none());
         assert!(state.post_replacement_event_target().is_none());
         assert!(
-            state.post_replacement_token_choice_applied.is_none(),
-            "abandoning the parked chooser's continuation must also clear the token-choice \
-             applied seed, not just its established siblings (issue #4886, review #6)"
-        );
-        assert!(
             state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
@@ -5431,6 +5463,7 @@ mod tests {
             Zone::Battlefield,
         );
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -5455,6 +5488,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5494,6 +5528,7 @@ mod tests {
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::SearchFound {
                 searcher: PlayerId(0),
@@ -5519,6 +5554,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5551,6 +5587,7 @@ mod tests {
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -5575,6 +5612,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
@@ -5637,6 +5675,7 @@ mod tests {
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
         state.pending_replacement = Some(PendingReplacement {
+            damage_delivery_owner: None,
             settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::Draw {
                 player_id: PlayerId(0),
@@ -5661,6 +5700,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
+            token_substitute: None,
         });
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),

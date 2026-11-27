@@ -83,7 +83,7 @@ use engine::types::zones::Zone;
 /// The batched enters-the-battlefield class (CR 603.6a + CR 603.2c): "Whenever one or more
 /// creatures you control enter, you gain 1 life." Built directly rather than loaded from a card
 /// because the behaviour under test is the ENGINE's batched-dedup KEY, which is card-agnostic —
-/// and no card in `integration_cards.json.gz` carries a batched ETB trigger that admits tokens
+/// and no card in `integration_cards/` carries a batched ETB trigger that admits tokens
 /// without an additional "only once each turn" clause that would mask the second fire.
 fn batched_etb_life_trigger() -> TriggerDefinition {
     let mut def = TriggerDefinition::new(TriggerMode::ChangesZone);
@@ -108,6 +108,7 @@ fn batched_etb_life_trigger() -> TriggerDefinition {
 fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<GameEvent> {
     let ability = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -2519,6 +2520,7 @@ fn modification_paused_copy_token_entry_after_a_token_batch_fires_the_batched_tr
 
 fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: &str) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: name.to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
