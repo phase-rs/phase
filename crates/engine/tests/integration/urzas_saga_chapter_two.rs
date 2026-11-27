@@ -86,6 +86,7 @@ fn chapter_two_granted_ability() -> AbilityDefinition {
             supertypes: vec![],
             static_abilities: vec![boost],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     )
     .cost(AbilityCost::Composite {

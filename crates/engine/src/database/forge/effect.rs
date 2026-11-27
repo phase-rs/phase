@@ -323,6 +323,7 @@ fn translate_token(
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
         enters_blocking: None,
+        additional_members: Vec::new(),
     })
 }
 

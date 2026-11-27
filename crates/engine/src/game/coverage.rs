@@ -3405,6 +3405,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             attack_destination,
             attach_to,
             enters_blocking,
+            additional_members,
             ..
         } => {
             let mut desc = String::new();
@@ -3446,6 +3447,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("token".into(), desc));
             if let Some(attacker) = enters_blocking {
                 d.push(("enters_blocking".into(), fmt_target(attacker)));
+            }
+            // Each later member of the list gets its own labels, so every
+            // member's token stays visible in the details. Members are
+            // numbered from 2 because the instruction's own token is the first.
+            for (position, member) in (2..).zip(additional_members) {
+                d.extend(
+                    effect_details(member.effect())
+                        .into_iter()
+                        .map(|(label, value)| (format!("member {position} {label}"), value)),
+                );
             }
         }
         Effect::PutCounter {
@@ -6119,10 +6130,14 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
             format!("{:?}", repl.mana_replacement_scope),
         ));
     }
-    if let Some(spec) = &repl.additional_token_spec {
+    if let Some(append) = &repl.additional_token_spec {
         d.push((
             "additional token".into(),
-            without_unspecified_attack_request(format!("{spec:?}")),
+            without_unspecified_attack_request(format!("{:?}", append.spec)),
+        ));
+        d.push((
+            "additional token count".into(),
+            format!("{:?}", append.count),
         ));
     }
     if let Some(specs) = &repl.ensure_token_specs {
@@ -6663,7 +6678,9 @@ fn append_effect_static_carrier_items(
             }
         }
         Effect::Token {
-            static_abilities, ..
+            static_abilities,
+            additional_members,
+            ..
         } if token_static_traversal.includes() => {
             for stat in static_abilities {
                 children.push(build_static_item(
@@ -6672,6 +6689,15 @@ fn append_effect_static_carrier_items(
                     static_registry,
                     token_static_traversal,
                 ));
+            }
+            for member in additional_members {
+                append_effect_static_carrier_items(
+                    member.effect(),
+                    trigger_registry,
+                    static_registry,
+                    token_static_traversal,
+                    children,
+                );
             }
         }
         Effect::Counter {
@@ -9411,10 +9437,19 @@ fn visit_effect_static_carrier_modifications(
             }
         }
         Effect::Token {
-            static_abilities, ..
+            static_abilities,
+            additional_members,
+            ..
         } if token_static_traversal.includes() => {
             for stat in static_abilities {
                 visit_static_modifications(stat, visit);
+            }
+            for member in additional_members {
+                visit_effect_static_carrier_modifications(
+                    member.effect(),
+                    token_static_traversal,
+                    visit,
+                );
             }
         }
         Effect::Counter {
@@ -18859,7 +18894,10 @@ mod tests {
         };
         let details = |attack_request: TokenAttackRequest| {
             let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken);
-            repl.additional_token_spec = Some(Box::new(spec(attack_request.clone())));
+            repl = repl.additional_token_spec(
+                spec(attack_request.clone()),
+                QuantityExpr::Fixed { value: 1 },
+            );
             repl.ensure_token_specs = Some(vec![spec(attack_request)]);
             replacement_details(&repl)
         };
@@ -18912,6 +18950,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let token_detail = |effect: &Effect| {
             effect_details(effect)
@@ -18929,6 +18968,65 @@ mod tests {
         }));
         assert!(named.contains("attacking Player"), "{named}");
         assert_ne!(named, unnamed);
+    }
+
+    /// Every member of a shared-verb token list keeps its own detail labels,
+    /// so no member's token is hidden behind another's.
+    #[test]
+    fn token_list_members_render_under_their_own_labels() {
+        use crate::types::ability::{TokenAttackDestination, TokenCreationMember};
+
+        let token = |name: &str| Effect::Token {
+            enters_blocking: None,
+            name: name.to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), name.to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            additional_members: Vec::new(),
+        };
+        let mut list = token("Snake");
+        let Effect::Token {
+            additional_members, ..
+        } = &mut list
+        else {
+            unreachable!()
+        };
+        additional_members.extend(
+            ["Wolf", "Elephant"]
+                .map(|name| TokenCreationMember::new(token(name)).expect("single token")),
+        );
+
+        let details = effect_details(&list);
+        let token_detail = |label: &str| {
+            details
+                .iter()
+                .find(|(found, _)| found == label)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(token_detail("token"), Some("+1/+1 Snake (Creature Snake)"));
+        assert_eq!(
+            token_detail("member 2 token"),
+            Some("+1/+1 Wolf (Creature Wolf)")
+        );
+        assert_eq!(
+            token_detail("member 3 token"),
+            Some("+1/+1 Elephant (Creature Elephant)")
+        );
+        assert_eq!(
+            details.iter().filter(|(label, _)| label == "token").count(),
+            1
+        );
     }
 
     /// A copy-token instruction's named attack destination reaches the parse
@@ -21150,6 +21248,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 supertypes: vec![],
                 static_abilities: vec![static_ability],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         )
     }
@@ -26467,6 +26566,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             )
             .description(
@@ -26518,6 +26618,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                             },
                         },
                     )],
+                    additional_members: Vec::new(),
                 },
             )
             .description(oracle.to_string()),

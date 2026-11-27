@@ -10786,13 +10786,18 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
 /// intentionally not accepted (no combat-scoped tracking).
 fn parse_source_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_explicit_self_source_subject(input)?;
-    value(
-        StaticCondition::SourceMatchesFilter {
-            filter: attacked_this_turn_source_filter(),
-        },
-        tag("attacked this turn"),
+    let (rest, filter) = terminated(
+        alt((
+            value(
+                source_attacked_or_blocked_this_turn_filter(),
+                tag("attacked or blocked"),
+            ),
+            value(attacked_this_turn_source_filter(), tag("attacked")),
+        )),
+        tag(" this turn"),
     )
-    .parse(rest)
+    .parse(rest)?;
+    Ok((rest, StaticCondition::SourceMatchesFilter { filter }))
 }
 
 /// CR 508.1a: the type-free "this object attacked this turn" runtime filter —
@@ -10801,6 +10806,14 @@ fn parse_source_attacked_this_turn(input: &str) -> OracleResult<'_, StaticCondit
 fn attacked_this_turn_source_filter() -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::default().properties(vec![FilterProp::AttackedThisTurn { defender: None }]),
+    )
+}
+
+pub(in crate::parser) fn source_attacked_or_blocked_this_turn_filter() -> TargetFilter {
+    // CR 700.7 + CR 603.4: "This creature" identifies the source even if its
+    // types change before the intervening-if is checked again.
+    TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
     )
 }
 
@@ -23127,6 +23140,28 @@ mod tests {
             });
             assert_eq!(rest, "", "{phrase:?} must be fully consumed");
             assert_eq!(c, expected, "{phrase:?}");
+        }
+    }
+
+    #[test]
+    fn source_attacked_or_blocked_this_turn_matches_type_free_source_history() {
+        for phrase in [
+            "~ attacked or blocked this turn",
+            "this creature attacked or blocked this turn",
+            "this permanent attacked or blocked this turn",
+        ] {
+            let (rest, condition) = parse_inner_condition(phrase).unwrap();
+            assert_eq!(rest, "", "{phrase:?} must be fully consumed");
+            assert_eq!(
+                condition,
+                StaticCondition::SourceMatchesFilter {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::default()
+                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+                    ),
+                },
+                "{phrase:?}"
+            );
         }
     }
 

@@ -9428,7 +9428,14 @@ fn declined_search_object_operands(ability: &ResolvedAbility) -> Vec<&TargetFilt
             crate::types::ability::UntilCondition::CumulativeThreshold { .. } => Vec::new(),
         },
         Effect::RevealHand { card_filter, .. } => vec![card_filter],
-        Effect::Token { attach_to, .. } => attach_to.iter().collect(),
+        Effect::Token { .. } => ability
+            .effect
+            .token_creation_members()
+            .filter_map(|member| match member {
+                Effect::Token { attach_to, .. } => attach_to.as_ref(),
+                _ => None,
+            })
+            .collect(),
         Effect::CopyTokenOf {
             target,
             source_filter,
@@ -10697,12 +10704,14 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             supertypes: _,
             static_abilities,
             enter_with_counters,
+            additional_members,
         } => (
             // A token's printed power, toughness and abilities could be defined
             // by what the gated action did ("an X/X token"); only a fixed,
             // ability-free token is audited. A named destination is not a
             // `TargetFilter`, so this list cannot hold it.
-            (pt_value_is_fixed(power)
+            (additional_members.is_empty()
+                && pt_value_is_fixed(power)
                 && pt_value_is_fixed(toughness)
                 && keywords.is_empty()
                 && static_abilities.is_empty()
@@ -11930,11 +11939,15 @@ fn effect_fields_read_filter_population(
             owner,
             attach_to,
             keywords,
+            additional_members,
             ..
         } => {
             has_filter(owner)
                 || attach_to.as_ref().is_some_and(has_filter)
                 || keywords.iter().any(has_keyword)
+                || additional_members.iter().any(|member| {
+                    effect_fields_read_filter_population(member.effect(), leaf)
+                })
         }
         Effect::GainLife { player, .. } => has_filter(player),
         Effect::LoseLife { target, .. } => target.as_ref().is_some_and(has_filter),
@@ -12828,9 +12841,10 @@ fn replacement_matchers_read_filter_population(
         || damage_modification.as_ref().is_some_and(|modification| {
             damage_modification_reads_filter_population(modification, leaf)
         })
-        || additional_token_spec
-            .as_deref()
-            .is_some_and(token_spec_reads)
+        || additional_token_spec.as_deref().is_some_and(|append| {
+            token_spec_reads(&append.spec)
+                || quantity_expr_counts_population_matching(&append.count, leaf)
+        })
         || ensure_token_specs.iter().flatten().any(token_spec_reads)
         || entry_payment_max
             .as_ref()
@@ -18841,44 +18855,50 @@ fn when_you_do_mandatory_parent_did_nothing(
         && !mandatory_parent_effect_performed(&parent.effect, parent_events)
 }
 
-/// CR 608.2c: Whether this node only grants a play or cast permission over cards
-/// an earlier instruction moved ("You may play that card this turn") and is
-/// directly followed by a "… this way" head that reads the earlier mover's
-/// zone-change ledger (Cait Sith, Fortune Teller; Hidetsugu, Devouring Chaos).
-/// Such a permission node moves nothing, so it leaves that ledger in place for
-/// the head. Scoped to the direct reader: other consumers after a permission
-/// node keep the established cleared ledger, because "cards exiled with this
-/// enchantment" readers (Court of Locthwain) would otherwise narrow to the
-/// current resolution's exile. Deliberately excludes `CastFromZone`, which can
-/// also cast during resolution.
-fn permission_node_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
-    matches!(ability.effect, Effect::GrantCastingPermission { .. })
-        && ability
-            .sub_ability
-            .as_ref()
-            .and_then(|sub| sub.condition.as_ref())
-            .is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
-}
-
-/// CR 608.2c: Whether this node is one of several consecutive effects gated by
-/// the same "if [noun] was [verb]ed this way" clause and is directly followed by
-/// another such gated effect ("If a creature card is discarded this way, untap
-/// this creature, then transform it" — Civilized Scholar). The gate names the
-/// earlier instruction that moved the cards, not the gated effects between, so a
-/// gated node that itself moved nothing (the untap) must leave that instruction's
-/// ledger in place for the next gated node (the transform). The caller applies
-/// this only when the node moved no objects.
-fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
-    let gated_by_this_way_head = |condition: Option<&AbilityCondition>| {
+/// CR 608.2c: Whether this node must leave the "… this way" zone-change ledger
+/// in place for the "… this way" head directly after it. Such a head names the
+/// earlier instruction that performed its verb, so a node that is not that
+/// instruction must not replace the ledger the head reads:
+///
+/// - A play or cast permission over cards an earlier instruction moved ("You
+///   may play that card this turn") moves nothing (Cait Sith, Fortune Teller;
+///   Hidetsugu, Devouring Chaos). Scoped to the direct reader: other consumers
+///   after a permission node keep the established cleared ledger, because
+///   "cards exiled with this enchantment" readers (Court of Locthwain) would
+///   otherwise narrow to the current resolution's exile. Deliberately excludes
+///   `CastFromZone`, which can also cast during resolution.
+/// - CR 121.1: a draw (putting the top card of a library into a hand) is not
+///   the instruction a ledger head names. The printed draw-reading heads ("If
+///   you draw one or more cards this way" — Transcendent Archaic; Sarek,
+///   Federation Ambassador) read the draw's count (`PreviousEffectAmount`),
+///   not this ledger, and no printed card places a hand-arrival ledger head
+///   ("If you put a card into your hand this way" — Sidequest: Catch a Fish)
+///   directly after a draw. Lord Windgrace's "Discard a card, then draw a
+///   card. If a land card is discarded this way, draw an additional card."
+/// - The heads of one gated run all name the run's shared antecedent, so a
+///   gated node — even one that moved an object or created a token (CR 111.1)
+///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
+///   milled this way, create a Treasure token. If a creature card is milled
+///   this way, …": the creature gate reads the milled card, not the Treasure.
+///   "If a creature card is discarded this way, untap this creature, then
+///   transform it" (Civilized Scholar): the gate names the earlier instruction
+///   that moved the cards, not the gated effects between, so the untap must
+///   leave that instruction's ledger in place for the transform.
+fn keeps_this_way_ledger_for_following_head(ability: &ResolvedAbility) -> bool {
+    let is_this_way_head = |condition: Option<&AbilityCondition>| {
         condition.is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
     };
-    gated_by_this_way_head(ability.condition.as_ref())
-        && gated_by_this_way_head(
-            ability
-                .sub_ability
-                .as_ref()
-                .and_then(|sub| sub.condition.as_ref()),
-        )
+    let next_head = is_this_way_head(
+        ability
+            .sub_ability
+            .as_ref()
+            .and_then(|sub| sub.condition.as_ref()),
+    );
+    next_head
+        && (matches!(
+            ability.effect,
+            Effect::GrantCastingPermission { .. } | Effect::Draw { .. }
+        ) || is_this_way_head(ability.condition.as_ref()))
 }
 
 /// CR 603.12 + CR 701.9a: Effect kinds whose reflexive "when you do" needs an
@@ -27794,41 +27814,27 @@ fn simultaneous_token_fan_out_applies(
     if matching_players.len() < 2 || after_scope.is_some() {
         return false;
     }
-    let Effect::Token {
-        count,
-        owner,
-        attach_to,
-        enters_attacking,
-        attack_destination,
-        enter_with_counters,
-        ..
-    } = &scoped_template.effect
-    else {
+    let Effect::Token { owner, .. } = &scoped_template.effect else {
         return false;
     };
-    // Bare creation only: fixed or scoped tracked-set per-seat count,
-    // seat-held ownership, no host, no counters, no attacking seats.
-    // `TrackedSetSize` is resolved after `bind_scoped_seat`, so each compound
-    // batch retains the seat's own finalized reveal count.
-    if !matches!(
-        count,
-        QuantityExpr::Fixed { .. }
-            | QuantityExpr::Ref {
-                qty: QuantityRef::TrackedSetSize
-            }
-    ) {
-        return false;
-    }
-    // `ScopedPlayer` is the fan-out's own seat binding (the instructed seat
-    // resolves as the creator); `Controller` falls back to the seat-bound
-    // controller the same way. Anything else is not seat-relative.
-    if !matches!(owner, TargetFilter::Controller | TargetFilter::ScopedPlayer) {
-        return false;
-    }
-    if attach_to.is_some() || !enter_with_counters.is_empty() {
-        return false;
-    }
-    if *enters_attacking || !attack_destination.is_controller_chooses() {
+    // Bare creation only: seat-held ownership, fixed or scoped tracked-set
+    // count, and no host, counters or attacking seats.
+    if !matches!(owner, TargetFilter::Controller | TargetFilter::ScopedPlayer)
+        || !scoped_template.effect.token_creation_members().all(|member| {
+            matches!(
+                member,
+                Effect::Token {
+                    count: QuantityExpr::Fixed { .. }
+                        | QuantityExpr::Ref { qty: QuantityRef::TrackedSetSize },
+                    attach_to: None,
+                    enters_attacking: false,
+                    attack_destination,
+                    enter_with_counters,
+                    ..
+                } if attack_destination.is_controller_chooses() && enter_with_counters.is_empty()
+            )
+        })
+    {
         return false;
     }
     // No interactive riders: nothing may pause a seat mid-clause.
@@ -27891,7 +27897,7 @@ fn try_resolve_simultaneous_token_fan_out(
         Vec::with_capacity(matching_players.len());
     for seat in matching_players {
         let bound = bind_scoped_seat(scoped_template, controller, *seat);
-        match token::propose_token_batch(state, &bound, None) {
+        match token::propose_token_instruction(state, &bound, Vec::new()) {
             token::TokenBatchProposal::Ready(event) => singles.push(*event),
             token::TokenBatchProposal::Parked | token::TokenBatchProposal::NoToken => {
                 state.waiting_for = waiting_before;
@@ -27900,57 +27906,13 @@ fn try_resolve_simultaneous_token_fan_out(
         }
     }
 
-    // Assemble one compound event: the first seat's batch is the event's own
-    // batch, every later seat's batch rides appended in seat order.
-    let mut singles = singles.into_iter();
-    let Some(first) = singles.next() else {
-        return SimultaneousTokenOutcome::NotApplicable;
-    };
-    let crate::types::proposed_event::ProposedEvent::CreateToken {
-        owner,
-        spec,
-        enter_tapped,
-        count,
-        applied,
-        ..
-    } = first
+    let Some(compound) =
+        crate::types::proposed_event::ProposedEvent::from_token_batch_views(singles)
     else {
         return SimultaneousTokenOutcome::NotApplicable;
     };
-    let mut appended = Vec::new();
-    for single in singles {
-        let crate::types::proposed_event::ProposedEvent::CreateToken {
-            owner,
-            spec,
-            enter_tapped,
-            count,
-            applied,
-            ..
-        } = single
-        else {
-            return SimultaneousTokenOutcome::NotApplicable;
-        };
-        // CR 616.1 + CR 614.5: each seat's batch starts with its own proposal's applied set.
-        appended.push(crate::types::proposed_event::TokenBatch {
-            owner,
-            spec,
-            copy: None,
-            enter_tapped,
-            count,
-            redirected_to: None,
-            applied,
-        });
-    }
-    let compound = crate::types::proposed_event::ProposedEvent::CreateToken {
-        owner,
-        spec,
-        copy: None,
-        enter_tapped,
-        count,
-        appended,
-        redirected_to: None,
-        applied,
-    };
+    let shared_verb_list = matches!(&scoped_template.effect,
+        Effect::Token { additional_members, .. } if !additional_members.is_empty());
 
     // CR 616.1 + CR 101.4 (F2): triage the compound's candidates. An
     // optional candidate rides the compound when exactly one player decides
@@ -27974,7 +27936,10 @@ fn try_resolve_simultaneous_token_fan_out(
     }) {
         return SimultaneousTokenOutcome::NotApplicable;
     }
-    if candidates.len() > 1
+    // A shared-verb list stays together through material ordering. The
+    // ordinary compound pipeline prompts for the affected owner.
+    if !shared_verb_list
+        && candidates.len() > 1
         && crate::game::replacement::replacement_ordering_is_material(state, &candidates, &compound)
         && !candidates
             .iter()
@@ -30959,12 +30924,10 @@ fn resolve_chain_body(
         })
         .collect();
     // CR 608.2c: "… this way" names the earlier instruction that moved the
-    // cards. A play permission over those cards ("You may play that card this
-    // turn") directly followed by a "this way" head is not that instruction,
-    // so it leaves the moving instruction's ledger in place for the head.
-    if !permission_node_keeps_ledger_for_this_way_head(ability)
-        && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
-    {
+    // cards. A node that is not that instruction (a play permission, a draw, a
+    // member of the head's gated run) directly followed by a "this way" head
+    // leaves the moving instruction's ledger in place for the head.
+    if !keeps_this_way_ledger_for_following_head(ability) {
         state.last_zone_changed_ids = zone_changed_ids;
     }
     let linked_batch =
@@ -45998,6 +45961,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert!(effect_has_iteration_bound_recipient(&token_original));
         // A non-recipient effect remains unclassified.
@@ -47464,6 +47428,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(1),
@@ -47612,6 +47577,7 @@ mod tests {
                         qty: QuantityRef::TrackedSetSize,
                     },
                 )],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(1),
@@ -49838,6 +49804,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![TargetRef::Object(prey)],
             ObjectId(100),
@@ -54326,6 +54293,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
                 vec![],
                 ObjectId(900),
@@ -55332,6 +55300,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,
@@ -60379,6 +60348,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
                 vec![],
                 ObjectId(1),
@@ -60933,6 +60903,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let scoped = |effect: Effect, scope: Option<PlayerFilter>| {
             let mut node = ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0));
@@ -61036,6 +61007,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
 
         // (i) War Games tail shape: a goad grant whose `affected` is the referent.
@@ -61465,6 +61437,7 @@ mod tests {
             supertypes: vec![],
             static_abilities,
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let mut modal_payload = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
         modal_payload.mode_abilities = vec![*payload()];
@@ -61830,6 +61803,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![static_def],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert!(tail_reads_created_referent(&node(token(affected(
             TargetFilter::LastCreated
@@ -62473,6 +62447,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         let suspect_single = Effect::Suspect {
             target: TargetFilter::LastCreated,
@@ -63217,6 +63192,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 })),
             ),
             (
@@ -65653,6 +65629,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,
@@ -65814,6 +65791,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,
@@ -67168,6 +67146,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,
@@ -69587,6 +69566,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source_id,
@@ -71577,6 +71557,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
 
         let mut sub = ResolvedAbility::new(make_cat(), vec![], ObjectId(1000), PlayerId(0));
@@ -76553,6 +76534,7 @@ mod resolution_progress_contract_tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 }
             } else {
                 Effect::ChangeZone {
