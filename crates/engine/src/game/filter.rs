@@ -12935,9 +12935,8 @@ fn zone_change_record_matches_property(
         // reference the live door reads — `parent_target_shared_quality_values`,
         // including its parked ladder (the record-side context carries the
         // parked targets) — and compares it against the record's own
-        // event-time characteristics. `reference = None` is the vacuous
-        // per-object pass the live door gives (the CR 608.2b group
-        // constraint is validated at resolution, not per member). Any
+        // event-time characteristics. A missing reference satisfies Shares
+        // and fails DoesNotShare, matching the live per-object evaluator. Any
         // other reference needs the live reference-population scan, which a
         // snapshot cannot run — fail closed.
         FilterProp::SharesQuality {
@@ -13798,13 +13797,9 @@ fn evaluate_shares_quality(
     relation: &SharedQualityRelation,
     source: &SourceContext<'_>,
 ) -> bool {
-    // CR 601.2c: A reference-free relation is a requirement on the
-    // declaration's group. Individual candidates pass for either relation.
-    let Some(reference_filter) = reference else {
-        return true;
-    };
-    let shares =
-        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source);
+    let shares = reference.as_ref().is_none_or(|reference_filter| {
+        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
+    });
     // CR 201.2a: an object with no name doesn't have the same name as any other
     // object, including another object with no name. `quality_sets_overlap`
     // already answers "no common value" for an empty value set (face-down

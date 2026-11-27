@@ -15957,20 +15957,37 @@ pub(crate) fn extract_shares_quality_props(
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
-            .filter_map(|p| match p {
-                FilterProp::SharesQuality {
-                    quality,
-                    reference: None,
-                    relation,
-                } => Some((quality, *relation)),
-                _ => None,
-            })
+            .filter_map(declared_shared_quality)
             .collect(),
         TargetFilter::And { filters } => filters
             .iter()
             .flat_map(extract_shares_quality_props)
             .collect(),
         _ => vec![],
+    }
+}
+
+fn declared_shared_quality(prop: &FilterProp) -> Option<(&SharedQuality, SharedQualityRelation)> {
+    match prop {
+        FilterProp::SharesQuality {
+            quality,
+            reference: None,
+            relation,
+        } => Some((quality, *relation)),
+        _ => None,
+    }
+}
+
+/// Remove only the property positions read by the declaration's group validator.
+pub(super) fn strip_declared_shared_qualities(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .retain(|prop| declared_shared_quality(prop).is_none()),
+        TargetFilter::And { filters } => {
+            filters.iter_mut().for_each(strip_declared_shared_qualities);
+        }
+        _ => {}
     }
 }
 

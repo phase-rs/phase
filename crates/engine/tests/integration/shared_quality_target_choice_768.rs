@@ -304,3 +304,113 @@ fn rivals_duel_accepts_disjoint_types_and_excludes_changeling() {
     choose(&mut runner, elf);
     assert_eq!(runner.state().stack.len(), 1);
 }
+
+const PRISMATIC_WARDROBE: &str = "Destroy target nonartifact, nonland permanent that doesn't share a color with clothing worn by its controller.";
+const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
+
+#[test]
+fn prismatic_wardrobe_rejects_a_target_with_no_clothing_reference() {
+    use engine::types::mana::ManaColor;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Prismatic Wardrobe", false, PRISMATIC_WARDROBE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let victim = scenario
+        .add_creature(P0, "Goblin Piker", 2, 1)
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let mut runner = build(scenario, &[ManaType::White]);
+    let card_id = runner.state().objects[&spell].card_id;
+    assert!(runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .is_err());
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+    assert!(runner.state().stack.is_empty());
+}
+
+#[test]
+fn deflecting_swat_checks_the_final_rivals_duel_pair() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let duel = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rivals' Duel", false, RIVALS_DUEL)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let swat = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deflecting Swat", true, DEFLECTING_SWAT)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let [piker, goblin, elf, _changeling] = battlefield(&mut scenario);
+    let mut runner = build(scenario, &[ManaType::Red; 7]);
+    cast(&mut runner, duel);
+    choose(&mut runner, piker);
+    choose(&mut runner, elf);
+    let duel_entry = runner.state().stack[0].id;
+    runner.cast(swat).target_object(duel_entry).commit();
+    runner.pass_both_players();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    let WaitingFor::RetargetChoice {
+        player: P0,
+        current_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Swat's target-change prompt");
+    };
+    assert_eq!(
+        current_targets,
+        &[TargetRef::Object(piker), TargetRef::Object(elf)]
+    );
+
+    // CR 115.7d + CR 115.7e: changing one target must preserve the relation
+    // between the new target and the target that stays.
+    assert!(runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![None, Some(TargetRef::Object(goblin))],
+        })
+        .is_err());
+    runner
+        .act(GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(goblin)), None],
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(
+        runner.state().stack[0].ability().unwrap().targets,
+        [TargetRef::Object(goblin), TargetRef::Object(elf)]
+    );
+
+    runner.pass_both_players();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&piker].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
+}

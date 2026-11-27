@@ -198,9 +198,10 @@ pub fn find_legal_targets_for_ability(
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
     let target_ctx = ability_target_filter_context(state, ability);
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     find_legal_targets_with_context(
         state,
-        filter,
+        &filter,
         ability.controller,
         ability.source_id,
         &target_ctx,
@@ -213,9 +214,10 @@ pub(crate) fn has_legal_target_for_ability(
     ability: &ResolvedAbility,
 ) -> bool {
     let target_ctx = ability_target_filter_context(state, ability);
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     has_legal_target_with_context(
         state,
-        filter,
+        &filter,
         ability.controller,
         ability.source_id,
         &target_ctx,
@@ -230,9 +232,10 @@ pub(crate) fn find_legal_targets_for_ability_with_controller(
 ) -> Vec<TargetRef> {
     let target_ctx =
         ability_target_filter_context_with_controller(state, ability, source_controller);
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     find_legal_targets_with_context(
         state,
-        filter,
+        &filter,
         source_controller,
         ability.source_id,
         &target_ctx,
@@ -255,9 +258,10 @@ pub(crate) fn find_legal_targets_for_ability_with_controller_and_trigger_context
         source_controller,
         trigger_context,
     );
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     find_legal_targets_with_context(
         state,
-        filter,
+        &filter,
         source_controller,
         ability.source_id,
         &target_ctx,
@@ -279,9 +283,10 @@ pub(crate) fn find_legal_targets_for_ability_with_view(
     let target_ctx =
         ability_target_filter_context_with_controller(state, ability, source_controller)
             .with_declared_slot_view(view);
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     find_legal_targets_with_context(
         state,
-        filter,
+        &filter,
         source_controller,
         ability.source_id,
         &target_ctx,
@@ -305,9 +310,10 @@ pub(crate) fn find_legal_targets_for_ability_with_view_and_trigger_context(
         trigger_context,
     )
     .with_declared_slot_view(view);
+    let filter = super::ability_utils::per_object_target_filter(ability, filter);
     find_legal_targets_with_context(
         state,
-        filter,
+        &filter,
         source_controller,
         ability.source_id,
         &target_ctx,
@@ -2532,7 +2538,8 @@ fn target_ref_matches_resolved_filter(
     target: &TargetRef,
 ) -> bool {
     let ctx = super::filter::FilterContext::from_ability(ability);
-    target_ref_matches_resolved_filter_with_context(state, target_filter, target, &ctx)
+    let target_filter = super::ability_utils::per_object_target_filter(ability, target_filter);
+    target_ref_matches_resolved_filter_with_context(state, &target_filter, target, &ctx)
 }
 
 fn target_ref_matches_resolved_filter_with_context(

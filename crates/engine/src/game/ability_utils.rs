@@ -8124,6 +8124,9 @@ fn legal_targets_for_ability_filter_uncapped(
     // CR 109.5 + CR 108.3: original "your" ownership keeps the declaring
     // ability's authority even when a companion player narrows control.
     let mut bound_filter = filter.clone();
+    if is_shared_quality_declaration(ability, filter) {
+        super::effects::strip_declared_shared_qualities(&mut bound_filter);
+    }
     if !super::filter::bind_declaring_owner_authority(&mut bound_filter, ability.controller) {
         return Vec::new();
     }
@@ -9032,6 +9035,9 @@ fn legal_targets_for_selected_slot(
         // selected companion substitutes the enumeration controller. The
         // declared TargetPlayer rewrite then retains its independent authority.
         let mut bound_filter = spec.filter.clone();
+        if !spec.shared_qualities.is_empty() {
+            super::effects::strip_declared_shared_qualities(&mut bound_filter);
+        }
         if !super::filter::bind_declaring_owner_authority(&mut bound_filter, ability.controller) {
             return Vec::new();
         }
@@ -10662,10 +10668,15 @@ fn validate_selected_slots_with_specs(
                 if specs.get(index).is_some_and(|spec| {
                     !matches_declared_shared_qualities(
                         state,
-                        spec,
-                        target,
-                        &specs[..index],
-                        &selected_slots[..index],
+                        spec.shared_qualities
+                            .iter()
+                            .map(|(quality, relation)| (quality, *relation)),
+                        specs[..index]
+                            .iter()
+                            .zip(&selected_slots[..index])
+                            .filter(|(prior, _)| prior.instance == spec.instance)
+                            .filter_map(|(_, selection)| selection.as_ref())
+                            .chain(std::iter::once(target)),
                     )
                 }) {
                     return Err(EngineError::InvalidAction(
@@ -10686,48 +10697,91 @@ fn validate_selected_slots_with_specs(
     validate_target_constraints(Some(state), &compact_targets, constraints, Some(ability))
 }
 
+/// CR 601.2c + CR 115.3: this is the generic multi-target declaration whose
+/// slot specs enforce its reference-free shared qualities as a group.
+fn is_shared_quality_declaration(ability: &ResolvedAbility, filter: &TargetFilter) -> bool {
+    ability.multi_target.is_some()
+        && !super::effects::extract_shares_quality_props(filter).is_empty()
+        && matches!(node_slot_filters(ability), NodeSlotFilters::UniformRun(declared) if declared == *filter)
+}
+
+pub(super) fn per_object_target_filter<'a>(
+    ability: &ResolvedAbility,
+    filter: &'a TargetFilter,
+) -> std::borrow::Cow<'a, TargetFilter> {
+    if is_shared_quality_declaration(ability, filter) {
+        let mut filter = filter.clone();
+        super::effects::strip_declared_shared_qualities(&mut filter);
+        std::borrow::Cow::Owned(filter)
+    } else {
+        std::borrow::Cow::Borrowed(filter)
+    }
+}
+
 /// CR 601.2c + CR 115.3: the quality restriction belongs to one declaration.
-fn matches_declared_shared_qualities(
+fn matches_declared_shared_qualities<'a>(
     state: &GameState,
-    spec: &TargetSlotSpec,
-    target: &TargetRef,
-    prior_specs: &[TargetSlotSpec],
-    prior_selections: &[Option<TargetRef>],
+    qualities: impl IntoIterator<Item = (&'a SharedQuality, SharedQualityRelation)>,
+    targets: impl IntoIterator<Item = &'a TargetRef>,
 ) -> bool {
-    if spec.shared_qualities.is_empty() {
+    let mut qualities = qualities.into_iter().peekable();
+    if qualities.peek().is_none() {
         return true;
     }
-    let TargetRef::Object(id) = target else {
-        return false;
-    };
-    let prior_objects = prior_specs
-        .iter()
-        .zip(prior_selections)
-        .filter(|(prior, _)| prior.instance == spec.instance)
-        .filter_map(|(_, selection)| selection.as_ref())
-        .map(|selection| match selection {
+    let Some(objects) = targets
+        .into_iter()
+        .map(|target| match target {
             TargetRef::Object(id) => Some(*id),
-            _ => None,
-        });
-    let Some(mut objects) = prior_objects.collect::<Option<Vec<_>>>() else {
+            TargetRef::Player(_) => None,
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
         return false;
     };
-    objects.push(*id);
-    spec.shared_qualities
+    qualities.all(|(quality, relation)| match relation {
+        SharedQualityRelation::Shares => {
+            super::filter::objects_have_common_quality_value(state, &objects, quality)
+        }
+        SharedQualityRelation::DoesNotShare => objects.iter().enumerate().all(|(index, id)| {
+            objects[..index].iter().all(|other| {
+                !super::filter::objects_have_common_quality_value(state, &[*other, *id], quality)
+            })
+        }),
+    })
+}
+
+/// CR 115.7d + CR 115.7e: validate every edited declaration against all its
+/// final targets. A declaration kept in its entirety can retain illegal targets.
+pub(super) fn changed_target_runs_satisfy_shared_qualities(
+    state: &GameState,
+    post: &ResolvedAbility,
+    bindings: &[RetargetSlotBinding],
+    changed: &dyn Fn(usize) -> bool,
+) -> bool {
+    bindings
         .iter()
-        .all(|(quality, relation)| match relation {
-            SharedQualityRelation::Shares => {
-                super::filter::objects_have_common_quality_value(state, &objects, quality)
+        .enumerate()
+        .filter(|(index, _)| changed(*index))
+        .all(|(_, binding)| {
+            let (Some(run), SlotEnforcement::Filtered(filter)) =
+                (binding.run, &binding.enforcement)
+            else {
+                return true;
+            };
+            let qualities = super::effects::extract_shares_quality_props(filter);
+            if qualities.is_empty() {
+                return true;
             }
-            SharedQualityRelation::DoesNotShare => {
-                objects[..objects.len() - 1].iter().all(|other| {
-                    !super::filter::objects_have_common_quality_value(
-                        state,
-                        &[*other, *id],
-                        quality,
-                    )
-                })
-            }
+            let Some(node) = node_at(post, &binding.address.path) else {
+                return false;
+            };
+            let targets = bindings
+                .iter()
+                .filter(|other| other.run == Some(run))
+                .map(|other| node.targets.get(other.address.slot))
+                .collect::<Option<Vec<_>>>();
+            targets
+                .is_some_and(|targets| matches_declared_shared_qualities(state, qualities, targets))
         })
 }
 
