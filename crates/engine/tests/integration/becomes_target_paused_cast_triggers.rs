@@ -848,6 +848,15 @@ fn prowess_instances(runner: &GameRunner, source: ObjectId) -> usize {
         .count()
 }
 
+fn assert_power_toughness(runner: &GameRunner, source: ObjectId, power: i32, toughness: i32) {
+    let object = &runner.state().objects[&source];
+    assert_eq!(
+        (object.power, object.toughness),
+        (Some(power), Some(toughness)),
+        "effective power and toughness of object {source:?}"
+    );
+}
+
 fn finish_prowess_trigger_order(runner: &mut GameRunner, expected: usize) {
     if let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for {
         assert_eq!((*player, triggers.len()), (P0, expected));
@@ -908,7 +917,7 @@ fn printed_prowess_instances_stack_and_resolve_separately() {
         sc.with_mana_pool(P0, pool(&[ManaType::Red]));
         let mut runner = sc.build();
         assert_eq!(runner.state().objects[&source].owner, owner);
-        runner.assert_controls(P0, source);
+        assert_eq!(runner.state().objects[&source].controller, P0);
         assert_eq!(prowess_instances(&runner, source), 2, "{name}");
 
         cast(&mut runner, spell, CastPaymentMode::Auto);
@@ -922,32 +931,32 @@ fn printed_prowess_instances_stack_and_resolve_separately() {
         assert_eq!(prompts, ["TargetSelection"]);
         finish_prowess_trigger_order(&mut runner, 2);
 
-        runner.assert_stack_size(3);
+        assert_eq!(runner.state().stack.len(), 3);
         assert_eq!(triggers_from(&runner, source), 2);
         assert!(spell_on_stack(&runner, spell));
         let stack = &runner.state().stack;
         assert_eq!(stack[0].id, spell);
         assert_ne!(stack[1].id, stack[2].id);
         assert_eq!((stack[1].controller, stack[2].controller), (P0, P0));
-        runner.assert_power_toughness(source, 4, toughness);
+        assert_power_toughness(&runner, source, 4, toughness);
 
         pass_to_resolve_top(&mut runner);
-        runner.assert_stack_size(2);
+        assert_eq!(runner.state().stack.len(), 2);
         assert_eq!(triggers_from(&runner, source), 1);
         assert!(spell_on_stack(&runner, spell));
-        runner.assert_power_toughness(source, 5, toughness + 1);
+        assert_power_toughness(&runner, source, 5, toughness + 1);
 
         pass_to_resolve_top(&mut runner);
-        runner.assert_stack_size(1);
+        assert_eq!(runner.state().stack.len(), 1);
         assert!(spell_on_stack(&runner, spell));
-        runner.assert_power_toughness(source, 6, toughness + 2);
+        assert_power_toughness(&runner, source, 6, toughness + 2);
 
         pass_to_resolve_top(&mut runner);
-        runner.assert_stack_size(0);
+        assert!(runner.state().stack.is_empty());
         assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
-        assert_eq!(runner.damage_marked(source), 2);
+        assert_eq!(runner.state().objects[&source].damage_marked, 2);
         assert_eq!(runner.state().objects[&draw_card].zone, Zone::Library);
-        runner.assert_zone_count(P0, Zone::Hand, 0);
+        assert!(runner.state().players[P0.0 as usize].hand.is_empty());
 
         // CR 514.2: both until-end-of-turn bonuses end during cleanup.
         runner.advance_to_upkeep();
@@ -957,7 +966,7 @@ fn printed_prowess_instances_stack_and_resolve_separately() {
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
         ));
-        runner.assert_power_toughness(source, 4, toughness);
+        assert_power_toughness(&runner, source, 4, toughness);
     }
 }
 
@@ -992,18 +1001,26 @@ fn printed_and_granted_prowess_each_trigger() {
             },
         );
         finish_prowess_trigger_order(&mut runner, swiftspear_count + narset_count);
-        runner.assert_stack_size(1 + swiftspear_count + narset_count);
+        assert_eq!(
+            runner.state().stack.len(),
+            1 + swiftspear_count + narset_count
+        );
         assert!(spell_on_stack(&runner, spell));
         assert_eq!(triggers_from(&runner, swiftspear), swiftspear_count);
         assert_eq!(triggers_from(&runner, narset), narset_count);
-        runner.assert_power_toughness(swiftspear, 1, 2);
-        runner.assert_power_toughness(narset, 3, 4);
+        assert_power_toughness(&runner, swiftspear, 1, 2);
+        assert_power_toughness(&runner, narset, 3, 4);
 
         resolve_all(&mut runner, false);
         let swiftspear_bonus = swiftspear_count as i32;
         let narset_bonus = narset_count as i32;
-        runner.assert_power_toughness(swiftspear, 1 + swiftspear_bonus, 2 + swiftspear_bonus);
-        runner.assert_power_toughness(narset, 3 + narset_bonus, 4 + narset_bonus);
+        assert_power_toughness(
+            &runner,
+            swiftspear,
+            1 + swiftspear_bonus,
+            2 + swiftspear_bonus,
+        );
+        assert_power_toughness(&runner, narset, 3 + narset_bonus, 4 + narset_bonus);
         assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
     }
 }
@@ -1035,18 +1052,18 @@ fn ruric_thar_prowess_only_sees_its_controllers_noncreature_casts() {
     sc.with_mana_pool(P1, pool(&[ManaType::Red]));
     let mut runner = sc.build();
     assert_eq!(runner.state().objects[&ruric].owner, P1);
-    runner.assert_controls(P0, ruric);
+    assert_eq!(runner.state().objects[&ruric].controller, P0);
 
     cast(&mut runner, ornithopter, CastPaymentMode::Auto);
     assert!(spell_on_stack(&runner, ornithopter));
     let spell_types = &runner.state().objects[&ornithopter].card_types.core_types;
     assert!(spell_types.contains(&CoreType::Artifact));
     assert!(spell_types.contains(&CoreType::Creature));
-    runner.assert_stack_size(1);
+    assert_eq!(runner.state().stack.len(), 1);
     pass_to_resolve_top(&mut runner);
     assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Battlefield);
-    runner.assert_stack_size(0);
-    runner.assert_power_toughness(ruric, 4, 6);
+    assert!(runner.state().stack.is_empty());
+    assert_power_toughness(&runner, ruric, 4, 6);
 
     runner.act(GameAction::PassPriority).expect("P0 passes");
     assert_eq!(
@@ -1061,7 +1078,7 @@ fn ruric_thar_prowess_only_sees_its_controllers_noncreature_casts() {
             ..Default::default()
         },
     );
-    runner.assert_stack_size(3);
+    assert_eq!(runner.state().stack.len(), 3);
     assert!(spell_on_stack(&runner, spell));
     assert_eq!(triggers_from(&runner, ruric), 1);
     assert_eq!(triggers_from(&runner, swiftspear), 1);
@@ -1072,22 +1089,22 @@ fn ruric_thar_prowess_only_sees_its_controllers_noncreature_casts() {
     assert_eq!((stack[2].source_id, stack[2].controller), (swiftspear, P1));
 
     pass_to_resolve_top(&mut runner);
-    runner.assert_power_toughness(swiftspear, 2, 3);
+    assert_power_toughness(&runner, swiftspear, 2, 3);
     assert_eq!(runner.state().objects[&draw_card].zone, Zone::Library);
     pass_to_resolve_top(&mut runner);
     assert_eq!(runner.state().objects[&draw_card].zone, Zone::Hand);
-    runner.assert_zone_count(P0, Zone::Hand, 1);
-    runner.assert_zone_count(P1, Zone::Hand, 0);
+    assert_eq!(runner.state().players[P0.0 as usize].hand.len(), 1);
+    assert!(runner.state().players[P1.0 as usize].hand.is_empty());
     assert_eq!(
         runner.state().objects[&opponent_draw_card].zone,
         Zone::Library
     );
 
     pass_to_resolve_top(&mut runner);
-    runner.assert_stack_size(0);
+    assert!(runner.state().stack.is_empty());
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
-    assert_eq!(runner.damage_marked(ruric), 2);
-    runner.assert_power_toughness(ruric, 4, 6);
+    assert_eq!(runner.state().objects[&ruric].damage_marked, 2);
+    assert_power_toughness(&runner, ruric, 4, 6);
 }
 
 /// CR 603.7b + CR 603.3b: Doublecast's delayed trigger watches for the
