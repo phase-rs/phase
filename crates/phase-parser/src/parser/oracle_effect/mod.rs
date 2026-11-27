@@ -194,6 +194,7 @@ use self::search::{
     classify_search_zone_list, parse_search_destination, parse_search_library_details,
     parse_seek_details, parse_total_mana_value_comparator,
 };
+use self::sequence::SearchResultReferent;
 use self::sequence::{
     apply_clause_continuation, clause_is_dig_lookback_transparent, continuation_absorbs_current,
     dig_patch_represents_from_among, parse_followup_continuation_ast,
@@ -45576,12 +45577,16 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
     .is_ok()
         && scan_contains_phrase(lower, "battlefield");
 
-    // Hand recall — "put {that card,them,it} into your hand". Composed via
-    // nested `alt()` over the pronoun axis (CLAUDE.md "compose nom
-    // combinators, don't enumerate permutations") within a shared "put …
-    // into your hand" frame.
-    let hand_recall = sequence::parse_put_into_your_hand_prefix(lower)
-        .is_ok_and(|(_, (_, referent))| referent != "those cards ");
+    // Hand recall — "put {that card,them,it} into your hand".
+    let hand_recall =
+        sequence::parse_put_into_your_hand_prefix(lower).is_ok_and(|(_, referent)| {
+            matches!(
+                referent,
+                SearchResultReferent::ThatCard
+                    | SearchResultReferent::It
+                    | SearchResultReferent::Them
+            )
+        });
 
     // Issue #377: Anikthea, Hand of Erebos — "create a token that's a copy of
     // it" uses the bare pronoun "it" instead of "that card". Both anaphors
@@ -51462,7 +51467,12 @@ fn is_plural_hand_delivery(source: &str, effect: &Effect) -> bool {
     }
     let lower = source.trim_end_matches('.').trim_end().to_ascii_lowercase();
     let parsed = all_consuming(sequence::parse_put_into_your_hand_prefix).parse(lower.as_str());
-    parsed.is_ok_and(|(_, (number, _))| number == AnaphorNumber::Plural)
+    parsed.is_ok_and(|(_, referent)| {
+        matches!(
+            referent,
+            SearchResultReferent::Them | SearchResultReferent::ThoseCards
+        )
+    })
 }
 
 // CR 608.2c + CR 701.23a: only the locally defined scalar search and its

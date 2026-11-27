@@ -327,10 +327,27 @@ fn inherited_x_does_not_own_the_plural_hand_clause() {
 }
 
 #[test]
+fn implicit_tracked_set_hand_recall_preserves_legacy_referents() {
+    for (referent, expected) in [
+        ("that card", true),
+        ("it", true),
+        ("them", true),
+        ("those cards", false),
+    ] {
+        let clause = format!("put {referent} into your hand");
+        assert!(sequence::parse_put_into_your_hand_prefix(&clause).is_ok());
+        assert_eq!(
+            contains_implicit_tracked_set_pronoun(&clause),
+            expected,
+            "{clause}"
+        );
+    }
+}
+
+#[test]
 fn plural_hand_delivery_requires_adjacent_agreement_and_full_put_source() {
     const SEARCH: &str = "Search your library for up to X Plains cards, where X is the number of players who control more lands than you.";
-    // Exercise the demonstrative's tracked-set parse as well as the printed
-    // bare pronoun. Their absorbed delivery uses the same continuation.
+    // SHAPE: Oreskos Explorer is the nearest printed locally bound search. No printed card combines its local X binding with "Reveal them, put those cards into your hand." Diabolic Revelation supplies the printed demonstrative Hand wording and gets X from its mana cost.
     let demonstrative =
         format!("{SEARCH} Reveal them, put those cards into your hand, then shuffle.");
     let ir = parse_effect_chain_ir(

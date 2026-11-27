@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, one_of};
 use nom::combinator::{
-    all_consuming, consumed, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -232,27 +232,31 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
-fn parse_search_result_referent(input: &str) -> OracleResult<'_, AnaphorNumber> {
+#[derive(Clone, Copy)]
+pub(super) enum SearchResultReferent {
+    ThatCard,
+    It,
+    Them,
+    ThoseCards,
+}
+
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, SearchResultReferent> {
     alt((
-        value(
-            AnaphorNumber::Singular,
-            alt((tag("that card "), tag("it "))),
-        ),
-        value(
-            AnaphorNumber::Plural,
-            alt((tag("them "), tag("those cards "))),
-        ),
+        value(SearchResultReferent::ThatCard, tag("that card ")),
+        value(SearchResultReferent::It, tag("it ")),
+        value(SearchResultReferent::Them, tag("them ")),
+        value(SearchResultReferent::ThoseCards, tag("those cards ")),
     ))
     .parse(input)
 }
 
 pub(super) fn parse_put_into_your_hand_prefix(
     input: &str,
-) -> OracleResult<'_, (AnaphorNumber, &str)> {
+) -> OracleResult<'_, SearchResultReferent> {
     let (input, _) = tag("put ").parse(input)?;
-    let (input, (referent, number)) = consumed(parse_search_result_referent).parse(input)?;
+    let (input, referent) = parse_search_result_referent(input)?;
     let (input, _) = tag("into your hand").parse(input)?;
-    Ok((input, (number, referent)))
+    Ok((input, referent))
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
