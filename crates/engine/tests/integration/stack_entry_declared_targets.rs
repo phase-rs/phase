@@ -194,11 +194,11 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
         let toward_p0 = scenario.add_creature(P1, "Attacks P0", 2, 2).id();
         let toward_p0_walker = scenario.add_creature(P1, "Attacks P0 walker", 2, 2).id();
         let p2_walker = scenario
-            .add_planeswalker_from_oracle(p2, "Karn Stand-in", "Karn", 5, "+1: You gain 1 life.")
+            .add_planeswalker_from_oracle(p2, "Karn Stand-in", "Karn", 5, "")
             .as_planeswalker_with_loyalty("Karn", 5)
             .id();
         let p0_walker = scenario
-            .add_planeswalker_from_oracle(P0, "Jace Stand-in", "Jace", 5, "+1: You gain 1 life.")
+            .add_planeswalker_from_oracle(P0, "Jace Stand-in", "Jace", 5, "")
             .as_planeswalker_with_loyalty("Jace", 5)
             .id();
         let mut runner = p1_priority(scenario);
