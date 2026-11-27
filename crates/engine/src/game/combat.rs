@@ -5799,11 +5799,7 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
-                    // MECHANICAL: the scope-selection field is parser→resolver
-                    // metadata consumed solely by `add_restriction` at creation;
-                    // enforcement reads only the snapshotted player. No behavior
-                    // change.
-                    protected_scope: _,
+                    protected_scope,
                 },
             ..
         } = restriction
@@ -5813,9 +5809,27 @@ fn attack_passes_temporary_prohibition(
         // New restrictions snapshot the protected player on resolution. Legacy
         // serialized restrictions have no snapshot and retain their historic
         // source-controller lookup.
-        let Some(protected) = (*protected_player)
-            .or_else(|| state.objects.get(source).map(|object| object.controller))
-        else {
+        let Some(protected) = (*protected_player).or_else(|| match protected_scope {
+            // CR 108.3 + CR 608.2h: an unresolved parent owner supplies no
+            // player; last-known information cannot be replaced by source control.
+            Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Owner,
+            }) => None,
+            None
+            | Some(crate::types::ability::RestrictionPlayerScope::AllPlayers)
+            | Some(crate::types::ability::RestrictionPlayerScope::SpecificPlayer(_))
+            | Some(crate::types::ability::RestrictionPlayerScope::TargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController)
+            | Some(crate::types::ability::RestrictionPlayerScope::DefendingPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            })
+            | Some(crate::types::ability::RestrictionPlayerScope::ScopedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::SourceController) => {
+                state.objects.get(source).map(|object| object.controller)
+            }
+        }) else {
             continue;
         };
         let attacker_is_affected = match affected_players {
@@ -5837,7 +5851,7 @@ fn attack_passes_temporary_prohibition(
             crate::types::ability::RestrictionPlayerScope::TargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-            | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
+            | crate::types::ability::RestrictionPlayerScope::ParentObjectTarget { .. }
             | crate::types::ability::RestrictionPlayerScope::ScopedPlayer
             | crate::types::ability::RestrictionPlayerScope::SourceController => false,
         };
@@ -11690,6 +11704,46 @@ mod tests {
         state.turn_number = 2;
         state.active_player = PlayerId(0);
         state
+    }
+
+    #[test]
+    fn unresolved_parent_owner_does_not_fallback_to_source_controller() {
+        // CR 508.1c: an unresolved protected-player owner must not make an
+        // otherwise legal attack fail against the restriction source's player.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::DeclareAttackers;
+        let attacker = create_creature(&mut state, PlayerId(1), "Attacker", 2, 2);
+        let source = create_creature(&mut state, PlayerId(0), "Restriction Source", 1, 1);
+        state
+            .restrictions
+            .push(crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players: crate::types::ability::RestrictionPlayerScope::AllPlayers,
+                expiry: crate::types::ability::RestrictionExpiry::EndOfTurn,
+                activity: crate::types::ability::ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: Some(
+                        crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                            possession: crate::types::ability::PossessionAxis::Owner,
+                        },
+                    ),
+                },
+            });
+        let gates = CombatStaticGates::compute(&state);
+        assert!(attack_passes_temporary_prohibition(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+        ));
+        assert!(attacker_can_attack_target(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            &gates,
+            &[PlayerId(1)],
+        ));
     }
 
     /// Test adapter: derive both defender-scoped cap sets from `state` exactly
