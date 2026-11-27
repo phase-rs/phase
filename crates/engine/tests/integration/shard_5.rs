@@ -313,6 +313,7 @@ mod theorists_sanctum;
 mod there_are_no_permanents_state_trigger;
 mod they_gain_keyword_anaphor;
 mod thickest_in_the_thicket_target_anaphor_8460;
+mod this_way_gate_reads_named_instruction;
 mod thor_god_of_thunder;
 mod thorna_and_twigtooth_shared_x_relay_6956;
 mod thought_distortion;

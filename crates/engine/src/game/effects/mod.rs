@@ -18854,44 +18854,50 @@ fn when_you_do_mandatory_parent_did_nothing(
         && !mandatory_parent_effect_performed(&parent.effect, parent_events)
 }
 
-/// CR 608.2c: Whether this node only grants a play or cast permission over cards
-/// an earlier instruction moved ("You may play that card this turn") and is
-/// directly followed by a "… this way" head that reads the earlier mover's
-/// zone-change ledger (Cait Sith, Fortune Teller; Hidetsugu, Devouring Chaos).
-/// Such a permission node moves nothing, so it leaves that ledger in place for
-/// the head. Scoped to the direct reader: other consumers after a permission
-/// node keep the established cleared ledger, because "cards exiled with this
-/// enchantment" readers (Court of Locthwain) would otherwise narrow to the
-/// current resolution's exile. Deliberately excludes `CastFromZone`, which can
-/// also cast during resolution.
-fn permission_node_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
-    matches!(ability.effect, Effect::GrantCastingPermission { .. })
-        && ability
-            .sub_ability
-            .as_ref()
-            .and_then(|sub| sub.condition.as_ref())
-            .is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
-}
-
-/// CR 608.2c: Whether this node is one of several consecutive effects gated by
-/// the same "if [noun] was [verb]ed this way" clause and is directly followed by
-/// another such gated effect ("If a creature card is discarded this way, untap
-/// this creature, then transform it" — Civilized Scholar). The gate names the
-/// earlier instruction that moved the cards, not the gated effects between, so a
-/// gated node that itself moved nothing (the untap) must leave that instruction's
-/// ledger in place for the next gated node (the transform). The caller applies
-/// this only when the node moved no objects.
-fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
-    let gated_by_this_way_head = |condition: Option<&AbilityCondition>| {
+/// CR 608.2c: Whether this node must leave the "… this way" zone-change ledger
+/// in place for the "… this way" head directly after it. Such a head names the
+/// earlier instruction that performed its verb, so a node that is not that
+/// instruction must not replace the ledger the head reads:
+///
+/// - A play or cast permission over cards an earlier instruction moved ("You
+///   may play that card this turn") moves nothing (Cait Sith, Fortune Teller;
+///   Hidetsugu, Devouring Chaos). Scoped to the direct reader: other consumers
+///   after a permission node keep the established cleared ledger, because
+///   "cards exiled with this enchantment" readers (Court of Locthwain) would
+///   otherwise narrow to the current resolution's exile. Deliberately excludes
+///   `CastFromZone`, which can also cast during resolution.
+/// - CR 121.1: a draw (putting the top card of a library into a hand) is not
+///   the instruction a ledger head names. The printed draw-reading heads ("If
+///   you draw one or more cards this way" — Transcendent Archaic; Sarek,
+///   Federation Ambassador) read the draw's count (`PreviousEffectAmount`),
+///   not this ledger, and no printed card places a hand-arrival ledger head
+///   ("If you put a card into your hand this way" — Sidequest: Catch a Fish)
+///   directly after a draw. Lord Windgrace's "Discard a card, then draw a
+///   card. If a land card is discarded this way, draw an additional card."
+/// - The heads of one gated run all name the run's shared antecedent, so a
+///   gated node — even one that moved an object or created a token (CR 111.1)
+///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
+///   milled this way, create a Treasure token. If a creature card is milled
+///   this way, …": the creature gate reads the milled card, not the Treasure.
+///   "If a creature card is discarded this way, untap this creature, then
+///   transform it" (Civilized Scholar): the gate names the earlier instruction
+///   that moved the cards, not the gated effects between, so the untap must
+///   leave that instruction's ledger in place for the transform.
+fn keeps_this_way_ledger_for_following_head(ability: &ResolvedAbility) -> bool {
+    let is_this_way_head = |condition: Option<&AbilityCondition>| {
         condition.is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
     };
-    gated_by_this_way_head(ability.condition.as_ref())
-        && gated_by_this_way_head(
-            ability
-                .sub_ability
-                .as_ref()
-                .and_then(|sub| sub.condition.as_ref()),
-        )
+    let next_head = is_this_way_head(
+        ability
+            .sub_ability
+            .as_ref()
+            .and_then(|sub| sub.condition.as_ref()),
+    );
+    next_head
+        && (matches!(
+            ability.effect,
+            Effect::GrantCastingPermission { .. } | Effect::Draw { .. }
+        ) || is_this_way_head(ability.condition.as_ref()))
 }
 
 /// CR 603.12 + CR 701.9a: Effect kinds whose reflexive "when you do" needs an
@@ -30917,12 +30923,10 @@ fn resolve_chain_body(
         })
         .collect();
     // CR 608.2c: "… this way" names the earlier instruction that moved the
-    // cards. A play permission over those cards ("You may play that card this
-    // turn") directly followed by a "this way" head is not that instruction,
-    // so it leaves the moving instruction's ledger in place for the head.
-    if !permission_node_keeps_ledger_for_this_way_head(ability)
-        && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
-    {
+    // cards. A node that is not that instruction (a play permission, a draw, a
+    // member of the head's gated run) directly followed by a "this way" head
+    // leaves the moving instruction's ledger in place for the head.
+    if !keeps_this_way_ledger_for_following_head(ability) {
         state.last_zone_changed_ids = zone_changed_ids;
     }
     let linked_batch =
