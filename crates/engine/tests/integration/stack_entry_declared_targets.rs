@@ -17,7 +17,7 @@ use engine::types::game_state::{
     CastPaymentMode, GameState, PersistedGameState, PersistedRestoreFinalization, RetargetScope,
     ShardChoice, StackEntryKind, WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, TrackedSetId};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -26,6 +26,7 @@ use engine::types::zones::Zone;
 
 const SABOTAGE_STRATEGIST: &str = "Flying, vigilance\nWhenever one or more creatures attack you, those creatures get -1/-0 until end of turn.\nExhaust — {5}{U}{U}: Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)";
 const FRONTIER_WARMONGER: &str = "Whenever one or more creatures attack one of your opponents or a planeswalker they control, those creatures gain menace until end of turn.";
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, then return those cards to the battlefield under your control.";
 const ENDLESS_COCKROACHES: &str = "When this creature dies, return it to its owner's hand.";
 const CONTEMPT: &str = "Enchant creature\nWhen enchanted creature attacks, return it and this Aura to their owners' hands at end of combat.";
 const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
@@ -178,12 +179,14 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
         ),
         (
             "Frenzied Gorespawn",
-            "When this creature enters, for each opponent, goad target creature that player controls.\nWhenever one or more creatures attack one of your opponents, those creatures gain menace until end of turn.",
+            "When this creature enters, for each opponent, goad target creature that player controls. (Until your next turn, those creatures attack each combat if able and attack a player other than you if able.)\nWhenever one or more creatures attack one of your opponents, those creatures gain menace until end of turn.",
         ),
     ] {
         let mut scenario = GameScenario::new_n_player(4, 42);
         scenario.at_phase(Phase::PreCombatMain);
-        let source = scenario.add_creature_from_oracle(P0, name, 4, 4, oracle).id();
+        let source = scenario
+            .add_creature_from_oracle(P0, name, 4, 4, oracle)
+            .id();
         let toward_p2 = scenario.add_creature(P1, "Attacks P2", 2, 2).id();
         let also_toward_p2 = scenario.add_creature(P1, "Also attacks P2", 2, 2).id();
         let toward_p2_walker = scenario.add_creature(P1, "Attacks P2 walker", 2, 2).id();
@@ -200,21 +203,27 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
             .id();
         let mut runner = p1_priority(scenario);
         runner.advance_to_combat();
-        let attacks = [
+        let mut attacks = vec![
             (toward_p2, AttackTarget::Player(p2)),
-            (also_toward_p2, AttackTarget::Player(p2)),
             (toward_p2_walker, AttackTarget::Planeswalker(p2_walker)),
-            (toward_p3, AttackTarget::Player(p3)),
             (toward_p0, AttackTarget::Player(P0)),
             (toward_p0_walker, AttackTarget::Planeswalker(p0_walker)),
         ];
+        if name != "Gahiji, Honored One" {
+            attacks.push((also_toward_p2, AttackTarget::Player(p2)));
+            attacks.push((toward_p3, AttackTarget::Player(p3)));
+        }
         runner.declare_attackers(&attacks).expect("declare attacks");
         let expected_groups = match name {
             "Frontier Warmonger" => {
-                vec![vec![toward_p2, also_toward_p2, toward_p2_walker], vec![toward_p3]]
+                vec![
+                    vec![toward_p2, also_toward_p2, toward_p2_walker],
+                    vec![toward_p3],
+                ]
             }
             "Gahiji, Honored One" => {
-                vec![vec![toward_p2], vec![also_toward_p2], vec![toward_p2_walker], vec![toward_p3]]
+                // CR 508.3a + CR 603.2c: one occurrence per qualifying creature.
+                vec![vec![toward_p2], vec![toward_p2_walker]]
             }
             "Frenzied Gorespawn" => vec![vec![toward_p2, also_toward_p2], vec![toward_p3]],
             _ => unreachable!(),
@@ -224,9 +233,13 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
                 assert_eq!(*player, P0);
                 assert_eq!(triggers.len(), expected_groups.len(), "{name}");
                 let order = (0..triggers.len()).rev().collect();
-                runner.act(GameAction::OrderTriggers { order }).expect("order triggers");
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("order triggers");
             }
-            WaitingFor::Priority { .. } => {}
+            WaitingFor::Priority { .. } => {
+                assert_eq!(runner.state().stack.len(), expected_groups.len(), "{name}");
+            }
             waiting => panic!("{name} could not place its triggers: {waiting:?}"),
         }
         let mut pending_groups = expected_groups;
@@ -238,27 +251,45 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
             let StackEntryKind::TriggeredAbility {
                 trigger_event: Some(GameEvent::AttackersDeclared { attacker_ids, .. }),
                 ..
-            } = &entry.kind else {
+            } = &entry.kind
+            else {
                 panic!("expected the narrowed attack declaration");
             };
-            let index = pending_groups.iter().position(|group| {
-                group.len() == attacker_ids.len() && group.iter().all(|id| attacker_ids.contains(id))
-            }).expect("one firing for this attacker group");
+            let index = pending_groups
+                .iter()
+                .position(|group| {
+                    group.len() == attacker_ids.len()
+                        && group.iter().all(|id| attacker_ids.contains(id))
+                })
+                .expect("one firing for this attacker group");
             let ids = pending_groups.remove(index);
             let (held, declared) = both(runner.state(), entry.id);
             assert!(declared.is_empty(), "{name} has no targets");
             if name != "Gahiji, Honored One" {
-                assert_eq!(held, attacker_ids.iter().copied().map(TargetRef::Object).collect::<Vec<_>>());
+                assert_eq!(
+                    held,
+                    attacker_ids
+                        .iter()
+                        .copied()
+                        .map(TargetRef::Object)
+                        .collect::<Vec<_>>()
+                );
             }
 
             let mut phased = None;
             if name == "Frontier Warmonger" && ids.len() == 3 {
-                assert!(engine::game::effects::remove_from_combat::remove_object_from_combat(
-                    runner.state_mut(), toward_p2,
-                ));
+                assert!(
+                    engine::game::effects::remove_from_combat::remove_object_from_combat(
+                        runner.state_mut(),
+                        toward_p2,
+                    )
+                );
                 assert_eq!(
                     engine::game::phasing::phase_out_object(
-                        runner.state_mut(), also_toward_p2, PhaseOutCause::Directly, &mut Vec::new(),
+                        runner.state_mut(),
+                        also_toward_p2,
+                        PhaseOutCause::Directly,
+                        &mut Vec::new(),
                     ),
                     vec![also_toward_p2],
                 );
@@ -269,7 +300,10 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
                 runner.act(GameAction::PassPriority).expect("pass priority");
             }
             assert_eq!(runner.state().stack.len(), pending_groups.len(), "{name}");
-            assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
             if let Some(id) = phased {
                 assert_eq!(
                     engine::game::phasing::phase_in_object(runner.state_mut(), id, &mut Vec::new()),
@@ -277,14 +311,94 @@ fn opponent_attack_destination_resolves_each_firing_against_its_own_creatures() 
                 );
                 engine::game::layers::flush_layers(runner.state_mut());
             }
-            for (id, _) in attacks {
+            for &(id, _) in &attacks {
                 let object = &runner.state().objects[&id];
                 if name == "Gahiji, Honored One" {
-                    assert_eq!(object.power, Some(if granted.contains(&id) { 4 } else { 2 }));
+                    assert_eq!(
+                        object.power,
+                        Some(if granted.contains(&id) { 4 } else { 2 })
+                    );
                 } else {
-                    assert_eq!(object.has_keyword(&Keyword::Menace), granted.contains(&id), "{name} {id:?}");
+                    assert_eq!(
+                        object.has_keyword(&Keyword::Menace),
+                        granted.contains(&id),
+                        "{name} {id:?}"
+                    );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn warmonger_grants_menace_only_to_surviving_incarnations_from_its_firing() {
+    for blink_both in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let warmonger = scenario
+            .add_creature_from_oracle(P0, "Frontier Warmonger", 4, 4, FRONTIER_WARMONGER)
+            .id();
+        let first = scenario.add_creature(P0, "First attacker", 2, 2).id();
+        let second = scenario.add_creature(P0, "Second attacker", 2, 2).id();
+        let bystander = scenario.add_creature(P0, "Bystander", 2, 2).id();
+        let flicker = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[
+                (first, AttackTarget::Player(P1)),
+                (second, AttackTarget::Player(P1)),
+            ])
+            .expect("declare both attackers");
+        let trigger = trigger_of(&mut runner, warmonger);
+        let (held, declared) = both(runner.state(), trigger);
+        assert_eq!(held.len(), 2);
+        assert!(held.contains(&TargetRef::Object(first)));
+        assert!(held.contains(&TargetRef::Object(second)));
+        assert!(declared.is_empty());
+
+        let blinked = [first, if blink_both { second } else { bystander }];
+        let before = blinked.map(|id| runner.state().objects[&id].incarnation);
+        runner.cast(flicker).target_objects(&blinked).commit();
+        assert_eq!(runner.state().stack.len(), 2);
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&flicker].zone, Zone::Graveyard);
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(
+            runner.state().stack.back().expect("Warmonger trigger").id,
+            trigger
+        );
+        for (id, old_incarnation) in blinked.into_iter().zip(before) {
+            let object = &runner.state().objects[&id];
+            assert_eq!(object.zone, Zone::Battlefield);
+            assert_ne!(
+                object.incarnation, old_incarnation,
+                "CR 400.7: the returned creature is a new object"
+            );
+        }
+
+        // Seed an unrelated population independently of Flicker's result.
+        let state = runner.state_mut();
+        let set = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set, vec![bystander]);
+        state.chain_tracked_set_id = Some(set);
+
+        runner.resolve_top();
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        for (id, menace) in [(first, false), (second, !blink_both), (bystander, false)] {
+            assert_eq!(
+                runner.state().objects[&id].has_keyword(&Keyword::Menace),
+                menace,
+                "CR 400.7 + CR 611.2c: only original creatures still present can gain menace (blink_both={blink_both}, creature={id:?})"
+            );
         }
     }
 }
