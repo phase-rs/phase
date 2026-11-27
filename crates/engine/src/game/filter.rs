@@ -13798,9 +13798,13 @@ fn evaluate_shares_quality(
     relation: &SharedQualityRelation,
     source: &SourceContext<'_>,
 ) -> bool {
-    let shares = reference.as_ref().is_none_or(|reference_filter| {
-        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source)
-    });
+    // CR 601.2c: A reference-free relation is a requirement on the
+    // declaration's group. Individual candidates pass for either relation.
+    let Some(reference_filter) = reference else {
+        return true;
+    };
+    let shares =
+        object_shares_quality_with_reference_filter(state, obj, quality, reference_filter, source);
     // CR 201.2a: an object with no name doesn't have the same name as any other
     // object, including another object with no name. `quality_sets_overlap`
     // already answers "no common value" for an empty value set (face-down

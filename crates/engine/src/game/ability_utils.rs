@@ -18,8 +18,8 @@ use crate::types::ability::{
     EffectError, EffectKind, EffectScope, FilterProp, ModalChoice, ModalSelectionCondition,
     ModalSelectionConstraint, MultiTargetSpec, ObjectScope, ParentTargetMissingReason,
     PlayerFilter, PreventionAmount, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
-    TypeFilter, TypedFilter,
+    SharedQuality, SharedQualityRelation, SpellContext, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{
@@ -1719,6 +1719,7 @@ struct TargetSlotSpec {
     filter: TargetFilter,
     optional: bool,
     instance: TargetInstanceId,
+    shared_qualities: Vec<(SharedQuality, SharedQualityRelation)>,
     /// The declared-player group the clause announcing this slot is tagged with.
     group: Option<crate::types::ability::ChosenGroupId>,
     /// Typed origin of the declaring instruction, relative to the targeting root.
@@ -6983,6 +6984,7 @@ fn collect_attach_attachment_target_slot_specs(
             *next_instance += 1;
             for slot_index in 0..bounds.max {
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: attachment.clone(),
                     optional: slot_index >= bounds.min,
                     instance: id,
@@ -6995,6 +6997,7 @@ fn collect_attach_attachment_target_slot_specs(
         let id = TargetInstanceId(*next_instance);
         *next_instance += 1;
         specs.push(TargetSlotSpec {
+            shared_qualities: Vec::new(),
             filter: attachment.clone(),
             optional: attach_attachment_targeting_is_optional(ability),
             instance: id,
@@ -7635,6 +7638,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: role.filter().clone(),
                     optional: ability.optional_targeting,
                     instance: id,
@@ -7646,6 +7650,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: src_leaf.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
@@ -7666,6 +7671,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: filter.clone(),
                 // CR 115.6: same authority as collect_target_slots_inner's paired arm.
                 optional: ability.targeting_is_optional(),
@@ -7686,6 +7692,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: filter.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
@@ -7709,6 +7716,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: filter.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
@@ -7728,6 +7736,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: filter.clone(),
                 optional: ability.optional_targeting,
                 instance: id,
@@ -7755,6 +7764,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: target.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
@@ -7785,6 +7795,7 @@ fn collect_target_slot_specs(
                     *next_instance += 1;
                     for slot_index in 0..bounds.max {
                         specs.push(TargetSlotSpec {
+                            shared_qualities: Vec::new(),
                             filter: sources.clone(),
                             optional: slot_index >= bounds.min,
                             instance: id,
@@ -7797,6 +7808,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: sources.clone(),
                     optional: false,
                     instance: id,
@@ -7812,6 +7824,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: extra.clone(),
                     optional: true,
                     instance: id,
@@ -7822,6 +7835,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: recipient.clone(),
                 optional: false,
                 instance: id,
@@ -7844,6 +7858,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: TargetFilter::Player,
                 // CR 115.6: mirror the collect-side skip authority so
                 // recomputation agrees with the surfaced slot.
@@ -7860,6 +7875,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: effect_target_slot_filter(&ability.effect)
                     .expect("slot filter present when gate true")
                     .filter,
@@ -7875,6 +7891,7 @@ fn collect_target_slot_specs(
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
             specs.push(TargetSlotSpec {
+                shared_qualities: Vec::new(),
                 filter: parent_target_combat_relation_slot_filter(),
                 optional: ability.optional_targeting,
                 instance: id,
@@ -7901,6 +7918,7 @@ fn collect_target_slot_specs(
                 let id = TargetInstanceId(*next_instance);
                 *next_instance += 1;
                 specs.push(TargetSlotSpec {
+                    shared_qualities: Vec::new(),
                     filter: filter.clone(),
                     optional: ability.optional_targeting,
                     instance: id,
@@ -7924,8 +7942,14 @@ fn collect_target_slot_specs(
                         // chosen into two of these slots.
                         let id = TargetInstanceId(*next_instance);
                         *next_instance += 1;
+                        let shared_qualities: Vec<_> =
+                            super::effects::extract_shares_quality_props(filter)
+                                .into_iter()
+                                .map(|(quality, relation)| (quality.clone(), relation))
+                                .collect();
                         for slot_index in 0..bounds.max {
                             specs.push(TargetSlotSpec {
+                                shared_qualities: shared_qualities.clone(),
                                 filter: filter.clone(),
                                 optional: slot_index >= bounds.min,
                                 instance: id,
@@ -7938,6 +7962,7 @@ fn collect_target_slot_specs(
                     let id = TargetInstanceId(*next_instance);
                     *next_instance += 1;
                     specs.push(TargetSlotSpec {
+                        shared_qualities: Vec::new(),
                         filter: filter.clone(),
                         optional: ability.optional_targeting,
                         instance: id,
@@ -8682,6 +8707,7 @@ fn collect_per_opponent_target_fanout_specs(
         let object_id = TargetInstanceId(*next_instance);
         *next_instance += 1;
         specs.push(TargetSlotSpec {
+            shared_qualities: Vec::new(),
             filter: TargetFilter::SpecificPlayer { id: opponent },
             optional: false,
             instance: player_id,
@@ -8689,6 +8715,7 @@ fn collect_per_opponent_target_fanout_specs(
             path: Vec::new(),
         });
         specs.push(TargetSlotSpec {
+            shared_qualities: Vec::new(),
             filter: object_filter.clone(),
             optional: ability.targeting_is_optional(),
             instance: object_id,
@@ -9916,6 +9943,7 @@ fn homogeneous_required_target_walk_spec<'a>(
         || specs.iter().any(|spec| {
             spec.instance != first.instance
                 || spec.filter != first.filter
+                || !spec.shared_qualities.is_empty()
                 || target_filter_has_another_target_marker(&spec.filter)
                 || relative_controller_kind(&spec.filter).is_some()
                 || caster_scoped_selection(&spec.filter)
@@ -10631,6 +10659,19 @@ fn validate_selected_slots_with_specs(
                         "Illegal target selected".to_string(),
                     ));
                 }
+                if specs.get(index).is_some_and(|spec| {
+                    !matches_declared_shared_qualities(
+                        state,
+                        spec,
+                        target,
+                        &specs[..index],
+                        &selected_slots[..index],
+                    )
+                }) {
+                    return Err(EngineError::InvalidAction(
+                        "Targets do not satisfy the declaration's shared quality".to_string(),
+                    ));
+                }
                 compact_targets.push(target.clone());
             }
             None if slot.optional => {}
@@ -10643,6 +10684,51 @@ fn validate_selected_slots_with_specs(
     }
 
     validate_target_constraints(Some(state), &compact_targets, constraints, Some(ability))
+}
+
+/// CR 601.2c + CR 115.3: the quality restriction belongs to one declaration.
+fn matches_declared_shared_qualities(
+    state: &GameState,
+    spec: &TargetSlotSpec,
+    target: &TargetRef,
+    prior_specs: &[TargetSlotSpec],
+    prior_selections: &[Option<TargetRef>],
+) -> bool {
+    if spec.shared_qualities.is_empty() {
+        return true;
+    }
+    let TargetRef::Object(id) = target else {
+        return false;
+    };
+    let prior_objects = prior_specs
+        .iter()
+        .zip(prior_selections)
+        .filter(|(prior, _)| prior.instance == spec.instance)
+        .filter_map(|(_, selection)| selection.as_ref())
+        .map(|selection| match selection {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        });
+    let Some(mut objects) = prior_objects.collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    objects.push(*id);
+    spec.shared_qualities
+        .iter()
+        .all(|(quality, relation)| match relation {
+            SharedQualityRelation::Shares => {
+                super::filter::objects_have_common_quality_value(state, &objects, quality)
+            }
+            SharedQualityRelation::DoesNotShare => {
+                objects[..objects.len() - 1].iter().all(|other| {
+                    !super::filter::objects_have_common_quality_value(
+                        state,
+                        &[*other, *id],
+                        quality,
+                    )
+                })
+            }
+        })
 }
 
 /// CR 601.2c: the announcement assigner. It appends raw `targets` while the

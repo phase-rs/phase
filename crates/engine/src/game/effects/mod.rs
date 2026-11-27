@@ -15950,7 +15950,7 @@ fn collect_effect_quantity_exprs<'a>(effect: &'a Effect, out: &mut Vec<&'a Quant
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
 /// Returns the typed qualities that require group validation.
-fn extract_shares_quality_props(
+pub(crate) fn extract_shares_quality_props(
     filter: &TargetFilter,
 ) -> Vec<(&SharedQuality, SharedQualityRelation)> {
     match filter {
