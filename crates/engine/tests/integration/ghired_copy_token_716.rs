@@ -18,6 +18,7 @@ use engine::types::{ObjectId, TargetRef};
 const GHIRED_NAME: &str = "Ghired, Mirror of the Wilds";
 const GHIRED: &str = "Haste\nNontoken creatures you control have \"{T}: Create a token that's a copy of target token you control that entered this turn.\"";
 const RAISE_THE_ALARM: &str = "Create two 1/1 white Soldier creature tokens.";
+const DRAGON_FODDER: &str = "Create two 1/1 red Goblin creature tokens.";
 const RUNECLAW_BEAR: &str = "Runeclaw Bear";
 
 fn raise_the_alarm(scenario: &mut GameScenario) -> ObjectId {
@@ -27,6 +28,10 @@ fn raise_the_alarm(scenario: &mut GameScenario) -> ObjectId {
 }
 
 fn soldier_tokens(runner: &GameRunner) -> Vec<ObjectId> {
+    tokens_named(runner, "Soldier")
+}
+
+fn tokens_named(runner: &GameRunner, name: &str) -> Vec<ObjectId> {
     runner
         .state()
         .objects
@@ -35,7 +40,7 @@ fn soldier_tokens(runner: &GameRunner) -> Vec<ObjectId> {
             obj.zone == Zone::Battlefield
                 && obj.controller == P0
                 && obj.is_token
-                && obj.name == "Soldier"
+                && obj.name == name
         })
         .map(|obj| obj.id)
         .collect()
@@ -61,9 +66,16 @@ fn ghired_granted_ability_targets_and_copies_only_an_eligible_token() {
     let opposing_token = scenario.add_creature(P1, "Soldier", 1, 1).id();
     scenario.add_creature(P1, "Grizzly Bears", 2, 2);
     let alarm = raise_the_alarm(&mut scenario);
+    let fodder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Dragon Fodder", false, DRAGON_FODDER)
+        .id();
 
     let mut runner = scenario.build();
     let turn = runner.state().turn_number;
+    // The scenario puts both Soldiers onto the battlefield on an earlier turn
+    // with no summoning sickness. Marking them tokens gives P0 an older token
+    // ("entered this turn" excludes it) and P1 a token that did enter this
+    // turn ("you control" excludes it), so each restriction has its own witness.
     runner
         .state_mut()
         .objects
@@ -83,8 +95,13 @@ fn ghired_granted_ability_targets_and_copies_only_an_eligible_token() {
         .into_iter()
         .filter(|id| *id != old_token)
         .collect();
-    let &[chosen, other] = soldiers.as_slice() else {
+    let &[soldier_a, soldier_b] = soldiers.as_slice() else {
         panic!("Raise the Alarm must create two Soldiers, got {soldiers:?}");
+    };
+    // A second kind of eligible token, so the copy shows which target it copied.
+    runner.cast(fodder).resolve();
+    let &[chosen, other_goblin] = tokens_named(&runner, "Goblin").as_slice() else {
+        panic!("Dragon Fodder must create two Goblins");
     };
 
     let offers = activations(&runner);
@@ -112,9 +129,10 @@ fn ghired_granted_ability_targets_and_copies_only_an_eligible_token() {
         panic!("expected one target slot, got {target_slots:?}");
     };
     assert!(!slot.optional);
-    assert_eq!(slot.legal_targets.len(), 2, "{:?}", slot.legal_targets);
-    assert!(slot.legal_targets.contains(&TargetRef::Object(chosen)));
-    assert!(slot.legal_targets.contains(&TargetRef::Object(other)));
+    assert_eq!(slot.legal_targets.len(), 4, "{:?}", slot.legal_targets);
+    for id in [soldier_a, soldier_b, chosen, other_goblin] {
+        assert!(slot.legal_targets.contains(&TargetRef::Object(id)));
+    }
 
     runner
         .act(GameAction::ChooseTarget {
@@ -137,21 +155,24 @@ fn ghired_granted_ability_targets_and_copies_only_an_eligible_token() {
     ));
 
     // CR 111.1 + CR 111.2 + CR 707.2: Create one token under the activator's
-    // control with the targeted Soldier's copiable characteristics.
-    let tokens = soldier_tokens(&runner);
-    assert_eq!(tokens.len(), 4);
-    assert!(tokens.contains(&old_token));
-    assert!(tokens.contains(&other));
-    assert!(tokens.contains(&chosen));
-    let copy = tokens
+    // control with the targeted Goblin's copiable characteristics.
+    let mut soldiers = soldier_tokens(&runner);
+    soldiers.sort();
+    let mut expected = [old_token, soldier_a, soldier_b];
+    expected.sort();
+    assert_eq!(soldiers, expected, "the Soldiers are unchanged");
+    let goblins = tokens_named(&runner, "Goblin");
+    assert_eq!(goblins.len(), 3);
+    let copy = goblins
         .into_iter()
-        .find(|id| *id != chosen && *id != other && *id != old_token)
+        .find(|id| *id != chosen && *id != other_goblin)
         .unwrap();
     for id in [chosen, copy] {
-        let soldier = &runner.state().objects[&id];
-        assert_eq!((soldier.power, soldier.toughness), (Some(1), Some(1)));
-        assert_eq!(soldier.color, [ManaColor::White]);
-        assert!(!soldier.tapped);
+        let goblin = &runner.state().objects[&id];
+        assert_eq!(goblin.controller, P0);
+        assert_eq!((goblin.power, goblin.toughness), (Some(1), Some(1)));
+        assert_eq!(goblin.color, [ManaColor::Red]);
+        assert!(!goblin.tapped);
     }
 
     let ghired = runner
