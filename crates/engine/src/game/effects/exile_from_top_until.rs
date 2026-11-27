@@ -2480,7 +2480,7 @@ mod tests {
 
     /// The normalized "put the rest on the bottom" cleanup target: every card
     /// this ability exiled EXCEPT the ParentTarget hit (declined hit stays in
-    /// exile). Mirrors `normalize_exile_until_cast_bottom_cleanup`.
+    /// exile). Mirrors `normalize_exile_until_hit_bottom_cleanup`.
     fn jodah_rest_cleanup_target() -> TargetFilter {
         TargetFilter::And {
             filters: vec![

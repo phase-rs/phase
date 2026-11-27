@@ -74885,6 +74885,123 @@ fn assimilate_without_a_graveyard_target_stays_unimplemented() {
     );
 }
 
+/// The exile-until "the rest" cleanup (`And { ExiledBySource, DistinctFrom
+/// { ParentTarget } }`, every-card count) at the end of `ability`'s sub chain.
+fn assert_last_sub_is_exile_until_rest_bottom(ability: &AbilityDefinition) {
+    let mut cursor = ability;
+    while let Some(sub) = cursor.sub_ability.as_deref() {
+        cursor = sub;
+    }
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position: LibraryPosition::Bottom,
+        ..
+    } = cursor.effect.as_ref()
+    else {
+        panic!(
+            "the chain must end with a bottom placement, got {:?}",
+            cursor.effect
+        );
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::DistinctFrom {
+                        reference: Box::new(TargetFilter::ParentTarget),
+                    },
+                ])),
+            ],
+        },
+        "CR 608.2c: \"the rest\" is the exiled pile minus the found card"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 0 },
+        "every matching card"
+    );
+}
+
+/// CR 608.2c + CR 701.13a: The Borg Queen — `assimilate` of the card an
+/// exile-until loop found ("Assimilate that card") lowers on the `ParentTarget`
+/// anaphor, and "They put the rest on the bottom in a random order" (the
+/// abbreviated placement, after the two-step assimilate instruction) is the
+/// exile-until "the rest" cleanup.
+#[test]
+fn assimilate_that_card_after_exile_until_lowers_with_the_rest_cleanup() {
+    const THE_BORG_QUEEN: &str = "Artifact creatures you control get +2/+2.\n\
+         Whenever The Borg Queen enters or attacks, target opponent exiles cards from the top \
+         of their library until they exile a creature card. Assimilate that card. They put the \
+         rest on the bottom in a random order. (To assimilate a card, put it onto the battlefield \
+         under your control with a +1/+1 counter. It's a Borg artifact creature and loses all \
+         other creature types.)";
+    let parsed = parse_oracle_text(
+        THE_BORG_QUEEN,
+        "The Borg Queen",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Borg".to_string(), "Noble".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .first()
+        .and_then(|trigger| trigger.execute.as_deref())
+        .expect("the enters-or-attacks trigger carries an execute body");
+    assert!(
+        !ability_chain_has_unimplemented(execute),
+        "the trigger must lower with no residual Unimplemented node: {execute:#?}"
+    );
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::ExileFromTopUntil { .. }
+    ));
+    let assimilate = execute.sub_ability.as_deref().expect("assimilate step");
+    assert!(
+        matches!(
+            assimilate.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                destination: Zone::Battlefield,
+                enters_under: Some(ControllerRef::You),
+                ..
+            }
+        ),
+        "\"assimilate that card\" moves the found card, got {:?}",
+        assimilate.effect
+    );
+    assert_last_sub_is_exile_until_rest_bottom(execute);
+}
+
+/// CR 401.4: the abbreviated "on the bottom [in a random order]" placement is
+/// the same "the rest" cleanup as the "of <owner's> library" form, for any
+/// instruction that acts on the found card (here a plain battlefield put).
+#[test]
+fn abbreviated_rest_bottom_placement_after_exile_until_is_the_rest_cleanup() {
+    for text in [
+        "Whenever ~ attacks, exile cards from the top of your library until you exile a \
+         creature card. Put that card onto the battlefield. Put the rest on the bottom in a \
+         random order.",
+        "Whenever ~ attacks, exile cards from the top of your library until you exile a \
+         creature card. Put that card onto the battlefield. Put the rest on the bottom of your \
+         library in a random order.",
+    ] {
+        let parsed = parse_oracle_text(text, "Probe", &[], &["Creature".to_string()], &[]);
+        let execute = parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("the attack trigger carries an execute body");
+        assert!(
+            !ability_chain_has_unimplemented(execute),
+            "{text}: no residual Unimplemented node: {execute:#?}"
+        );
+        assert_last_sub_is_exile_until_rest_bottom(execute);
+    }
+}
+
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \
 exile cards from the top of your library until you exile an instant or sorcery card with lesser mana \
 value. Until end of turn, you may cast that card without paying its mana cost. Put each other card \

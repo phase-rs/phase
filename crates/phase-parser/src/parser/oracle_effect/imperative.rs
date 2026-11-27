@@ -10641,6 +10641,23 @@ fn parse_battlefield_combined_creature_qualifier(input: &str) -> OracleResult<'_
     Ok((rest, ()))
 }
 
+/// CR 401.4: the abbreviated bottom placement that ends a put clause — "on the
+/// bottom", optionally followed by the order the placed cards take ("in a
+/// random order" / "in any order"). Anchored at end of input so a longer
+/// destination ("on the bottom of …") never matches here.
+fn abbreviated_bottom_placement_tail(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("on the bottom"),
+            opt(alt((tag(" in a random order"), tag(" in any order")))),
+            opt(tag(".")),
+            eof,
+        ),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_put_ast(
     text: &str,
     lower: &str,
@@ -10891,8 +10908,11 @@ pub(super) fn parse_put_ast(
     }
 
     // "put that card on the bottom" / "put it on the bottom" —
-    // abbreviated form without "of Y's library".
-    if lower.ends_with("on the bottom") {
+    // abbreviated form without "of Y's library". CR 401.4: an ordering
+    // instruction may follow ("They put the rest on the bottom in a random
+    // order" — The Borg Queen); it orders the placed cards and names no other
+    // destination.
+    if nom_primitives::scan_at_word_boundaries(lower, abbreviated_bottom_placement_tail).is_some() {
         return Some(PutImperativeAst::BottomOfLibrary);
     }
 
@@ -15290,15 +15310,23 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
 /// `parse_zone_suffix` to `Owned{Opponent}` + `InZone{Graveyard}` exactly as it
 /// does for Ashen Powder and Puppeteer Clique.
 ///
+/// The operand is either a graveyard target phrase or, CR 608.2c, an anaphor
+/// ("that card", "it") naming the card an earlier instruction of the same
+/// ability found (The Borg Queen: "… until they exile a creature card.
+/// Assimilate that card."). The anaphor lowers to `ParentTarget`; the
+/// lowering's `origin: None` then moves the found card from whatever zone the
+/// earlier instruction left it in.
+///
 /// Fails closed (returns `None`, so the caller falls through to the imperative
 /// `Effect::Unimplemented` fallback and coverage stays red) when either:
 ///   * the target phrase leaves an unconsumed remainder, or
-///   * CR 115.2: the phrase does not name a graveyard zone. This second guard
-///     exists for COVERAGE HONESTY, not to license an `origin` value: the
-///     lowering emits `ChangeZone { origin: None }` (the zone constraint travels
-///     on the target filter), and a non-graveyard `assimilate` phrasing is a
+///   * CR 115.2: the phrase is neither that anaphor nor a graveyard target.
+///     This guard exists for COVERAGE HONESTY, not to license an `origin`
+///     value: the lowering emits `ChangeZone { origin: None }` (the zone
+///     constraint travels on the target filter), and a battlefield `assimilate`
+///     phrasing (The Best of Both Worlds' "gain control of it" definition) is a
 ///     shape this production does not model, so it must keep reporting as
-///     unsupported rather than be silently lowered into a reanimation.
+///     unsupported rather than be silently lowered into a zone move.
 fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("assimilate ")
         .parse(lower.trim())
@@ -15307,7 +15335,9 @@ fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<Target
     if !remainder.trim().is_empty() {
         return None;
     }
-    (target.extract_in_zone() == Some(Zone::Graveyard)).then_some(target)
+    (matches!(target, TargetFilter::ParentTarget)
+        || target.extract_in_zone() == Some(Zone::Graveyard))
+    .then_some(target)
 }
 
 /// CR 701.71a: recognize the `empower Jace N` keyword action.

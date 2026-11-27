@@ -926,12 +926,17 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
 }
 
 /// CR 608.2c + CR 701.13a: Head-aware companion to
-/// [`is_linked_exile_cast_bottom_cleanup`] for the Jodah, the Unifier class —
-/// `ExileFromTopUntil { NextMatches }` → optional `CastFromZone { ParentTarget }`
-/// → `PutAtLibraryPosition { Bottom, TrackedSet }`.
+/// [`is_linked_exile_cast_bottom_cleanup`] for the exile-until "the rest" class —
+/// `ExileFromTopUntil { NextMatches }` → a step acting on the hit through
+/// `ParentTarget` → `PutAtLibraryPosition { Bottom, TrackedSet }`. The hit step
+/// is any instruction about "that card": Jodah, the Unifier's optional
+/// `CastFromZone`, or The Borg Queen's assimilate move onto the battlefield.
+/// CR 608.2c: "the rest" is the exiled pile minus the hit whatever the earlier
+/// instruction did with the hit, so what that instruction is does not matter —
+/// only that it names the hit.
 ///
 /// The plain linked-exile gate cannot fire here: neither the `ParentTarget`
-/// cast nor the parser-default `TrackedSet` cleanup references
+/// step nor the parser-default `TrackedSet` cleanup references
 /// `ExiledBySource`, so `is_linked_exile_cast_bottom_cleanup` returns false and
 /// the "put the rest on the bottom" step is left addressing the wrong pool (a
 /// tracked set nothing publishes) — the whole exiled pile is then stranded.
@@ -942,9 +947,9 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
 /// class ("look at the top N, put the rest on the bottom") legitimately keeps
 /// the parser-default library-only `TrackedSet` — its rest-cards never left the
 /// library — and is excluded because its head is not `ExileFromTopUntil`.
-pub(super) fn is_exile_until_cast_bottom_cleanup(
+pub(super) fn is_exile_until_hit_bottom_cleanup(
     head_effect: &Effect,
-    cast_effect: &Effect,
+    hit_step_effect: &Effect,
     cleanup_effect: &Effect,
 ) -> bool {
     if !matches!(
@@ -956,12 +961,10 @@ pub(super) fn is_exile_until_cast_bottom_cleanup(
     ) {
         return false;
     }
-    let Effect::CastFromZone { target, .. } = cast_effect else {
-        return false;
-    };
-    // The cast anaphors the hit via `ParentTarget`; a cast that already reads
-    // `ExiledBySource` is the plain Chaos Wand / Etali shape handled elsewhere.
-    if !matches!(target, TargetFilter::ParentTarget) {
+    // The hit step anaphors the hit via `ParentTarget`; a cast that already
+    // reads `ExiledBySource` is the plain Chaos Wand / Etali shape handled
+    // elsewhere.
+    if hit_step_effect.target_filter() != Some(&TargetFilter::ParentTarget) {
         return false;
     }
     matches!(
@@ -982,7 +985,7 @@ pub(super) fn is_exile_until_cast_bottom_cleanup(
 /// swept to the bottom. `DistinctFrom { ParentTarget }` fails open when the
 /// cleanup carries no object targets (the no-hit / library-exhausted case),
 /// which is exactly right — with no hit, all exiled cards go to the bottom.
-pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
+pub(super) fn normalize_exile_until_hit_bottom_cleanup(effect: &mut Effect) {
     if let Effect::PutAtLibraryPosition {
         ref mut target,
         ref mut count,

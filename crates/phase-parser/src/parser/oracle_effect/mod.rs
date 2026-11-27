@@ -24128,11 +24128,14 @@ fn refine_put_at_library_position(
                 .parse(lower.as_str())
                 .ok()?;
             // Isolate the noun phrase before the first positional terminator;
-            // the remainder is the placement tail.
+            // the remainder is the placement tail. The bare " on the bottom"
+            // (no "of <library>") is the abbreviated placement, tried last so
+            // the full " on the bottom of" form keeps its own tail.
             let (placement_tail, before) = alt((
                 take_until::<_, _, OracleError<'_>>(" on top of"),
                 take_until(" on the bottom of"),
                 take_until(" into "),
+                take_until(" on the bottom"),
             ))
             .parse(after_put)
             .ok()?;

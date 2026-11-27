@@ -1006,6 +1006,39 @@ impl GameScenario {
         self.add_spell_to_zone(player, name, is_instant, Zone::Library)
     }
 
+    /// Add a creature card to the top of a player's library. Mirrors
+    /// [`Self::add_creature_to_graveyard`]; used to stage the creature an
+    /// "exile/reveal cards until a creature card" loop stops on.
+    pub fn add_creature_to_library_top(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+        self.place_on_library_top(player, id);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a land to the top of a player's library. Mirrors
     /// `add_spell_to_library_top`/`add_land_to_hand`; used to stage a
     /// non-spell library top (a land has no spell face, so exile-then-cast

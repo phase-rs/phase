@@ -172,6 +172,7 @@ mod boneyard_parley_pile_separation;
 mod boon_reflection_gain_life_drain;
 mod booster_tutor_open_pack;
 mod borg_queen_assimilate;
+mod borg_queen_exile_until_assimilate;
 mod bounce_destination_redirect;
 mod bound_by_moonsilver_sacrifice_source_relative_6017;
 mod bow_to_my_command_as_choice;
