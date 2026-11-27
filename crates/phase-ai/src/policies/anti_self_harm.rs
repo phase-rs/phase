@@ -1551,6 +1551,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                 }
                 WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                WardCost::Blight(count) => f64::from(*count),
                 WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                 WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                 // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
@@ -1594,6 +1595,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                         }
                         WardCost::Discard { count, .. } => *count as f64 * 1.5,
+                        WardCost::Blight(count) => f64::from(*count),
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::GetPlayerCounters {

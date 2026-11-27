@@ -1297,7 +1297,7 @@ pub mod nodes {
 macro_rules! define_granter_walk {
     ([$($mut_:tt)?]; $Node:ident; $nodes:ident) => {
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ActivationRestriction, CardTypeSetSource,
+    AbilityCondition, AbilityCost, ActivationRestriction, BlightCount, CardTypeSetSource,
     ContinuousModification, Duration, Effect, FilterProp, ObjectScope, ParsedCondition,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition,
     TargetFilter, TriggerCondition,
@@ -1467,6 +1467,9 @@ fn ability_cost(cost: &$($mut_)? AbilityCost, v: &mut impl FnMut(Symbol<'_>)) {
         | AbilityCost::RemoveCounter { target: Some(f), .. }
         | AbilityCost::ReturnToHand { filter: Some(f), .. }
         | AbilityCost::Reveal { filter: Some(f), .. } => filter(f, v),
+        AbilityCost::Blight {
+            count: BlightCount::AnnouncedX { maximum },
+        } => quantity(maximum, v),
         AbilityCost::EffectCost { effect: e } => effect(e, v),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
             for c in costs {

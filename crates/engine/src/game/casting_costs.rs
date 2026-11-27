@@ -32,7 +32,6 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
 use crate::types::mana::{ManaCost, ManaCostShard, ManaSupertype, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::CounterCause;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
@@ -41,7 +40,6 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::announcement_triggers::stage_with_pending_owner;
 use super::casting::emit_targeting_events;
-use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
@@ -4999,7 +4997,10 @@ pub(crate) fn resume_interrupted_cost_payment(
             player: state.active_player,
         });
     };
-    let pending = *pending;
+    let mut pending = *pending;
+    if pending.blight_in_flight.take().is_some() {
+        pending.mark_activation_cost_committed();
+    }
     // CR 113.8: the activated ability belongs to the player who activated it,
     // even after the source changed controller or left the battlefield.
     let player = pending.ability.controller;
@@ -7315,26 +7316,15 @@ pub(crate) fn handle_blight_choice(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 701.68a: to blight is to put N -1/-1 counters on a creature (one) you control.
-    if chosen.len() != 1 {
-        return Err(EngineError::InvalidAction(format!(
-            "Must blight exactly one creature, got {}",
-            chosen.len()
-        )));
-    }
-    for id in chosen {
-        if !legal_creatures.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected creature not eligible for blight".to_string(),
-            ));
-        }
-    }
+    // CR 701.68a: all the counters go on the one chosen creature you control.
+    let recipient = super::effects::blight::validate_blight_selection(
+        state,
+        player,
+        counters,
+        legal_creatures,
+        chosen,
+    )?;
 
-    // CR 701.68a + CR 614.1: place N -1/-1 counters on the one chosen
-    // creature, routed through the CR 122.6 replacement pipeline. Guarded
-    // on N > 0 for exact parity with the #497 effect-form handler
-    // (engine_resolution_choices.rs `EffectKind::BlightEffect`); the parser
-    // does not structurally exclude a degenerate `Blight 0`.
     // CR 117.1 + CR 608.2k: snapshot the blighted creature as this ability's
     // cost-paid object so later `CostPaidObject` target filters / quantity
     // refs ("the creature you blighted") resolve to it. This writes the
@@ -7343,7 +7333,7 @@ pub(crate) fn handle_blight_choice(
     // field from the #497 EFFECT-form handler, which writes
     // `effect_context_object` (CR 608.2c). `TargetFilter::CostPaidObject`
     // (filter.rs) reads only `cost_paid_object`; cost != effect.
-    if let Some(obj) = state.objects.get(&chosen[0]) {
+    if let Some(obj) = state.objects.get(&recipient) {
         pending
             .ability
             .set_cost_paid_object_recursive(CostPaidObjectSnapshot::capture(
@@ -7352,21 +7342,22 @@ pub(crate) fn handle_blight_choice(
             ));
     }
 
-    if counters > 0
-        && !add_counter_with_replacement(
-            state,
-            player,
-            chosen[0],
-            crate::types::counter::CounterType::Minus1Minus1,
-            counters,
-            // CR 614.16: paying a casting cost is neither a resolving
-            // effect nor a replacement — fail closed.
-            CounterCause::Other,
-            events,
-        )
-    {
-        state.pending_cast = Some(Box::new(pending));
-        return Ok(state.waiting_for.clone());
+    // CR 701.68a + CR 614.1 + CR 122.6: propose one counter placement through
+    // the replacement pipeline. A zero count does not propose an event.
+    use super::effects::counters::CounterAdditionOutcome;
+    match super::effects::blight::place_blight_cost(state, player, recipient, counters, events) {
+        CounterAdditionOutcome::Settled => {}
+        CounterAdditionOutcome::Prevented => {
+            return super::engine_casting::cancel_pending_cast(state, player, &pending, events);
+        }
+        CounterAdditionOutcome::Paused => {
+            pending.blight_in_flight = state
+                .objects
+                .get(&recipient)
+                .map(ObjectIncarnationRef::from_object);
+            state.pending_cast = Some(Box::new(pending));
+            return Ok(state.waiting_for.clone());
+        }
     }
 
     pending.mark_activation_cost_committed();
@@ -9124,17 +9115,12 @@ fn surface_next_interactive_activation_cost_leg(
             matches!(cost, AbilityCost::Blight { .. })
         })
     {
-        let creatures: Vec<ObjectId> = state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|id| {
-                state.objects.get(id).is_some_and(|obj| {
-                    obj.controller == player
-                        && obj.card_types.core_types.contains(&CoreType::Creature)
-                })
-            })
-            .collect();
+        let crate::types::ability::BlightCount::Fixed(count) = *count else {
+            return Err(EngineError::ActionNotAllowed(
+                "An activation cannot announce a bounded Blight cost".to_string(),
+            ));
+        };
+        let creatures = super::effects::blight::eligible_blight_creatures(state, player, count);
         if creatures.is_empty() {
             return Err(EngineError::ActionNotAllowed(
                 "No creature to blight".to_string(),
@@ -9150,7 +9136,7 @@ fn surface_next_interactive_activation_cost_leg(
         );
         return Ok(Some(WaitingFor::BlightChoice {
             player,
-            counters: *count,
+            counters: count,
             creatures,
             pending_cast: Box::new(pending),
         }));
@@ -9841,6 +9827,9 @@ pub(super) fn push_activated_ability_to_stack(
 
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
     match cost {
+        AbilityCost::Blight { count } => AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(count.with_announced_x(chosen_x)),
+        },
         AbilityCost::RemoveCounter {
             count,
             counter_type,
@@ -12869,30 +12858,16 @@ fn pay_additional_cost_with_source(
             }
         }
         AbilityCost::Blight { count } => {
-            // Blight N — player chooses creature(s) to put -1/-1 counters on.
-            // Per reminder text: "(You may put a -1/-1 counter on a creature you control.)"
-            let creatures: Vec<ObjectId> = state
-                .battlefield
-                .iter()
-                .copied()
-                .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| {
-                        obj.controller == player
-                            && obj
-                                .card_types
-                                .core_types
-                                .contains(&crate::types::card_type::CoreType::Creature)
-                    })
-                })
-                .collect();
-            // CR 701.68b + CR 601.2b: Blight is only choosable while the player
-            // controls >=1 creature (N is irrelevant to eligibility). Defense-in-depth
-            // — the is_payable gate must have already caught an empty eligibility set;
-            // never construct a dead WaitingFor.
-            if creatures.is_empty() {
+            let crate::types::ability::BlightCount::Fixed(count) = count else {
                 return Err(EngineError::ActionNotAllowed(
-                    "No creature to blight".to_string(),
+                    "Blight requires an announced X".to_string(),
                 ));
+            };
+            // CR 701.68b + CR 601.2b: Blight requires an eligible creature,
+            // including a controlled creature at the zero announcement.
+            let creatures = super::effects::blight::eligible_blight_creatures(state, player, count);
+            if creatures.is_empty() {
+                return super::engine_casting::cancel_pending_cast(state, player, &pending, events);
             }
             return Ok(WaitingFor::BlightChoice {
                 player,
@@ -13847,6 +13822,9 @@ fn additional_cost_x_max(
     cost: &AbilityCost,
 ) -> Option<u32> {
     match cost {
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { maximum },
+        } => Some(bounded_blight_x_max(state, player, source_id, maximum)),
         AbilityCost::PayLife { amount } if amount.contains_x() => {
             Some(max_pay_life_x(state, player))
         }
@@ -13996,6 +13974,129 @@ fn additional_cost_x_max(
             additional_cost_x_max(state, player, source_id, granting_object, base)
         }
         _ => None,
+    }
+}
+
+fn bounded_blight_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    maximum: &QuantityExpr,
+) -> u32 {
+    // CR 701.68b: a placement prohibition distinguishes zero (no event)
+    // from a positive counter placement, regardless of its amount.
+    if super::effects::blight::blightable_creatures(state, player, 1)
+        .next()
+        .is_none()
+    {
+        return 0;
+    }
+    u32::try_from(super::quantity::resolve_quantity(
+        state, maximum, player, source,
+    ))
+    .unwrap_or(0)
+}
+
+pub(super) fn bounded_blight_cost_max(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    cost: &AbilityCost,
+) -> Option<u32> {
+    match cost {
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { maximum },
+        } => Some(bounded_blight_x_max(state, player, source, maximum)),
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .filter_map(|cost| bounded_blight_cost_max(state, player, source, cost))
+            .min(),
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
+    }
+}
+
+pub(super) fn bounded_blight_x_can_be_paid(
+    state: &GameState,
+    player: PlayerId,
+    cost: &AbilityCost,
+    x: u32,
+) -> bool {
+    match cost {
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { .. },
+        } => !super::effects::blight::eligible_blight_creatures(state, player, x).is_empty(),
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|cost| bounded_blight_x_can_be_paid(state, player, cost, x)),
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => true,
     }
 }
 
@@ -15365,14 +15466,12 @@ fn finalize_cast_pre_payment_checks(
         ));
     }
 
-    // CR 702.85a: Evaluate cascade/resulting-MV constraints before payment.
-    // For the constraint we synthesize the resulting MV from the printed cost
-    // + chosen_x rather than reading `obj.cost_x_paid`, since that field is
-    // stamped only after payment.
-    let cascade_resulting_mv = state
-        .objects
-        .get(&object_id)
-        .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
+    // CR 702.85a + CR 202.3e: Evaluate the resulting mana value before payment
+    // using announced X for any {X} symbols in the spell's mana cost.
+    let cascade_resulting_mv = state.objects.get(&object_id).map(|obj| {
+        obj.mana_cost
+            .mana_value_with_x(Zone::Stack, ability.chosen_x)
+    });
     let mut cascade_cast_transformed = false;
     let mut resolution_success_waiting_for: Option<WaitingFor> = None;
     if let Some(resulting_mv) = cascade_resulting_mv {
@@ -16695,10 +16794,8 @@ enum CascadeCheck {
 /// On acceptance, bottom-shuffles the exiled misses here so both accept paths
 /// (plain free cast + X-cost cast) share a single cleanup point.
 ///
-/// `resulting_mv` is the resulting spell's mana value — printed
-/// `mana_cost.mana_value()` plus the chosen X. Caller synthesizes this because
-/// X is known at announcement time but `obj.cost_x_paid` is not stamped until
-/// after mana payment.
+/// The caller supplies `resulting_mv` using the announced X for {X} symbols
+/// in the mana cost. The object records `cost_x_paid` only after payment.
 fn evaluate_cascade_constraint_with_resulting_mv(
     state: &mut GameState,
     object_id: ObjectId,
@@ -25012,6 +25109,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -31534,6 +31632,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -31686,6 +31785,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -31807,6 +31907,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -31918,6 +32019,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -32062,6 +32164,7 @@ mod tests {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -33911,7 +34014,7 @@ its replicate cost was paid.)\nDraw a card.";
         });
         builder.from_oracle_text("Scry 1.");
         builder.with_additional_cost(AdditionalCost::Required(AbilityCost::Blight {
-            count: blight_n,
+            count: crate::types::ability::BlightCount::Fixed(blight_n),
         }));
         let spell_id = builder.id();
         let card_id = scenario.state.objects[&spell_id].card_id;
@@ -34031,11 +34134,10 @@ its replicate cost was paid.)\nDraw a card.";
         let bear = scenario.add_creature(PlayerId(0), "Lone Bear", 2, 2).id();
 
         assert!(
-            AbilityCost::Blight { count: 3 }.is_payable_for_spell(
-                &scenario.state,
-                PlayerId(0),
-                bear
-            ),
+            AbilityCost::Blight {
+                count: crate::types::ability::BlightCount::Fixed(3)
+            }
+            .is_payable_for_spell(&scenario.state, PlayerId(0), bear),
             "CR 701.68b: Blight 3 is payable with a single controlled creature"
         );
     }
@@ -35522,7 +35624,12 @@ its replicate cost was paid.)\nDraw a card.";
             ),
             ("mill", AbilityCost::Mill { count: 1 }),
             ("exert", AbilityCost::Exert),
-            ("blight", AbilityCost::Blight { count: 1 }),
+            (
+                "blight",
+                AbilityCost::Blight {
+                    count: crate::types::ability::BlightCount::Fixed(1),
+                },
+            ),
             (
                 "reveal",
                 AbilityCost::Reveal {

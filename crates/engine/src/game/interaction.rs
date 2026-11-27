@@ -356,6 +356,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -615,6 +616,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -4609,7 +4611,8 @@ fn selection_projection(
         | WaitingFor::HarmonizeTapChoice {
             eligible_creatures, ..
         } => eligible_creatures.len(),
-        WaitingFor::BlightChoice { creatures, .. } => creatures.len(),
+        WaitingFor::BlightChoice { creatures, .. }
+        | WaitingFor::UnlessBlightChoice { creatures, .. } => creatures.len(),
         WaitingFor::ChooseRingBearer { candidates, .. } => candidates.len(),
         WaitingFor::ChooseUntapSubset { group, .. } => group.len(),
         WaitingFor::ScryChoice { cards, .. }
@@ -5312,6 +5315,7 @@ fn selection_projection(
         | WaitingFor::PrecastCopyShortcutOffer { .. }
         | WaitingFor::RespondToPrecastCopyShortcut { .. }
         | WaitingFor::UnlessPayment { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::UnlessPaymentChooseCost { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }

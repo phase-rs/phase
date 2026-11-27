@@ -408,6 +408,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
                 costs: legs.iter().map(ward_cost_to_ability_cost).collect(),
             },
         },
+        WardCost::Blight(count) => AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(*count),
+        },
         WardCost::GetPlayerCounters {
             counter_kind,
             count,

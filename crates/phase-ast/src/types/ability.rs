@@ -20282,6 +20282,60 @@ pub enum CostRecipientSelection {
     Each,
 }
 
+/// CR 107.3a and CR 701.68a: the number of counters for a Blight cost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "BlightCountWire", into = "BlightCountWire")]
+pub enum BlightCount {
+    Fixed(u32),
+    AnnouncedX { maximum: Box<QuantityExpr> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum BlightCountWire {
+    Fixed(u32),
+    AnnouncedX {
+        #[serde(rename = "type")]
+        kind: BlightCountTag,
+        maximum: Box<QuantityExpr>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum BlightCountTag {
+    AnnouncedX,
+}
+
+impl From<BlightCountWire> for BlightCount {
+    fn from(wire: BlightCountWire) -> Self {
+        match wire {
+            BlightCountWire::Fixed(count) => Self::Fixed(count),
+            BlightCountWire::AnnouncedX { maximum, .. } => Self::AnnouncedX { maximum },
+        }
+    }
+}
+
+impl From<BlightCount> for BlightCountWire {
+    fn from(count: BlightCount) -> Self {
+        match count {
+            BlightCount::Fixed(count) => Self::Fixed(count),
+            BlightCount::AnnouncedX { maximum } => Self::AnnouncedX {
+                kind: BlightCountTag::AnnouncedX,
+                maximum,
+            },
+        }
+    }
+}
+
+impl BlightCount {
+    pub fn with_announced_x(&self, x: u32) -> u32 {
+        match self {
+            Self::Fixed(count) => *count,
+            Self::AnnouncedX { .. } => x,
+        }
+    }
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20446,7 +20500,7 @@ pub enum AbilityCost {
     /// Blight N — put N -1/-1 counters on a creature you control.
     /// Used as both activated ability costs and optional additional casting costs.
     Blight {
-        count: u32,
+        count: BlightCount,
     },
     Reveal {
         /// CR 701.20a + CR 107.3a: how many cards are revealed. A `Variable("X")`
@@ -20794,6 +20848,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::PayEnergy { amount }
             | AbilityCost::PaySpeed { amount } => f(amount),
             AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => f(count),
+            AbilityCost::Blight {
+                count: BlightCount::AnnouncedX { maximum },
+            } => f(maximum),
             // --- Recursive forms: every nested cost's quantities are part of
             // --- paying THIS cost, so recurse.
             AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -20825,7 +20882,9 @@ macro_rules! define_ability_cost_quantity_walk {
             | AbilityCost::UnattachFrom { .. }
             | AbilityCost::Mill { .. }
             | AbilityCost::Exert
-            | AbilityCost::Blight { .. }
+            | AbilityCost::Blight {
+                count: BlightCount::Fixed(_),
+            }
             | AbilityCost::Behold { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
@@ -50743,7 +50802,9 @@ mod tests {
 
     #[test]
     fn blight_cost_roundtrips() {
-        let cost = AbilityCost::Blight { count: 2 };
+        let cost = AbilityCost::Blight {
+            count: BlightCount::Fixed(2),
+        };
         let json = serde_json::to_value(&cost).unwrap();
         assert_eq!(json["type"], "Blight");
         assert_eq!(json["count"], 2);
@@ -52848,7 +52909,9 @@ mod tests {
                 ("exert", AbilityCost::Exert, vec![CostCategory::Exerts]),
                 (
                     "blight_puts_counters",
-                    AbilityCost::Blight { count: 1 },
+                    AbilityCost::Blight {
+                        count: BlightCount::Fixed(1),
+                    },
                     vec![CostCategory::PutsCounters],
                 ),
                 (
