@@ -366,6 +366,7 @@ import {
 import type { CreateDraftSettings } from "../../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
 import { setCrossTabTxnLockWaitForTests } from "../../services/crossTabTransaction";
+import { watchPointerStepReads } from "../../test/helpers/pointerStepReads";
 import { installFifoWebLocks, installRefusingWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 const POINTER_KEY = "phase-active-draft-guest";
@@ -1856,8 +1857,7 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
     "a native resume's comparison and write are one step against another context's publication: %s",
     async (leg) => {
       installFifoWebLocks();
-      const getItem = localStorage.getItem.bind(localStorage);
-      let spy: { mockRestore: () => void } | null = null;
+      let trigger: { restore: () => void } | null = null;
       try {
         const predecessorDisposals = await seatPredecessor(leg);
         const ownId = storedPointer()?.capabilityId as string;
@@ -1873,22 +1873,23 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
         const recordB = await storedRecord("cap-B");
         storage.log.length = 0;
 
-        // Another tab publishes at the resume's first read of the pointer
-        // after its private record commits: its comparison read.
+        // Another tab publishes at the resume's comparison read: the first read
+        // of the pointer its step's body makes, once its private record has
+        // committed and its write-ahead has landed.
         let publishedB: Promise<void> | null = null;
         let fired = 0;
-        spy = vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
-          const seen = getItem(key);
-          if (key === POINTER_KEY && fired === 0 && storage.log.includes("privateSave:committed")) {
+        trigger = watchPointerStepReads({
+          nth: 1,
+          after: () => storage.log.includes("privateSave:committed"),
+          onRead: () => {
             fired += 1;
             publishedB = tab.publishActiveNativeDraft(pointerB);
-          }
-          return seen;
+          },
         });
         const outcome = await store().resumeNativeDraft();
         await publishedB;
-        spy.mockRestore();
-        spy = null;
+        trigger.restore();
+        trigger = null;
 
         expect(outcome).toEqual({ status: "resumed" });
         expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
@@ -1900,7 +1901,7 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
         expect(store()).toMatchObject({ role: "guest", transport: "native" });
         expect(predecessorDisposals()).toBe(1);
       } finally {
-        spy?.mockRestore();
+        trigger?.restore();
         uninstallWebLocks();
       }
     },
@@ -1910,8 +1911,7 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
     "a native resume's comparison and write are one step against another context's guest seat publication: %s",
     async (leg) => {
       installFifoWebLocks();
-      const getItem = localStorage.getItem.bind(localStorage);
-      let spy: { mockRestore: () => void } | null = null;
+      let trigger: { restore: () => void } | null = null;
       try {
         const predecessorDisposals = await seatPredecessor(leg);
         const ownId = storedPointer()?.capabilityId as string;
@@ -1927,13 +1927,15 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
         });
         storage.log.length = 0;
 
-        // Another tab's guest seat publishes at the resume's first read of the
-        // pointer after its private record commits: its comparison read.
+        // Another tab's guest seat publishes at the resume's comparison read: the
+        // first read of the pointer its step's body makes, once its private
+        // record has committed and its write-ahead has landed.
         let publishedB: Promise<void> | null = null;
         let fired = 0;
-        spy = vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
-          const seen = getItem(key);
-          if (key === POINTER_KEY && fired === 0 && storage.log.includes("privateSave:committed")) {
+        trigger = watchPointerStepReads({
+          nth: 1,
+          after: () => storage.log.includes("privateSave:committed"),
+          onRead: () => {
             fired += 1;
             publishedB = tab.saveActiveDraftGuest({
               roomCode: "FGHJK",
@@ -1941,13 +1943,12 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
               hostPeerId: hostB,
               capabilityId: "cap-G",
             });
-          }
-          return seen;
+          },
         });
         const outcome = await store().resumeNativeDraft();
         await publishedB;
-        spy.mockRestore();
-        spy = null;
+        trigger.restore();
+        trigger = null;
 
         expect(outcome).toEqual({ status: "resumed" });
         expect(storedPointer()).toMatchObject({ roomCode: "FGHJK", hostPeerId: hostB, capabilityId: "cap-G" });
@@ -1963,7 +1964,7 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
         expect(store()).toMatchObject({ role: "guest", transport: "native" });
         expect(predecessorDisposals()).toBe(1);
       } finally {
-        spy?.mockRestore();
+        trigger?.restore();
         uninstallWebLocks();
       }
     },

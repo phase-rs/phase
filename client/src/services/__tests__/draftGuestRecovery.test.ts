@@ -1,16 +1,17 @@
 import "fake-indexeddb/auto";
-import { clear, get, set } from "idb-keyval";
+import { clear, del, get, set, setMany } from "idb-keyval";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseWebSocketUrl } from "../../config/multiplayerServer";
 import { isUserOwnedStorageKey } from "../../constants/storage";
+import { watchPointerStepReads } from "../../test/helpers/pointerStepReads";
 import {
   installFifoWebLocks,
   installRefusingWebLocks,
   readIdbGenerationForTests,
   uninstallWebLocks,
 } from "../../test/helpers/webLocks";
-import { VIEW_TIMEOUT_MS } from "../crossTabTransaction";
+import { GENERATION_IO_TIMEOUT_MS, VIEW_TIMEOUT_MS } from "../crossTabTransaction";
 import { withSavedDeckLibrary } from "../savedDeckTransaction";
 import {
   ActiveDraftPointerUnavailableError,
@@ -880,6 +881,7 @@ describe("guest recovery records", () => {
     describe("the cross-tab recovery-pointer transaction", () => {
       const LOCK = "phase-active-draft-pointer";
       const GENERATION_KEY = "phase-active-draft-pointer-generation";
+      const RECORD_KEY = "phase-active-draft-pointer-record";
       const capB: Omit<NativeDraftCapabilityRecord, "timestamp"> = {
         ...capC,
         capabilityId: "cap-B",
@@ -948,6 +950,62 @@ describe("guest recovery records", () => {
         return () => state;
       }
 
+      /** Counts pointer steps' entries into their view wait: registrations of a `storage` listener, from now. */
+      function enteredViewWait(): () => number {
+        const addEventListener = window.addEventListener.bind(window);
+        let waits = 0;
+        vi.spyOn(window, "addEventListener").mockImplementation((...args: Parameters<typeof window.addEventListener>) => {
+          if (args[0] === "storage") waits += 1;
+          addEventListener(...args);
+        });
+        return () => waits;
+      }
+
+      /**
+       * Lets real tasks run, IndexedDB's among them, until `reached()` holds or a bound passes,
+       * without moving faked time: a fake-timer advance made before a step's IndexedDB read has
+       * settled would fire that read's own bound first.
+       */
+      async function untilReached(reached: () => boolean): Promise<void> {
+        for (let round = 0; round < 1_000 && !reached(); round += 1) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+
+      /**
+       * Runs `commit`, another context's step, and then holds `keys` at the values this tab's view
+       * showed before it, as a view that context's writes have not reached. `deliver()` lets them
+       * arrive: each key takes the other context's value unless this tab has written it since.
+       */
+      async function withholdFromView(keys: readonly string[], commit: () => Promise<void>): Promise<() => void> {
+        const before = keys.map((key) => [key, localStorage.getItem(key)] as const);
+        await commit();
+        const withheld = keys.map((key) => [key, localStorage.getItem(key)] as const);
+        const write = (key: string, value: string | null) => {
+          if (value === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, value);
+        };
+        for (const [key, value] of before) write(key, value);
+        const written = new Set<string>();
+        const setItem = localStorage.setItem.bind(localStorage);
+        const removeItem = localStorage.removeItem.bind(localStorage);
+        const setSpy = vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+          written.add(key);
+          setItem(key, value);
+        });
+        const removeSpy = vi.spyOn(localStorage, "removeItem").mockImplementation((key: string) => {
+          written.add(key);
+          removeItem(key);
+        });
+        return () => {
+          setSpy.mockRestore();
+          removeSpy.mockRestore();
+          for (const [key, value] of withheld) {
+            if (!written.has(key)) write(key, value);
+          }
+        };
+      }
+
       /** cap-C's record and published pointer, and the pointer's capture. */
       async function storeNativeA(): Promise<{ pointer: ActiveNativeDraftPointer; capture: NativeDraftPointerCapture }> {
         const pointer = await saveNativeDraftCapability(capC);
@@ -969,7 +1027,7 @@ describe("guest recovery records", () => {
 
       /**
        * One clear and the read it compares on: the last read of the pointer
-       * key before its removal, counted from the end of its staging.
+       * key before its removal, counted among the reads its step's body makes.
        */
       type ClearLeg = { comparisonRead: number; stage: () => Promise<() => Promise<unknown>> };
       const clearLegs: Record<string, ClearLeg> = {
@@ -1033,7 +1091,7 @@ describe("guest recovery records", () => {
             if (leg in clearLegs) {
               const { comparisonRead, stage } = clearLegs[leg]!;
               const clear = await stage();
-              const trigger = atPointerRead(comparisonRead, publishB);
+              const trigger = watchPointerStepReads({ nth: comparisonRead, onRead: publishB });
               const removals = recordPointerRemovals(events);
               await clear();
               await publishedB;
@@ -1113,7 +1171,7 @@ describe("guest recovery records", () => {
 
             const { comparisonRead, stage } = guestContentionClearLegs[leg]!;
             const clear = await stage();
-            const trigger = atPointerRead(comparisonRead, publishB);
+            const trigger = watchPointerStepReads({ nth: comparisonRead, onRead: publishB });
             const removals = recordPointerRemovals(events);
             await clear();
             await publishedB;
@@ -1268,18 +1326,13 @@ describe("guest recovery records", () => {
 
             // The other tab's pointer and generation arrive.
             localStorage.setItem(POINTER_KEY, textB);
-            const getItem = localStorage.getItem.bind(localStorage);
-            let pointerReads = 0;
-            vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
-              if (key === POINTER_KEY) pointerReads += 1;
-              return getItem(key);
-            });
+            const body = watchPointerStepReads();
             localStorage.setItem(GENERATION_KEY, String(committed));
             window.dispatchEvent(new StorageEvent("storage", { key: GENERATION_KEY }));
             const outcome = await running;
-            // Reach: the step read the pointer once its view showed B's.
-            expect(pointerReads).toBeGreaterThan(0);
-            vi.mocked(localStorage.getItem).mockRestore();
+            // Reach: the step's body read the pointer once its view showed B's.
+            expect(body.reads()).toBeGreaterThan(0);
+            body.restore();
 
             await afterLag(outcome);
             if (leg !== "a capability's publishGuest") {
@@ -1293,39 +1346,394 @@ describe("guest recovery records", () => {
         },
       );
 
-      it("a pointer step that cannot confirm its view leaves the pointer and the next one proceeds", async () => {
+      it.each(Object.keys(lagLegs).filter((leg) => leg !== "a capability's publishGuest"))(
+        "a step and a later one keep another context's publication this tab's view has not shown: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const { stage, afterLag } = lagLegs[leg]!;
+            const step = await stage();
+            const staged = localStorage.getItem(POINTER_KEY);
+            const marker = localStorage.getItem(GENERATION_KEY);
+            const tab = await otherTab();
+            const pointerB = await tab.saveNativeDraftCapability(capB);
+            const recordB = await storedNative("cap-B");
+            const deliver = await withholdFromView([POINTER_KEY, GENERATION_KEY], async () => {
+              await tab.publishActiveNativeDraft(pointerB);
+              // Reach: the other context committed its step past this tab's generation.
+              expect(await get(GENERATION_KEY, getDraftStore())).toBeGreaterThan(Number(marker ?? 0));
+              expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+            });
+            // Reach: this tab's view shows neither that step's pointer nor its generation.
+            expect(localStorage.getItem(POINTER_KEY)).toBe(staged);
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(marker);
+
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+            const waits = enteredViewWait();
+            const first = Promise.resolve(step());
+            first.catch(() => {}); // its outcome is asserted last
+            const state = track(first);
+            await untilReached(() => waits() > 0);
+            expect(waits()).toBe(1);
+            await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS - 1);
+            // Reach: the step is still waiting on its view, under the lock.
+            expect(state()).toBe("pending");
+            expect((await navigator.locks.query()).held).toEqual([{ name: LOCK, mode: "exclusive" }]);
+            await vi.advanceTimersByTimeAsync(1);
+            await Promise.allSettled([first]);
+
+            const body = watchPointerStepReads();
+            const later = Promise.resolve(step());
+            await Promise.allSettled([later]);
+            // Reach: the later step's body read the pointer, and the step did not wait on its view.
+            expect(body.reads()).toBeGreaterThan(0);
+            expect(waits()).toBe(1);
+            body.restore();
+            vi.useRealTimers();
+            deliver();
+
+            expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+            await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+            // The step that outlasted its wait acted on that pointer.
+            await afterLag(await first);
+          } finally {
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it.each(["it rejects", "it does not settle within its bound"] as const)(
+        "a step whose write-ahead fails takes no generation as seen, so a later step waits for another context's step of that generation: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          let failing: { mockRestore: () => void } | null = null;
+          let abandon = () => {};
+          try {
+            const { pointer, capture } = await storeNativeA();
+            const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+            // Reach: this tab's view is caught up, so its step reaches its write-ahead at once.
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation));
+            const tab = await otherTab();
+            const pointerB = await tab.saveNativeDraftCapability(capB);
+            const recordB = await storedNative("cap-B");
+            const republish = () =>
+              republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+
+            let attempts = 0;
+            const put = IDBObjectStore.prototype.put;
+            failing = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+              this: IDBObjectStore,
+              value: unknown,
+              key?: IDBValidKey,
+            ) {
+              if (key !== GENERATION_KEY) return put.call(this, value, key);
+              attempts += 1;
+              if (leg === "it rejects") throw new DOMException("full", "QuotaExceededError");
+              // Holds the write-ahead's transaction open past its bound, then aborts it unlanded.
+              const request = put.call(this, value, key);
+              let open = true;
+              const keepAlive = (objects: IDBObjectStore) => {
+                if (open) objects.get("keep-alive").onsuccess = () => keepAlive(objects);
+              };
+              keepAlive(this);
+              abandon = () => {
+                if (!open) return;
+                open = false;
+                request.transaction?.abort();
+              };
+              return request;
+            });
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+            const failed = Promise.resolve(republish());
+            failed.catch(() => {}); // the assertions below attach after the advance
+            const failedState = track(failed);
+            await untilReached(() => attempts > 0 || failedState() !== "pending");
+            if (leg === "it does not settle within its bound") {
+              expect(failedState()).toBe("pending");
+              await vi.advanceTimersByTimeAsync(GENERATION_IO_TIMEOUT_MS);
+            }
+            await expect(failed).rejects.toMatchObject({ reason: "generation-unpublished" });
+            abandon();
+            failing.mockRestore();
+            failing = null;
+            // Reach: the write-ahead was attempted once and never landed.
+            expect(attempts).toBe(1);
+            await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(generation);
+            const markerAfterFailure = localStorage.getItem(GENERATION_KEY);
+
+            // Another context, whose view has not received this tab's marker, commits its step.
+            const deliver = await withholdFromView([POINTER_KEY, GENERATION_KEY], async () => {
+              localStorage.setItem(GENERATION_KEY, String(generation));
+              await tab.publishActiveNativeDraft(pointerB);
+              // Reach: it committed the generation after the one this tab's failed step started from.
+              await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(generation + 1);
+              expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+            });
+            // Reach: this tab's view shows neither that step's pointer nor its generation.
+            expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(markerAfterFailure);
+
+            const waits = enteredViewWait();
+            const later = Promise.resolve(republish());
+            later.catch(() => {}); // its outcome is asserted last
+            const laterState = track(later);
+            await untilReached(() => waits() > 0 || laterState() !== "pending");
+            await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+            await Promise.allSettled([later]);
+            vi.useRealTimers();
+            deliver();
+
+            expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+            await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+            // The failed step left this tab's marker where it was, and the later step waited on its view.
+            expect(markerAfterFailure).toBe(String(generation));
+            expect(waits()).toBe(1);
+            // It restored the other context's pointer and acted on it.
+            await expect(later).resolves.toMatchObject({ status: "superseded" });
+          } finally {
+            abandon();
+            failing?.mockRestore();
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it("a committed generation with no record skips the step and takes no generation as seen", async () => {
         installFifoWebLocks();
         try {
           const { pointer, capture } = await storeNativeA();
           await set(GENERATION_KEY, 3, getDraftStore());
+          await del(RECORD_KEY, getDraftStore());
           localStorage.setItem(GENERATION_KEY, "2");
-          // Reach: the committed generation is ahead of this tab's view.
+          // Reach: the committed generation is ahead of this tab's view, and nothing recorded it.
           await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(3);
+          await expect(get(RECORD_KEY, getDraftStore())).resolves.toBeUndefined();
           vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+          const waits = enteredViewWait();
+
           const first = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          await untilReached(() => waits() > 0);
+          expect(waits()).toBe(1);
           await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
           await expect(first).resolves.toBe(false);
+          expect(localStorage.getItem(GENERATION_KEY)).toBe("2");
           expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
-          expect(localStorage.getItem(GENERATION_KEY)).toBe("3");
 
-          await set(GENERATION_KEY, 4, getDraftStore());
-          await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(4);
-          const second = Promise.resolve().then(() => republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 })));
-          second.catch(() => {}); // the assertion below attaches after the advance
+          const second = Promise.resolve(
+            republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 })),
+          );
+          second.catch(() => {}); // the assertions below attach after the advance
+          const secondState = track(second);
+          await untilReached(() => waits() > 1 || secondState() !== "pending");
+          expect(waits()).toBe(2);
           await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
           await expect(second).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
           await expect(second).rejects.toMatchObject({ reason: "view-stale" });
+          expect(localStorage.getItem(GENERATION_KEY)).toBe("2");
           expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
-          expect(localStorage.getItem(GENERATION_KEY)).toBe("4");
 
-          vi.useRealTimers();
-          await expect(Promise.resolve(clearActiveNativeDraftIfCurrent(capture))).resolves.toBe(true);
+          // Positive pair: once the committed generation has a record, a step proceeds on it.
+          await set(RECORD_KEY, { generation: 3, value: capture.raw }, getDraftStore());
+          const third = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          await untilReached(() => waits() > 2);
+          expect(waits()).toBe(3);
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          await expect(third).resolves.toBe(true);
           expect(localStorage.getItem(POINTER_KEY)).toBeNull();
         } finally {
           vi.useRealTimers();
           uninstallWebLocks();
         }
       });
+
+      it.each(["the last step left a pointer", "the last step left none"] as const)(
+        "after a localStorage wipe that leaves IndexedDB, a publication restores the recorded pointer and writes over it: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const { capture } = await storeNativeA();
+            if (leg === "the last step left none") {
+              await expect(Promise.resolve(clearActiveNativeDraftIfCurrent(capture))).resolves.toBe(true);
+              // A record a wrongly restored pointer would lead the publication to remove.
+              await saveNativeDraftCapability(capC);
+            }
+            const recorded = await get(RECORD_KEY, getDraftStore());
+            localStorage.clear();
+            // Reach: the wipe left the committed generation ahead of this tab's view.
+            await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBeGreaterThan(0);
+            expect(localStorage.getItem(GENERATION_KEY)).toBeNull();
+
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+            const waits = enteredViewWait();
+            const pointerD = nativePointer({ capabilityId: "cap-D" });
+            const published = Promise.resolve(publishActiveNativeDraft(pointerD));
+            published.catch(() => {}); // the assertion below attaches after the advance
+            await untilReached(() => waits() > 0);
+            expect(waits()).toBe(1);
+            await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+            await expect(published).resolves.toBeUndefined();
+            vi.useRealTimers();
+            // Reach: before the step, the last step had recorded the pointer it left.
+            expect(recorded).toMatchObject({ value: leg === "the last step left a pointer" ? capture.raw : null });
+
+            expect(storedPointer()).toEqual(pointerD);
+            if (leg === "the last step left a pointer") {
+              // It wrote over the restored pointer, so it removed the record that pointer named.
+              await expect(storedNative("cap-C")).resolves.toBeUndefined();
+            } else {
+              // Nothing was restored, so it replaced no pointer and removed no record.
+              await expect(storedNative("cap-C")).resolves.toMatchObject({ capabilityId: "cap-C" });
+            }
+            await expect(get(RECORD_KEY, getDraftStore())).resolves.toEqual({
+              generation: await get(GENERATION_KEY, getDraftStore()),
+              value: localStorage.getItem(POINTER_KEY),
+            });
+          } finally {
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it.each(["its write landed", "its write did not land"] as const)(
+        "a step after another context's unrecorded step restores the pointer recorded before it: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const { capture } = await storeNativeA();
+            const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+            // Another context wrote the next generation ahead and never recorded its result.
+            await setMany(
+              [
+                [GENERATION_KEY, generation + 1],
+                [RECORD_KEY, { generation, value: capture.raw }],
+              ],
+              getDraftStore(),
+            );
+            if (leg === "its write landed") {
+              const textB = JSON.stringify(nativePointer({ capabilityId: "cap-B", draftCode: "NAT002", seatIndex: 1 }));
+              localStorage.setItem(POINTER_KEY, textB);
+              // Reach: this tab's view shows that step's unrecorded pointer.
+              expect(storedPointer()).toMatchObject({ capabilityId: "cap-B" });
+            }
+            expect(localStorage.getItem(GENERATION_KEY)).toBe(String(generation));
+
+            vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+            const waits = enteredViewWait();
+            const cleared = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+            await untilReached(() => waits() > 0);
+            expect(waits()).toBe(1);
+            await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+            // The clear acted on the pointer recorded before that step, which is this one's.
+            await expect(cleared).resolves.toBe(true);
+            expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+          } finally {
+            vi.useRealTimers();
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it("a step that cannot restore the recorded pointer is skipped, takes no generation as seen, and the next one waits again", async () => {
+        installFifoWebLocks();
+        let refusing: { mockRestore: () => void } | null = null;
+        try {
+          const { capture } = await storeNativeA();
+          const generation = (await get(GENERATION_KEY, getDraftStore())) as number;
+          await setMany(
+            [
+              [GENERATION_KEY, generation + 1],
+              [RECORD_KEY, { generation: generation + 1, value: null }],
+            ],
+            getDraftStore(),
+          );
+          const marker = localStorage.getItem(GENERATION_KEY);
+          const removeItem = localStorage.removeItem.bind(localStorage);
+          refusing = vi.spyOn(localStorage, "removeItem").mockImplementation((key: string) => {
+            if (key === POINTER_KEY) throw new DOMException("full", "QuotaExceededError");
+            removeItem(key);
+          });
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+          const waits = enteredViewWait();
+
+          const first = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          await untilReached(() => waits() > 0);
+          expect(waits()).toBe(1);
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          await expect(first).resolves.toBe(false);
+
+          const second = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          second.catch(() => {}); // the assertion below attaches after the advance
+          const secondState = track(second);
+          await untilReached(() => waits() > 1 || secondState() !== "pending");
+          // The next step waits again: the skipped one took no generation as seen.
+          expect(waits()).toBe(2);
+          expect(localStorage.getItem(GENERATION_KEY)).toBe(marker);
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          await expect(second).resolves.toBe(false);
+          expect(localStorage.getItem(GENERATION_KEY)).toBe(marker);
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+
+          // Positive pair: once storage accepts the restore, a step waits, restores and proceeds.
+          refusing.mockRestore();
+          refusing = null;
+          const third = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          await untilReached(() => waits() > 2);
+          expect(waits()).toBe(3);
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          // The restored record holds no pointer, so there is nothing to clear.
+          await expect(third).resolves.toBe(false);
+          expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+          expect(localStorage.getItem(GENERATION_KEY)).toBe(String(await get(GENERATION_KEY, getDraftStore())));
+        } finally {
+          refusing?.mockRestore();
+          vi.useRealTimers();
+          uninstallWebLocks();
+        }
+      });
+
+      it.each(["a publication", "a clear", "a refused republication"] as const)(
+        "each step records the pointer it leaves with the generation it committed: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const pointerB = nativePointer({ capabilityId: "cap-B", draftCode: "NAT002", seatIndex: 1 });
+            let step: () => Promise<unknown>;
+            if (leg === "a publication") {
+              step = () => publishActiveNativeDraft(pointerB);
+            } else {
+              const { pointer, capture } = await storeNativeA();
+              if (leg === "a clear") {
+                step = () => Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+              } else {
+                localStorage.setItem(POINTER_KEY, JSON.stringify(pointerB));
+                step = () => republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+              }
+            }
+            const before = ((await get(GENERATION_KEY, getDraftStore())) as number | undefined) ?? 0;
+            const left = await step();
+            const committed = await get(GENERATION_KEY, getDraftStore());
+            // Reach: the step committed one generation.
+            expect(committed).toBe(before + 1);
+
+            if (leg === "a clear") {
+              expect(left).toBe(true);
+              expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+            } else {
+              if (leg === "a refused republication") expect(left).toMatchObject({ status: "superseded" });
+              expect(storedPointer()).toMatchObject({ capabilityId: "cap-B" });
+            }
+            await expect(get(RECORD_KEY, getDraftStore())).resolves.toEqual({
+              generation: committed,
+              value: localStorage.getItem(POINTER_KEY),
+            });
+          } finally {
+            uninstallWebLocks();
+          }
+        },
+      );
 
       it("a refused pointer transaction rejects a publication and keeps the pointer for a clear", async () => {
         const { capture } = await storeNativeA();

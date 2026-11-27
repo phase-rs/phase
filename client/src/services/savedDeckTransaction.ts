@@ -91,6 +91,9 @@ const SAVED_DECK_RESOURCE: CrossTabResource = {
   localGenerationKey: SAVED_DECK_GENERATION_KEY,
   generationStore,
   generationKey: "generation",
+  // The library records no view: a transaction whose view does not catch up within the bound
+  // is skipped and records the committed generation locally.
+  staleView: { kind: "adopt-committed" },
 };
 
 /** The library's name for each of the runner's failures. */

@@ -1057,17 +1057,35 @@ export async function clearDraftGuestRecovery(capability: DraftGuestCapability):
 // ── Recovery-Pointer Transaction ──────────────────────────────────────
 
 /**
- * The recovery pointer's generation counter, a non-secret integer kept under
- * this key in `localStorage` and in the draft store, beside the records the
- * pointer leads to, so clearing that store resets both.
+ * The recovery pointer's generation counter, and the record of the generation
+ * each step committed with the pointer text it left. Both are non-secret and
+ * kept in the draft store beside the records the pointer leads to, so clearing
+ * that store resets them; the counter is also kept in `localStorage`.
  */
 const ACTIVE_DRAFT_POINTER_GENERATION_KEY = "phase-active-draft-pointer-generation";
+const ACTIVE_DRAFT_POINTER_RECORD_KEY = "phase-active-draft-pointer-record";
 
 const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource = {
   lockName: "phase-active-draft-pointer",
   localGenerationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
   generationStore: getDraftStore,
   generationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
+  staleView: {
+    kind: "restore-recorded",
+    view: {
+      recordKey: ACTIVE_DRAFT_POINTER_RECORD_KEY,
+      read: () => localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY),
+      // A plain write, removing no private record: rolling forward, the step
+      // that left the recorded pointer already removed the record its own
+      // write displaced; rolling back, the record an unrecorded step's
+      // pointer named is left unreachable, as when a tab closes before
+      // publishing.
+      write: (value) => {
+        if (value === null) localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+        else localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, value);
+      },
+    },
+  },
 };
 
 /**
@@ -1103,12 +1121,14 @@ export class ActiveDraftPointerUnavailableError extends Error {
 /**
  * Runs `body` inside the cross-tab recovery-pointer transaction: under its
  * exclusive lock, once this tab's storage shows every earlier step any tab
- * committed, so another tab's step lands wholly before `body` or wholly after
- * it. `body` is synchronous, and it reaches the pointer only through the
- * capability it is handed; it never calls an exported pointer function, whose
- * own lock request would wait on this one. A promise `body` returns is not
- * awaited under the lock. A transaction that cannot be confirmed in its bound
- * skips `body`, and a throw from `body` rejects. With no lock manager `body`
+ * committed, or, when it does not within its bound, once this tab has written
+ * into its storage the pointer the last step recorded, so another tab's step
+ * lands wholly before `body` or wholly after it. `body` is synchronous, and it
+ * reaches the pointer only through the capability it is handed; it never calls
+ * an exported pointer function, whose own lock request would wait on this one.
+ * A promise `body` returns is not awaited under the lock. A transaction whose
+ * view can be neither confirmed nor restored skips `body`, and a throw from
+ * `body` rejects. With no lock manager `body`
  * runs unguarded at the call, and nothing orders it against another tab.
  */
 export async function withActiveDraftPointer<T>(

@@ -5,6 +5,7 @@ import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataCo
 import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
 import type { ActiveDraftPointerTxn, DraftGuestCapability } from "../../services/draftPersistence";
 import { setCrossTabTxnLockWaitForTests } from "../../services/crossTabTransaction";
+import { watchPointerStepReads } from "../../test/helpers/pointerStepReads";
 import { installFifoWebLocks, installRefusingWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 /*
@@ -727,18 +728,18 @@ describe("guest recovery pointer publication", () => {
       const recordB = await saveSeatB(tab);
       harness.log.length = 0;
 
-      // Another tab's guest seat publishes at the reconnect's first read of
-      // the pointer after its private record commits: its comparison read.
-      const getItem = localStorage.getItem.bind(localStorage);
+      // Another tab's guest seat publishes at the reconnect's comparison read:
+      // the first read of the pointer its step's body makes, once its private
+      // record has committed and its write-ahead has landed.
       let publishedB: Promise<void> | null = null;
       let fired = 0;
-      vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
-        const seen = getItem(key);
-        if (key === POINTER_KEY && fired === 0 && harness.log.includes("privateSave:committed")) {
+      watchPointerStepReads({
+        nth: 1,
+        after: () => harness.log.includes("privateSave:committed"),
+        onRead: () => {
           fired += 1;
           publishedB = tab.saveActiveDraftGuest(seatB);
-        }
-        return seen;
+        },
       });
       const written = recordPointerWrites();
 
