@@ -1857,17 +1857,40 @@ fn commuting_soldier_entry_with_four_tap_effects_and_counters() {
     assert_commuting_soldier_entry(true);
 }
 
-fn assert_soldier_entry_orders_over_budget(tap_effects: usize, double_tokens: bool) {
+fn assert_soldier_entry_orders_over_budget(
+    tap_effects: usize,
+    double_tokens: bool,
+    taps_before_grumgully: usize,
+) {
+    const TAP_SOURCES: [&str; 16] = [
+        "Test Tap Enchantment 1",
+        "Test Tap Enchantment 2",
+        "Test Tap Enchantment 3",
+        "Test Tap Enchantment 4",
+        "Test Tap Enchantment 5",
+        "Test Tap Enchantment 6",
+        "Test Tap Enchantment 7",
+        "Test Tap Enchantment 8",
+        "Test Tap Enchantment 9",
+        "Test Tap Enchantment 10",
+        "Test Tap Enchantment 11",
+        "Test Tap Enchantment 12",
+        "Test Tap Enchantment 13",
+        "Test Tap Enchantment 14",
+        "Test Tap Enchantment 15",
+        "Test Tap Enchantment 16",
+    ];
+    let tap_sources = &TAP_SOURCES[..tap_effects];
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     if double_tokens {
         scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
     }
     // Synthetic permanents provide distinct mandatory replacements with identical writes.
-    for number in 1..=tap_effects {
+    for &source in tap_sources {
         scenario.add_enchantment_from_oracle(
             P1,
-            &format!("Test Tap Enchantment {number}"),
+            source,
             "Creatures your opponents control enter tapped.",
         );
     }
@@ -1877,11 +1900,19 @@ fn assert_soldier_entry_orders_over_budget(tap_effects: usize, double_tokens: bo
         .id();
     let mut runner = scenario.build();
     runner.cast(spell).resolve();
-    settle(
-        &mut runner,
-        &[order(tap_effects + 1, "Grumgully, the Generous")],
-        Until::StackEmpty,
-    );
+    // Parallel Lives spends one of the 16 live passes before entry ordering.
+    let entry_passes = 16 - usize::from(double_tokens);
+    let (before, after) = tap_sources.split_at(taps_before_grumgully);
+    let prompts: Vec<_> = before
+        .iter()
+        .copied()
+        .chain(std::iter::once("Grumgully, the Generous"))
+        .chain(after.iter().copied())
+        .take(entry_passes)
+        .enumerate()
+        .map(|(index, source)| order(tap_effects + 1 - index, source))
+        .collect();
+    settle(&mut runner, &prompts, Until::StackEmpty);
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,
@@ -1892,10 +1923,15 @@ fn assert_soldier_entry_orders_over_budget(tap_effects: usize, double_tokens: bo
 
 #[test]
 fn soldier_entry_over_pass_budget_offers_grumgully_first() {
-    assert_soldier_entry_orders_over_budget(16, false);
+    assert_soldier_entry_orders_over_budget(16, false, 0);
 }
 
 #[test]
 fn soldier_entry_over_remaining_pass_budget_offers_grumgully_first() {
-    assert_soldier_entry_orders_over_budget(15, true);
+    assert_soldier_entry_orders_over_budget(15, true, 0);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_after_three_taps() {
+    assert_soldier_entry_orders_over_budget(16, false, 3);
 }

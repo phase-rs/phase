@@ -15615,15 +15615,17 @@ fn token_replacement_ordering_is_material(
     if candidates.len() < 2 {
         return false;
     }
+    // Each candidate spends a live pass. If the pipeline can stop before
+    // they all apply, neither the prune nor the full probe models the cutoff.
+    // Let the player choose which effects apply first.
+    let passes_left = replacement_depth_limit(proposed).saturating_sub(depth);
+    if candidates.len() > usize::from(passes_left) {
+        return true;
+    }
     let _probe = super::engine::SimulationProbeGuard::enter();
     let _recorder =
         ProposedEventRecorderGuard(PROPOSED_EVENT_RECORDER.with(|cell| cell.borrow_mut().take()));
-    // Each candidate still spends one live pass. Keep the full probe when
-    // the pipeline can stop before all of them apply.
-    let passes_left = replacement_depth_limit(proposed).saturating_sub(depth);
-    let pruned = (candidates.len() <= usize::from(passes_left))
-        .then(|| fixed_token_entry_prefix(state, proposed, owner, registry, &candidates))
-        .flatten();
+    let pruned = fixed_token_entry_prefix(state, proposed, owner, registry, &candidates);
     let (probe_state, proposed, interacting) = match &pruned {
         Some((scratch, event, interacting)) => (scratch, event, interacting.as_slice()),
         None => (state, proposed, candidates.as_slice()),
