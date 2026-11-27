@@ -5027,7 +5027,7 @@ pub enum RestrictionScope {
 
 /// Identifies which players are affected by a temporary game restriction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
+#[serde(tag = "type", content = "data", from = "RestrictionPlayerScopeRepr")]
 pub enum RestrictionPlayerScope {
     AllPlayers,
     SpecificPlayer(PlayerId),
@@ -5039,19 +5039,11 @@ pub enum RestrictionPlayerScope {
     /// Resolved to `SpecificPlayer` by `add_restriction` after parent target
     /// propagation, without declaring a second target slot.
     ParentTargetedPlayer,
-    /// CR 109.4 + CR 608.2c + CR 608.2h: The controller of the parent effect's
-    /// object target — "its controller" where "it" is the object countered/
-    /// destroyed/tapped by the parent instruction (Render Silent: "Counter target
-    /// spell. Its controller can't cast spells this turn."). Resolved to
-    /// `SpecificPlayer` by `add_restriction::fill_runtime_fields` at restriction-
-    /// creation time via `ability_utils::parent_target_controller`, capturing the
-    /// referent's controller from last-known information (the object has left the
-    /// stack by the time the chained restriction resolves). Distinct from
-    /// `ParentTargetedPlayer` ("that player", CR 608.2c — a reused *player* target):
-    /// this derives a player from an *object* target's controller (CR 109.4).
-    /// Mirrors `PlayerFilter::ParentObjectTargetController` /
-    /// `PlayerScope::ParentObjectTarget` on the sibling enums.
-    ParentObjectTargetController,
+    /// CR 108.3 + CR 109.4 + CR 608.2h: The parent object target's owner or
+    /// controller, captured as a specific player when the restriction is created.
+    ParentObjectTarget {
+        possession: PossessionAxis,
+    },
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —
@@ -5081,9 +5073,58 @@ pub enum RestrictionPlayerScope {
     /// creation — locking the activator so the ban survives the source changing
     /// controller or leaving play — exactly like the other affected-player scopes
     /// (`TargetedPlayer`, `DefendingPlayer`, `ScopedPlayer`,
-    /// `ParentObjectTargetController`). This parser-facing scope is never stored:
+    /// `ParentObjectTarget`). This parser-facing scope is never stored:
     /// enforcement and display only ever see the lowered `SpecificPlayer`.
     SourceController,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum RestrictionPlayerScopeRepr {
+    AllPlayers,
+    SpecificPlayer(PlayerId),
+    TargetedPlayer,
+    ParentTargetedPlayer,
+    // The legacy controller tag is a unit payload with no `data` key.
+    #[serde(alias = "ParentObjectTargetController")]
+    ParentObjectTarget(Option<ParentObjectTargetPossession>),
+    #[serde(rename = "ParentObjectTargetOwner")]
+    LegacyParentOwner,
+    OpponentsOfSourceController,
+    DefendingPlayer,
+    ScopedPlayer,
+    SourceController,
+}
+
+#[derive(Deserialize)]
+struct ParentObjectTargetPossession {
+    #[serde(default = "default_parent_object_target_possession")]
+    possession: PossessionAxis,
+}
+
+impl From<RestrictionPlayerScopeRepr> for RestrictionPlayerScope {
+    fn from(repr: RestrictionPlayerScopeRepr) -> Self {
+        match repr {
+            RestrictionPlayerScopeRepr::AllPlayers => Self::AllPlayers,
+            RestrictionPlayerScopeRepr::SpecificPlayer(player) => Self::SpecificPlayer(player),
+            RestrictionPlayerScopeRepr::TargetedPlayer => Self::TargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentTargetedPlayer => Self::ParentTargetedPlayer,
+            RestrictionPlayerScopeRepr::ParentObjectTarget(data) => Self::ParentObjectTarget {
+                possession: data.map_or_else(default_parent_object_target_possession, |data| {
+                    data.possession
+                }),
+            },
+            RestrictionPlayerScopeRepr::LegacyParentOwner => Self::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            },
+            RestrictionPlayerScopeRepr::OpponentsOfSourceController => {
+                Self::OpponentsOfSourceController
+            }
+            RestrictionPlayerScopeRepr::DefendingPlayer => Self::DefendingPlayer,
+            RestrictionPlayerScopeRepr::ScopedPlayer => Self::ScopedPlayer,
+            RestrictionPlayerScopeRepr::SourceController => Self::SourceController,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7393,6 +7434,11 @@ pub enum FilterProp {
     Attacking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         defender: Option<ControllerRef>,
+        #[serde(
+            default,
+            skip_serializing_if = "AttackDefenderMatch::is_defending_side"
+        )]
+        scope: AttackDefenderMatch,
     },
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,
@@ -12098,8 +12144,8 @@ pub fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
 ///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
 ///    to that creature" rebinds through this hidden `ParentTarget` slot. The
 ///    arm also surfaces a *context-ref* `enters_blocking` (Nature Shields Its
-///    Own's "blocking that creature" rider). `target_filter()` never surfaces
-///    `enters_blocking` at all, so that slot can never double-count.
+///    Own's "blocking that creature" rider). Only a targetable blocking rider
+///    is surfaced by `target_filter()`.
 ///  * `Effect::Attach` surfaces `target` but hides `attachment`; the arm fires
 ///    only when `attachment.is_context_ref()`, mirroring the guards above (a
 ///    non-context-ref `attachment` can never be a parent-ref, so excluding it
@@ -23433,6 +23479,20 @@ impl TokenAttackDestination {
     }
 }
 
+/// CR 508.1b and 508.5: distinguish the actual player attacked from the defending side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackDefenderMatch {
+    #[default]
+    DefendingSide,
+    DirectPlayer,
+}
+
+impl AttackDefenderMatch {
+    pub fn is_defending_side(&self) -> bool {
+        *self == Self::DefendingSide
+    }
+}
+
 /// CR 508.4: what a named player offers as the destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NamedDefenderScope {
@@ -30236,7 +30296,7 @@ fn default_sum_aggregate() -> AggregateFunction {
     AggregateFunction::Sum
 }
 
-/// Backward-compat default for the legacy `PlayerScope::ParentObjectTargetController` unit tag.
+/// Backward-compat default for the legacy `ParentObjectTargetController` unit tag.
 /// Old saves carried no `possession` field; the tag itself meant the controller.
 fn default_parent_object_target_possession() -> PossessionAxis {
     PossessionAxis::Controller
@@ -33013,10 +33073,11 @@ impl Effect {
             // surface their token-creation target as the `owner` filter — the
             // player who creates the token is its owner. The default
             // `TargetFilter::Controller` preserves "you create ..." semantics.
-            Effect::Token { owner, attach_to, .. } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+            Effect::Token { owner, attach_to, enters_blocking, .. } => enters_blocking
+                .as_ref()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_ref().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             // GenericEffect and LoseLife have Option<TargetFilter>
             //
@@ -33603,11 +33664,15 @@ impl Effect {
             }
 
             Effect::Token {
-                owner, attach_to, ..
-            } => match attach_to {
-                Some(f) if !f.is_context_ref() => Some(f),
-                _ => Some(owner),
-            },
+                owner,
+                attach_to,
+                enters_blocking,
+                ..
+            } => enters_blocking
+                .as_mut()
+                .filter(|f| !f.is_context_ref())
+                .or(attach_to.as_mut().filter(|f| !f.is_context_ref()))
+                .or(Some(owner)),
 
             Effect::GenericEffect { target, .. }
             | Effect::LoseLife { target, .. }
@@ -37649,13 +37714,10 @@ pub enum ActivationRestriction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
     },
-    /// CR 702.62a: "If you could begin to cast this card by putting it onto the
-    /// stack from your hand" — the activation is legal whenever the underlying
-    /// card type's natural cast timing is legal. For a sorcery / permanent card,
-    /// this is sorcery-speed; for an instant, it's instant-speed. Used by the
-    /// synthesized Suspend hand-activated ability so future "cast-timing-mirroring"
-    /// activations (Foretell, etc.) can reuse this primitive instead of
-    /// special-casing card type at synthesis time.
+    /// CR 702.62a + CR 702.62c: "If you could begin to cast this card by putting it onto the
+    /// stack from your hand": legal whenever that cast could begin (CR 601.3), by the card's own
+    /// timing or an open flash route, with no effect prohibiting the cast. Used by the synthesized
+    /// Suspend hand ability.
     MatchesCardCastTiming,
 }
 
@@ -46377,15 +46439,11 @@ mod tests {
         );
 
         // Non-context-ref variants surface exactly once via the seed (guard):
-        // a targetable attach_to IS the seed, a non-context enters_blocking
-        // is excluded and the owner seed stands alone.
+        // Either targetable rider can provide the announced target seed.
         let targeted_attach = token_with(Some(targeted.clone()), None);
         assert_eq!(effect_parent_ref_slots(&targeted_attach), vec![&targeted]);
         let targeted_blocking = token_with(None, Some(targeted.clone()));
-        assert_eq!(
-            effect_parent_ref_slots(&targeted_blocking),
-            vec![&controller]
-        );
+        assert_eq!(effect_parent_ref_slots(&targeted_blocking), vec![&targeted]);
     }
 
     /// A token effect that names no defender is byte-identical on the wire to
@@ -50891,6 +50949,34 @@ mod tests {
     }
 
     #[test]
+    fn restriction_parent_object_target_decodes_legacy_controller_and_round_trips_owner() {
+        let legacy = r#"{"type":"ParentObjectTargetController"}"#;
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(legacy).unwrap(),
+            RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            },
+        );
+        let owner = RestrictionPlayerScope::ParentObjectTarget {
+            possession: PossessionAxis::Owner,
+        };
+        assert_eq!(
+            serde_json::from_str::<RestrictionPlayerScope>(r#"{"type":"ParentObjectTargetOwner"}"#)
+                .unwrap(),
+            owner,
+        );
+        let json = serde_json::json!({
+            "type": "ParentObjectTarget",
+            "data": { "possession": "Owner" }
+        });
+        assert_eq!(serde_json::to_value(&owner).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<RestrictionPlayerScope>(json).unwrap(),
+            owner,
+        );
+    }
+
+    #[test]
     fn player_filter_any_of_and_target_player_round_trip() {
         let filter = PlayerFilter::AnyOf {
             filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
@@ -51647,11 +51733,16 @@ mod tests {
         let props = vec![
             FilterProp::Token,
             FilterProp::RepresentedByCard,
-            FilterProp::Attacking { defender: None },
             FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
+            FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             },
             FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::Opponent),
             },
             FilterProp::AttackedThisTurn { defender: None },

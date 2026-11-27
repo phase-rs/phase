@@ -2993,6 +2993,13 @@ impl BattlefieldEntryObservations {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DepartureCombatSnapshot {
+    pub identity: ObjectIncarnationRef,
+    pub status: ZoneChangeCombatStatus,
+    pub block_pairs: Vec<BlockHistoryPair>,
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4818,10 +4825,9 @@ impl LatchedSuppressTrigger {
 /// Both pause carriers persist this same shape. Its terminal and occurrence
 /// authority deliberately has no serde defaults: an active legacy carrier cannot
 /// reconstruct the original member set, terminal outcomes, or already-delivered
-/// event authority safely. `announced_members` alone defaults to empty, because a
-/// legacy carrier without it only loses the CR 614.4 co-entrant exclusion for its
-/// later members (they are checked against every permanent on the battlefield, as
-/// before).
+/// event authority safely. Legacy carriers without `announced_members` keep
+/// their previous CR 614.4 co-entrant behavior. Those without `departure_combat`
+/// continue to capture combat at delivery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
@@ -4867,6 +4873,9 @@ pub struct LogicalZoneChangeGroup {
     /// permanent on the battlefield, as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub announced_members: Vec<ObjectIncarnationRef>,
+    /// CR 603.10a + CR 608.2h: combat facts from before simultaneous delivery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) departure_combat: Vec<DepartureCombatSnapshot>,
     /// CR 603.10 + CR 800.4a: the post-event authority of a player who left
     /// while this owner was paused (`retire_contexts_owned_by`), kept for the
     /// occurrences completed by then and merged into the final
@@ -4935,6 +4944,8 @@ struct LogicalZoneChangeGroupWire {
     #[serde(default)]
     announced_members: Vec<ObjectIncarnationRef>,
     #[serde(default)]
+    departure_combat: Vec<DepartureCombatSnapshot>,
+    #[serde(default)]
     departed_owner_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     #[serde(default)]
     departed_owner_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
@@ -4957,6 +4968,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
             announced_members: wire.announced_members,
+            departure_combat: wire.departure_combat,
             departed_owner_after_batched_triggers: wire.departed_owner_after_batched_triggers,
             departed_owner_after_suppress_triggers: wire.departed_owner_after_suppress_triggers,
         }
@@ -5000,6 +5012,12 @@ impl LogicalZoneChangeGroup {
                 ));
             }
             member_ids.insert(member.identity.object_id);
+        }
+        let mut combat_members = HashSet::with_capacity(self.departure_combat.len());
+        for snapshot in &self.departure_combat {
+            if !members.contains(&snapshot.identity) || !combat_members.insert(snapshot.identity) {
+                return Err("logical zone-change combat snapshot has an invalid member".to_string());
+            }
         }
         let mut entrants = HashSet::with_capacity(self.prospective_entrants.len());
         for entrant in &self.prospective_entrants {
@@ -5236,6 +5254,7 @@ impl LogicalZoneChangeGroup {
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
             announced_members: Vec::new(),
+            departure_combat: Vec::new(),
             departed_owner_after_batched_triggers: Vec::new(),
             departed_owner_after_suppress_triggers: Vec::new(),
         }
@@ -11553,6 +11572,9 @@ pub struct PendingTokenBattlefieldEntry {
     /// The `TokenCreated` display name (the token's OWN name, not the copied source's).
     pub name: String,
     pub source_id: ObjectId,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
 }
 
 /// Synchronous access to the exact batch owner parked by a paused move.
@@ -11852,6 +11874,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
     },
@@ -11872,6 +11896,8 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         source_id: ObjectId,
         controller: PlayerId,
         remaining_modifications: Vec<ContinuousModification>,
@@ -11920,6 +11946,9 @@ pub enum PendingCounterPostAction {
             skip_serializing_if = "EntryAttackDestination::is_any_defender"
         )]
         attack_destination: EntryAttackDestination,
+        /// CR 509.4: the bound attacker to block at completed battlefield entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_attacker: Option<ObjectIncarnationRef>,
         attach_to: Option<AttachTarget>,
         sacrifice_at: Option<Duration>,
         created_ids: Vec<ObjectId>,
@@ -29011,6 +29040,9 @@ pub struct LiminalEntry {
         skip_serializing_if = "EntryAttackDestination::is_any_defender"
     )]
     pub attack_destination: EntryAttackDestination,
+    /// CR 509.4: the bound attacker to block at completed battlefield entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_attacker: Option<ObjectIncarnationRef>,
     pub attach_to: Option<AttachTarget>,
     pub sacrifice_at: Option<Duration>,
     pub remaining_count: u32,
@@ -29973,6 +30005,9 @@ declare_game_state! {
     /// instead. Never serialized and never compared.
     #[serde(skip)]
     pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
+    /// Combat facts for the member currently delivered inline.
+    #[serde(skip)]
+    pub(crate) active_departure_combat: Option<DepartureCombatSnapshot>,
     /// CR 614.12: reusable scratch allocation for one synchronous copy-owner
     /// delivery segment. Not persisted, cloned, or compared; live state keeps
     /// every continuation and trigger journal authoritative.
@@ -30252,7 +30287,7 @@ declare_game_state! {
     /// of client round-trips; realized by the single authority
     /// `crate::game::effects::token::flush_pending_token_battlefield_entry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_token_battlefield_entry: Option<PendingTokenBattlefieldEntry>,
+    pub pending_token_battlefield_entry: Option<Box<PendingTokenBattlefieldEntry>>,
 
     // Layer system
     // CONSERVATIVE: deserialized snapshots (e.g. the WASM-export repro) rebuild
@@ -34872,6 +34907,68 @@ fn validate_restored_attack_authority(
     {
         return Err(ERROR.to_string());
     }
+    fn validate_departure(
+        state: &GameState,
+        row: &ZoneChangeRecord,
+        presence: &[bool],
+    ) -> Result<(), String> {
+        let status = row.combat_status;
+        let index = state
+            .zone_changes_this_turn
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, row))
+            .expect("selected row belongs to departure history");
+        if (!presence.get(index).copied().unwrap_or(false)
+            && (status.attacking || status.defending_player.is_some()))
+            || match (status.attack_target, status.attack_target_identity) {
+                (Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)), Some(pin)) => {
+                    pin.object_id != id
+                        || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+                }
+                (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => true,
+                (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
+                (Some(AttackTarget::Player(_)) | None, None) => false,
+            }
+        {
+            return Err(ERROR.to_string());
+        }
+        Ok(())
+    }
+
+    let check_condition = |condition: Option<&crate::types::ability::TriggerCondition>,
+                           event: Option<&GameEvent>| {
+        use crate::game::{combat, triggers};
+
+        if !condition.is_some_and(triggers::condition_reads_current_attack_destinations) {
+            return Ok(());
+        }
+        let identities = event
+            .and_then(triggers::attack_count_declaration_incarnations)
+            .ok_or_else(|| ERROR.to_string())?;
+        let mut seen_attackers = HashSet::new();
+        for identity in identities {
+            let identity = identity.ok_or_else(|| ERROR.to_string())?;
+            if !seen_attackers.insert(identity.object_id)
+                || combat::attack_destination_of_incarnation(state, identity).is_none()
+            {
+                return Err(ERROR.to_string());
+            }
+            if let Some(row) = exact_battlefield_departure_row(state, identity) {
+                validate_departure(state, row, departure_targets_present)?;
+                if let Some(pin) = row.combat_status.attack_target_identity {
+                    let live = state.objects.get(&pin.object_id).is_some_and(|object| {
+                        object.zone == Zone::Battlefield
+                            && ObjectIncarnationRef::from_object(object) == pin
+                    });
+                    if !live && exact_battlefield_departure_row(state, pin).is_none() {
+                        return Err(ERROR.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+
     fn ability(
         state: &GameState,
         node: &ResolvedAbility,
@@ -34915,31 +35012,7 @@ fn validate_restored_attack_authority(
                 return Err(ERROR.to_string());
             }
             if let Some(row) = row {
-                let status = row.combat_status;
-                let index = state
-                    .zone_changes_this_turn
-                    .iter()
-                    .position(|candidate| std::ptr::eq(candidate, row))
-                    .expect("selected row belongs to departure history");
-                if (!presence.get(index).copied().unwrap_or(false)
-                    && (status.attacking || status.defending_player.is_some()))
-                    || match (status.attack_target, status.attack_target_identity) {
-                        (
-                            Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)),
-                            Some(pin),
-                        ) => {
-                            pin.object_id != id
-                                || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
-                        }
-                        (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => {
-                            true
-                        }
-                        (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
-                        (Some(AttackTarget::Player(_)) | None, None) => false,
-                    }
-                {
-                    return Err(ERROR.to_string());
-                }
+                validate_departure(state, row, presence)?;
             }
         }
         if let Some(sub) = node.sub_ability.as_deref() {
@@ -34954,6 +35027,7 @@ fn validate_restored_attack_authority(
         ability(state, node, event, events, departure_targets_present)
     };
     if let Some(pending) = state.pending_trigger.as_deref() {
+        check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
         check(
             &pending.ability,
             pending.trigger_event.as_ref(),
@@ -34961,6 +35035,10 @@ fn validate_restored_attack_authority(
         )?;
     }
     for pending in &state.deferred_triggers {
+        check_condition(
+            pending.pending.condition.as_ref(),
+            pending.pending.trigger_event.as_ref(),
+        )?;
         check(
             &pending.pending.ability,
             pending.pending.trigger_event.as_ref(),
@@ -34970,12 +35048,36 @@ fn validate_restored_attack_authority(
     if let Some(order) = &state.pending_trigger_order {
         for group in &order.groups {
             for pending in &group.triggers {
+                check_condition(
+                    pending.pending.condition.as_ref(),
+                    pending.pending.trigger_event.as_ref(),
+                )?;
                 check(
                     &pending.pending.ability,
                     pending.pending.trigger_event.as_ref(),
                     &pending.trigger_events,
                 )?;
             }
+        }
+    }
+    if let Some(resume) = state.pending_triggered_mana_resume.as_deref() {
+        for context in resume
+            .collected_batches
+            .iter()
+            .flat_map(|batch| &batch.contexts)
+        {
+            let pending = &context.pending;
+            check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
+        }
+    }
+    for entry in &state.stack {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
         }
     }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
@@ -35005,6 +35107,14 @@ fn validate_restored_attack_authority(
         .chain(state.departed_activated_abilities.values())
         .chain(state.departed_triggered_abilities.values())
     {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
+        }
         if let Some(node) = entry.ability() {
             let event = match &entry.kind {
                 StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
@@ -41799,6 +41909,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_simultaneous_entrants: Vec::new(),
+            active_departure_combat: None,
             pre_entry_board_cache: Default::default(),
             active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
@@ -45939,6 +46050,7 @@ impl GameState {
             active_rules_execution_node: _,
             // Synchronous-window `ObjectId` lists, never serialized and never compared.
             active_simultaneous_entrants: _,
+            active_departure_combat: _,
             pre_entry_board_cache: _,
             active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
@@ -47540,6 +47652,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_simultaneous_entrants: _,
+        active_departure_combat: _,
         pre_entry_board_cache: _,
         active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
@@ -50236,6 +50349,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                blocking_attacker: None,
                 copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
@@ -50257,6 +50371,7 @@ mod tests {
             |entry| entry.attack_destination.clone(),
         );
         let copy = Box::new(crate::types::proposed_event::CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &state.objects[&object_id],
             )),
@@ -50289,6 +50404,7 @@ mod tests {
         );
         check(
             |attack_destination| PendingCounterPostAction::FinalizeCopyTokenEntry {
+                blocking_attacker: None,
                 object_id,
                 name: "Goblin".to_string(),
                 enters_attacking: true,
@@ -50311,6 +50427,7 @@ mod tests {
     fn continue_token_event_delivery_serde_roundtrip() {
         let spec = TokenSpec {
             blocking_attacker: None,
+            blocking_attacker_incarnation: None,
             characteristics: crate::types::proposed_event::TokenCharacteristics {
                 display_name: "Squirrel".to_string(),
                 power: Some(1),
@@ -50580,6 +50697,7 @@ mod tests {
                     owner: PlayerId(0),
                     count: 1,
                     copy: Box::new(CopyTokenSpec {
+                        blocking_attacker: None,
                         values: Box::new(intrinsic_copiable_values(&source)),
                         display: Default::default(),
                         extra_keywords: vec![Keyword::Haste],
@@ -62036,6 +62154,54 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         let twice = once.normalize_for_loop();
         assert!(loop_states_equal(&once, &twice));
         assert_eq!(twice.players[0].library, im::vector![b, a]);
+    }
+
+    #[test]
+    fn normalize_for_loop_ranks_an_installed_death_watch_against_its_creature() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let source = scenario.add_enchantment_from_oracle(
+            P0,
+            "Printed return watcher",
+            "When this enchantment enters, support 2. (Put a +1/+1 counter on each of up to two target creatures.)\n{1}: Choose target creature with a counter on it. When that creature dies this turn, return that card to its owner's hand.",
+        ).id();
+        let watched = scenario.add_creature(P1, "Watched creature", 2, 2).id();
+        scenario.with_counter(watched, crate::types::counter::CounterType::Plus1Plus1, 1);
+        let mut runner = scenario.build();
+        runner.activate(source, 0).target_object(watched).resolve();
+        let current = runner.state();
+        let mut shifted = current.clone();
+        shifted.objects.get_mut(&watched).unwrap().incarnation += 100;
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .expect("production activation installed a watch pin")
+            .incarnation += 100;
+        assert_ne!(current, &shifted);
+        assert!(normalized_equal(current, &shifted));
+
+        shifted.delayed_triggers[0]
+            .ability
+            .context
+            .delayed_watch_incarnation
+            .as_mut()
+            .unwrap()
+            .incarnation -= 1;
+        assert!(!normalized_equal(current, &shifted));
     }
 
     /// CR 400.7 + CR 104.4b: every incarnation a zone-change record names is ranked,

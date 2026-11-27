@@ -225,6 +225,7 @@ fn create_army_token(
         source_id: ability.source_id,
         controller: ability.controller,
         blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     };
 
     let proposed = ProposedEvent::CreateToken {
@@ -401,6 +402,7 @@ mod tests {
             .token_owner_scope(ControllerRef::You)
             .additional_token_spec(TokenSpec {
                 blocking_attacker: None,
+                blocking_attacker_incarnation: None,
                 characteristics: TokenCharacteristics {
                     display_name: "Squirrel".to_string(),
                     power: Some(1),

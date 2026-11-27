@@ -299,6 +299,7 @@ fn seifer_parses_threshold_subject_and_attack_target() {
         panic!("typed subject expected: {:?}", trigger.valid_card);
     };
     assert!(subject.properties.contains(&FilterProp::Attacking {
+        scope: Default::default(),
         defender: Some(ControllerRef::Opponent)
     }));
 }

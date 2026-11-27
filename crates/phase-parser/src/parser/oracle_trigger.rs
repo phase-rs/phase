@@ -1565,34 +1565,24 @@ fn effect_body_introduces_defending_player(effect_lower: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(effect_lower, parse_if_defending_player).is_some()
 }
 
-/// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
-/// ... that player ..." introduces the ATTACKING player (TriggeringPlayer) as the
-/// relative-player anaphor for a trailing "that player"/"that player controls"
-/// clause (Total War). Mirrors the any-player actor arm of
-/// `try_parse_attack_with_n_creatures` — the "you attack"/"another player
-/// attacks"/"an opponent attacks" forms fix the actor statically (no dynamic
-/// per-trigger player for "that player" to bind to; no in-corpus card phrases
-/// those forms with a trailing "that player" anaphor), so only the bare
-/// "a player attacks with" head-noun form needs this scope.
+/// CR 508.3d + CR 608.2c: a third-person actor in an attack-with head
+/// supplies the player antecedent for the effect body.
 fn condition_introduces_attacking_player(cond_lower: &str) -> bool {
-    // Walk word boundaries — the actor phrase may be preceded by "whenever"/"when".
-    let mut remaining = cond_lower;
-    while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("a player attacks with")
-            .parse(remaining)
-            .is_ok()
-        {
-            return true;
-        }
-        // structural: not dispatch — advance to the next word boundary so the
-        // nom tag above is retried at every word position (mirrors
-        // `condition_introduces_defending_player`).
-        remaining = match remaining.find(' ') {
-            Some(i) => remaining[i + 1..].trim_start(),
-            None => "",
-        };
-    }
-    false
+    nom_primitives::scan_at_word_boundaries(cond_lower, |input| {
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("a player"),
+                    tag("another player"),
+                    tag("an opponent"),
+                )),
+                tag(" attacks with "),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
 }
 
 /// CR 603.2e + CR 115.1 + CR 608.2c: A "becomes the target of a spell or
@@ -2050,6 +2040,9 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // stamp `Effect::Meld { source, partner, .. }` (the context carries the
         // source name; the gate carried the partner name).
         pending_meld_partner: meld_partner,
+        blocking_rider_antecedent: (condition == TriggerMode::Blocks
+            && partial_def.valid_target.is_some())
+        .then_some(TargetFilter::ParentTarget),
         pending_mana_symbol_count_color,
         actor: ctx.actor.clone(),
         // CR 608.2k says an effect still affects a specific untargeted object
@@ -10489,6 +10482,31 @@ fn parse_enters_verb_phrase(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+pub(super) fn is_singular_controlled_creature_entry_head(head: &str) -> bool {
+    // Preserve singular occurrence semantics before subject parsing consumes quantifiers.
+    if (
+        tag::<_, _, OracleError<'_>>("a"),
+        space1,
+        tag("creature"),
+        space1,
+    )
+        .parse(head)
+        .is_err()
+    {
+        return false;
+    }
+
+    let mut ctx = ParseContext::default();
+    ctx.enter_delayed_trigger_body();
+    let (subject, remainder) = parse_trigger_subject(head, &mut ctx);
+    subject == TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        && ctx.pending_trigger_subject_clause.is_none()
+        && ctx.diagnostics.is_empty()
+        && all_consuming(parse_enters_verb_phrase)
+            .parse(remainder.trim())
+            .is_ok()
+}
+
 fn trigger_head_dies_zone_change(condition_lower: &str) -> Option<(Zone, Zone)> {
     let (_before, (), rest) = scan_preceded(condition_lower, parse_dies_verb_phrase)?;
     rest.trim()
@@ -15935,6 +15953,7 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         if let Ok((after_suffix, defender)) = parse_attacking_player_postnominal(rest.trim_start())
         {
             let attacking = FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(defender),
             };
             return (conjoin_filter_property(filter, attacking), after_suffix);
@@ -16164,6 +16183,19 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
 /// recipient-relative `QuantityRef`); a bare object recipient ("to a creature"
 /// with no P/T tail, Strax's class) is the sole province of
 /// [`parse_object_recipient_filter`].
+// CR 506.2: the defending player is a player recipient. The ordinary
+// recipient parser uses the same filter for both spellings.
+fn parse_single_player_damage_recipient(input: &str) -> OracleResult<'_, BatchedDamageRecipient> {
+    alt((
+        value(BatchedDamageRecipient::APlayer, tag("a player")),
+        value(
+            BatchedDamageRecipient::DefendingPlayer,
+            preceded(opt(tag("the ")), tag("defending player")),
+        ),
+    ))
+    .parse(input)
+}
+
 fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
@@ -16249,14 +16281,9 @@ fn parse_damage_to_qualifier_with_rest(after_verb: &str) -> OracleResult<'_, Tar
             },
             preceded(tag("the player who cast "), tag(GRANTING_SELF_PLACEHOLDER)),
         ),
-        value(TargetFilter::Player, tag("a player")),
-        // CR 506.2: "defending player" names the player being attacked in combat,
-        // so damage dealt to them is damage to a player (CR 120.3) and the damaged
-        // player is the trigger's "that player".
-        value(
-            TargetFilter::Player,
-            preceded(opt(tag("the ")), tag("defending player")),
-        ),
+        map(parse_single_player_damage_recipient, |_| {
+            TargetFilter::Player
+        }),
         parse_opponent_or_battle_recipient,
         parse_opponent_player_recipient,
         value(TargetFilter::Controller, tag("you")),
@@ -20802,7 +20829,13 @@ fn parse_count_qualified_block_filter(input: &str) -> OracleResult<'_, (i32, Tar
 /// CR 603.4: this event qualifier is not an intervening-if and must not be
 /// rechecked when the ability resolves; EventTime is stripped when stacking.
 fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCondition {
-    let filter = add_property(filter, FilterProp::Attacking { defender: None });
+    let filter = add_property(
+        filter,
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
+    );
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
@@ -20847,7 +20880,10 @@ fn subject_attack_count_condition(
                     qty: QuantityRef::ObjectCount {
                         filter: add_property(
                             filter.clone(),
-                            FilterProp::Attacking { defender: None },
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None,
+                            },
                         ),
                     },
                 },
@@ -21560,109 +21596,134 @@ fn try_parse_one_or_more_put_into_exile_from(
     None
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum BatchedDamageRecipient {
+    APlayer,
+    DefendingPlayer,
+    OneOrMorePlayers,
+    Other(TargetFilter),
+}
+
+pub(super) struct BatchedDamageHead<'a> {
+    pub(super) source: TargetFilter,
+    pub(super) source_remainder: &'a str,
+    pub(super) recipient: BatchedDamageRecipient,
+    pub(super) damage_kind: DamageKindFilter,
+    pub(super) threshold: Option<(Comparator, u32)>,
+}
+
+fn parse_batched_damage_recipient(input: &str) -> OracleResult<'_, BatchedDamageRecipient> {
+    use BatchedDamageRecipient as Recipient;
+
+    let (input, _) = tag(" ").parse(input)?;
+    let input = input.trim_start();
+    // The shared recipient parser already puts mixed recipients ahead of
+    // their shorter prefixes. Only this production accepts the plural phrase.
+    let (rest, filter) = alt((
+        parse_damage_to_qualifier_with_rest,
+        value(TargetFilter::Player, tag("to one or more players")),
+    ))
+    .parse(input)?;
+    let recipient = if filter == TargetFilter::Player {
+        preceded(
+            tag("to "),
+            alt((
+                parse_single_player_damage_recipient,
+                value(Recipient::OneOrMorePlayers, tag("one or more players")),
+            )),
+        )
+        .parse(input)?
+        .1
+    } else {
+        Recipient::Other(filter)
+    };
+    Ok((rest, recipient))
+}
+
+pub(super) fn parse_batched_damage_head(input: &str) -> OracleResult<'_, BatchedDamageHead<'_>> {
+    let (rest, subject_text) = preceded(tag("one or more "), take_until(" deal")).parse(input)?;
+    let (rest, _) = (tag(" deal"), opt(tag("s")), tag(" ")).parse(rest)?;
+    let (rest, (damage_kind, threshold)) = parse_damage_predicate_tail(rest)?;
+    let (rest, recipient) = parse_batched_damage_recipient(rest)?;
+
+    let (filter, remainder) = parse_type_phrase_folding(subject_text);
+    let (filter, source_remainder) = if remainder.trim().is_empty() {
+        (filter, remainder)
+    } else if let Some(or_filter) = try_split_or_compound_type_phrase(subject_text) {
+        // CR 205.3m: Handle "ninja or rogue creatures you control" compound subtypes
+        (or_filter, "")
+    } else {
+        // Try to parse "with [property]" qualifiers appended after the type phrase.
+        // Covers cards like Primo, the Unbounded: "creatures you control with base power 0".
+        let mut rem = remainder.trim();
+        let mut extra_props = Vec::new();
+        while let Ok((next_rem, prop)) = parse_with_property(rem) {
+            extra_props.push(prop);
+            rem = next_rem.trim();
+        }
+        let direct = if extra_props.is_empty() {
+            (filter, remainder)
+        } else {
+            let qualified = extra_props
+                .into_iter()
+                .fold(filter, conjoin_filter_property);
+            (qualified, rem)
+        };
+        if direct.1.is_empty() {
+            direct
+        } else if let Some(subtype_filter) = parse_controlled_subtype_subject(subject_text) {
+            (subtype_filter, "")
+        } else {
+            let mut ctx = ParseContext::default();
+            let (subject_filter, subject_remainder) = parse_trigger_subject(subject_text, &mut ctx);
+            if subject_remainder.trim().is_empty() && !matches!(subject_filter, TargetFilter::Any) {
+                (subject_filter, "")
+            } else {
+                direct
+            }
+        }
+    };
+
+    Ok((
+        rest,
+        BatchedDamageHead {
+            source: filter,
+            source_remainder,
+            recipient,
+            damage_kind,
+            threshold,
+        },
+    ))
+}
+
 fn try_parse_one_or_more_combat_damage_to_player(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
-    for prefix in ["whenever one or more ", "when one or more "] {
-        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
-            continue;
-        };
-        let Ok((after_subject, subject_text)) =
-            take_until::<_, _, OracleError<'_>>(" deal").parse(rest)
-        else {
-            continue;
-        };
-        let Ok((after_verb, _)) =
-            (tag::<_, _, OracleError<'_>>(" deal"), opt(tag("s"))).parse(after_subject)
-        else {
-            continue;
-        };
-        let Ok((after_damage, (damage_kind, _))) = preceded(
-            tag::<_, _, OracleError<'_>>(" "),
-            parse_damage_predicate_tail,
-        )
-        .parse(after_verb) else {
-            continue;
-        };
-        if matches!(damage_kind, DamageKindFilter::NoncombatOnly) {
-            continue;
-        }
+    use BatchedDamageRecipient as Recipient;
 
-        // CR 120.1a: Try battle-inclusive suffixes first (longer match wins).
-        // Covers "deal(s) combat damage to a player or (a )battle".
-        let recipient_filter = if let Ok(("", _)) = (
-            tag::<_, _, OracleError<'_>>(" to a player or "),
-            opt(tag("a ")),
-            tag("battle"),
-        )
-            .parse(after_damage)
-        {
-            TargetFilter::Or {
-                filters: vec![
-                    TargetFilter::Player,
-                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Battle)),
-                ],
-            }
-        } else if let Ok(("", filter)) = preceded(
-            tag::<_, _, OracleError<'_>>(" "),
-            parse_damage_to_qualifier_with_rest,
-        )
-        .parse(after_damage)
-        {
-            filter
-        } else {
-            continue;
-        };
-
-        let (filter, remainder) = parse_type_phrase_folding(subject_text);
-        let filter = if remainder.trim().is_empty() {
-            filter
-        } else if let Some(or_filter) = try_split_or_compound_type_phrase(subject_text) {
-            // CR 205.3m: Handle "ninja or rogue creatures you control" compound subtypes
-            or_filter
-        } else {
-            // Try to parse "with [property]" qualifiers appended after the type phrase.
-            // Covers cards like Primo, the Unbounded: "creatures you control with base power 0".
-            let mut rem = remainder.trim();
-            let mut extra_props = Vec::new();
-            while let Ok((next_rem, prop)) = parse_with_property(rem) {
-                extra_props.push(prop);
-                rem = next_rem.trim();
-            }
-            if !extra_props.is_empty() && rem.is_empty() {
-                match filter {
-                    TargetFilter::Typed(mut tf) => {
-                        tf.properties.extend(extra_props);
-                        TargetFilter::Typed(tf)
-                    }
-                    other => other,
-                }
-            } else if let Some(subtype_filter) = parse_controlled_subtype_subject(subject_text) {
-                subtype_filter
-            } else {
-                let mut ctx = ParseContext::default();
-                let (subject_filter, subject_remainder) =
-                    parse_trigger_subject(subject_text, &mut ctx);
-                if subject_remainder.trim().is_empty()
-                    && !matches!(subject_filter, TargetFilter::Any)
-                {
-                    subject_filter
-                } else {
-                    continue;
-                }
-            }
-        };
-
-        let mut def = make_base();
-        def.mode = TriggerMode::DamageDoneOnceByController;
-        def.damage_kind = damage_kind;
-        def.valid_source = Some(filter);
-        def.valid_target = Some(recipient_filter);
-        def.batched = true;
-        return Some((TriggerMode::DamageDoneOnceByController, def));
+    let (_, head) = all_consuming(preceded(
+        alt((tag("whenever "), tag("when "))),
+        parse_batched_damage_head,
+    ))
+    .parse(lower)
+    .ok()?;
+    if head.damage_kind == DamageKindFilter::NoncombatOnly
+        || !head.source_remainder.trim().is_empty()
+    {
+        return None;
     }
-
-    None
+    let recipient = match head.recipient {
+        Recipient::APlayer | Recipient::DefendingPlayer => TargetFilter::Player,
+        Recipient::Other(filter) => filter,
+        Recipient::OneOrMorePlayers => return None,
+    };
+    let mut def = make_base();
+    def.mode = TriggerMode::DamageDoneOnceByController;
+    def.damage_kind = head.damage_kind;
+    def.valid_source = Some(head.source);
+    def.valid_target = Some(recipient);
+    def.batched = true;
+    Some((TriggerMode::DamageDoneOnceByController, def))
 }
 
 fn parse_controlled_subtype_subject(subject_text: &str) -> Option<TargetFilter> {
@@ -25145,6 +25206,25 @@ fn parse_dies_verb_phrase(input: &str) -> OracleResult<'_, ()> {
         value((), tag("are put into a graveyard from the battlefield")),
     ))
     .parse(input)
+}
+
+/// CR 700.4: " dies" after a declared-slot subject is a battlefield-to-graveyard
+/// zone change of the object in that slot.
+pub(super) fn parse_declared_creature_death(
+    input: &str,
+    index: usize,
+) -> Option<TriggerDefinition> {
+    all_consuming(preceded(
+        space1,
+        preceded(peek(tag("dies")), parse_dies_verb_phrase),
+    ))
+    .parse(input)
+    .ok()?;
+    let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+    trigger.origin = Some(Zone::Battlefield);
+    trigger.destination = Some(Zone::Graveyard);
+    trigger.valid_card = Some(TargetFilter::ParentTargetSlot { index });
+    Some(trigger)
 }
 
 /// CR 603.6 + CR 603.2: Parse one clause of a disjunctive zone-change trigger

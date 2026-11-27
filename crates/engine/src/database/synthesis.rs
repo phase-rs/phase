@@ -5528,10 +5528,12 @@ pub(crate) fn enlist_tap_target_filter() -> TargetFilter {
                     ]),
             ),
             TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .properties(vec![FilterProp::Attacking { defender: None }]),
-                )),
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                    vec![FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None,
+                    }],
+                ))),
             },
         ],
     }
@@ -5796,7 +5798,10 @@ fn is_frenzy_trigger(t: &TriggerDefinition, n: u32) -> bool {
 fn battlecry_target_filter() -> TypedFilter {
     let mut tf = TypedFilter::creature();
     tf.properties = vec![
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         FilterProp::Another,
     ];
     tf
@@ -5993,7 +5998,7 @@ fn is_mentor_trigger(t: &TriggerDefinition) -> bool {
                     counter_type: CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(tf),
-                } if tf.properties.contains(&FilterProp::Attacking { defender: None })
+                } if tf.properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && tf.properties.iter().any(|prop| matches!(
                         prop,
                         FilterProp::PtComparison {
@@ -6015,7 +6020,10 @@ fn build_mentor_trigger() -> TriggerDefinition {
     let mut target_filter = TypedFilter::creature();
     target_filter.properties = vec![
         // CR 702.134a: only attacking creatures are legal Mentor targets.
-        FilterProp::Attacking { defender: None },
+        FilterProp::Attacking {
+            scope: Default::default(),
+            defender: None,
+        },
         // CR 702.134a + CR 208.1: Mentor targets a creature with power
         // strictly less than the source creature's current power.
         FilterProp::PtComparison {
@@ -9212,19 +9220,19 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
+/// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///   1. **Hand-activated alt-cost** (not for Suspend X)
+///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
 ///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
+///      can counter the synthesized activation on the stack. Under CR 116.2f and
+///      CR 702.62a, suspending is a special action that skips the stack.
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9273,7 +9281,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                     if *counter_type == CounterType::Time
             )
     });
-    if !already_has_activation {
+    // CR 702.62a: no card prints suspend 0 ("X can't be 0", Aeon Chronicler); a count of 0 is
+    // the placeholder for an unread X, whose cost reads {0} too.
+    if time_counters > 0 && !already_has_activation {
         let composite_cost = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
@@ -14925,8 +14935,10 @@ mod mentor_synthesis_tests {
             panic!("counter target must be a TypedFilter");
         };
         assert!(
-            tf.properties
-                .contains(&FilterProp::Attacking { defender: None }),
+            tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }),
             "target must be an attacking creature (CR 702.134a)"
         );
         // CR 702.134a + CR 208.1: power strictly less than this creature's power.
@@ -15348,7 +15360,10 @@ mod battlecry_synthesis_tests {
         assert_eq!(
             tf.properties,
             vec![
-                FilterProp::Attacking { defender: None },
+                FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                },
                 FilterProp::Another
             ]
         );

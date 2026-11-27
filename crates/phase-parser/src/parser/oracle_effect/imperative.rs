@@ -884,25 +884,30 @@ fn resolve_earthbend_target(
     }
 }
 
+fn parse_anchored_life_verb<'a>(
+    input: &'a str,
+    verb: &str,
+    third_person: &str,
+) -> OracleResult<'a, ()> {
+    value(
+        (),
+        alt((
+            terminated(preceded(tag("you "), tag(verb)), tag(" ")),
+            terminated(tag(verb), tag(" ")),
+            terminated(tag(third_person), tag(" ")),
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_life_verb_remainder<'a>(
     text: &'a str,
     lower: &str,
     verb: &str,
     third_person: &str,
 ) -> Option<&'a str> {
-    let you_verb = format!("you {verb} ");
-    let bare_verb = format!("{verb} ");
-    let direct_third_person = format!("{third_person} ");
-    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
-        value(
-            (),
-            alt((
-                tag(you_verb.as_str()),
-                tag(bare_verb.as_str()),
-                tag(direct_third_person.as_str()),
-            )),
-        )
-        .parse(input)
+    if let Some(((), rest)) = nom_on_lower(text, lower, |input| {
+        parse_anchored_life_verb(input, verb, third_person)
     }) {
         return Some(rest);
     }
@@ -978,6 +983,442 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
     is_noun
 }
 
+/// The literal life operand shared by ordinary imperatives and clause boundaries.
+pub(super) fn parse_fixed_life_amount(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (head, remainder) = crate::parser::oracle_util::parse_count_head(input.trim_start());
+    let crate::parser::oracle_util::CountHead::Counted(amount @ QuantityExpr::Fixed { .. }) = head
+    else {
+        return Err(oracle_err(input));
+    };
+    let (remainder, _) =
+        preceded(space0, nom::bytes::complete::tag_no_case("life")).parse(remainder)?;
+    Ok((remainder, amount))
+}
+
+fn parse_life_amount(
+    input: &str,
+    ctx: &mut ParseContext,
+    parse_count: for<'a> fn(
+        &'a str,
+        &mut ParseContext,
+    ) -> Option<crate::parser::oracle_util::CountSlot<'a>>,
+) -> Option<QuantityExpr> {
+    let body = crate::parser::oracle_util::normalize_count_slot_text(input);
+    if let Ok((_, amount)) = all_consuming(parse_fixed_life_amount).parse(body) {
+        return Some(amount);
+    }
+    let slot = parse_count(input, ctx).filter(|slot| is_life_noun(slot.noun))?;
+    Some(slot.count)
+}
+
+type CountedInstruction<T> = (T, Option<QuantityExpr>);
+
+fn counted_card_instruction<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, crate::parser::oracle_util::CountSlot<'a>> {
+    let input = input.trim_start();
+    let body = crate::parser::oracle_util::normalize_count_slot_text(input);
+    let slot = super::parse_verb_count_slot(input, ctx).ok_or_else(|| oracle_err(input))?;
+    // The shared count parser ignores replacement markers and punctuation.
+    // Leave that suffix for the instruction's caller to consume.
+    Ok((&input[body.len()..], slot))
+}
+
+pub(super) fn parse_draw_instruction<'a>(
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, CountedInstruction<NumericImperativeAst>> {
+    // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
+    // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
+    // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
+    let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
+        value((), tag("up to ")).parse(i)
+    }) {
+        Some((_, after)) => (after, true),
+        None => (rest, false),
+    };
+    // CR 121.1 + CR 121.2: the draw count is the shared count position; an
+    // unparsed count or an unconsumed tail fails closed (`None` →
+    // `Effect::Unimplemented` upstream), never a literal.
+    let (remainder, slot) = counted_card_instruction(rest, ctx)?;
+    if !is_draw_noun(slot.noun) {
+        return Err(oracle_err(slot.noun));
+    }
+    Ok((
+        remainder,
+        (
+            NumericImperativeAst::Draw {
+                count: slot.count,
+                up_to,
+            },
+            slot.where_x,
+        ),
+    ))
+}
+
+/// The delayed body admits only productions that prove how much text they consumed.
+pub(super) fn parse_delayed_player_instruction<'a>(
+    input: &'a str,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, (ImperativeFamilyAst, Option<TargetFilter>)> {
+    let (predicate, subject) =
+        opt(terminated(alt((tag("you"), tag("that player"))), space1)).parse(input)?;
+    let actor = match subject {
+        Some(text) => {
+            let target = super::subject::parse_subject_application(text, ctx)
+                .map(|application| application.affected)
+                .ok_or_else(|| oracle_err(input))?;
+            if target != TargetFilter::Controller
+                && !(target == TargetFilter::TriggeringPlayer
+                    && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer))
+            {
+                return Err(oracle_err(input));
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    // A conjugated continuation without an explicit subject would need
+    // subject carry. Keep it outside this table instead of defaulting it to you.
+    let event_actor = actor == Some(TargetFilter::TriggeringPlayer);
+    let verb =
+        |base, third_person| terminated(tag(if event_actor { third_person } else { base }), space1);
+    let numeric = |ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast));
+    let (remainder, ast) = alt((
+        |input| {
+            let (rest, _) = verb("draw", "draws").parse(input)?;
+            let (rest, (ast, where_x)) = parse_draw_instruction(rest, &mut ctx.clone())?;
+            if where_x.is_some()
+                || !matches!(
+                    ast,
+                    NumericImperativeAst::Draw {
+                        count: QuantityExpr::Fixed { .. },
+                        up_to: false,
+                    }
+                )
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((rest, numeric(ast)))
+        },
+        |input| {
+            let (rest, _) = verb("discard", "discards").parse(input)?;
+            let (rest, (ast, where_x)) = parse_counted_discard(
+                rest,
+                rest,
+                discard_is_random(rest),
+                false,
+                &mut ctx.clone(),
+            )?;
+            if where_x.is_some()
+                || !matches!(
+                    ast,
+                    TargetedImperativeAst::Discard {
+                        count: QuantityExpr::Fixed { .. },
+                        random: false,
+                        up_to: false,
+                        unless_filter: None,
+                        filter: None,
+                    }
+                )
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((
+                rest,
+                ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)),
+            ))
+        },
+        |input| {
+            let (rest, (target, count, random)) = parse_possessive_hand_look(input)?;
+            if count.is_some()
+                || random
+                || event_actor
+                || !(target == TargetFilter::Controller
+                    || (target == TargetFilter::TriggeringPlayer
+                        && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer)))
+            {
+                return Err(oracle_err(input));
+            }
+            Ok((
+                rest,
+                ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(
+                    HandRevealImperativeAst::LookAt {
+                        target,
+                        count,
+                        random,
+                    },
+                )),
+            ))
+        },
+        preceded(peek(verb("become", "becomes")), parse_become_monarch),
+        map(
+            preceded(verb("gain", "gains"), parse_fixed_life_amount),
+            |amount| numeric(NumericImperativeAst::GainLife { amount }),
+        ),
+        map(
+            preceded(verb("lose", "loses"), parse_fixed_life_amount),
+            |amount| numeric(NumericImperativeAst::LoseLife { amount }),
+        ),
+    ))
+    .parse(predicate)?;
+    Ok((remainder, (ast, actor)))
+}
+
+pub(super) fn lower_delayed_player_instruction(
+    (ast, actor): (ImperativeFamilyAst, Option<TargetFilter>),
+) -> Effect {
+    let mut effect = lower_imperative_family_effect(ast);
+    if let Some(actor @ TargetFilter::TriggeringPlayer) = actor {
+        match &mut effect {
+            Effect::Draw { target, .. }
+            | Effect::Discard { target, .. }
+            | Effect::BecomeMonarch { target }
+            | Effect::GainLife { player: target, .. } => *target = actor,
+            Effect::LoseLife { target, .. } => *target = Some(actor),
+            Effect::StartYourEngines { .. }
+            | Effect::ChangeSpeed { .. }
+            | Effect::DealDamage { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::ResumeDamageBatch { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+            | Effect::Pump { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::Counter { .. }
+            | Effect::CounterAll { .. }
+            | Effect::Token { .. }
+            | Effect::SetTapState { .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::Mill { .. }
+            | Effect::Scry { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Dig { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Surveil { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::ExileTopCardContest { .. }
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::EpicCopy { .. }
+            | Effect::CastCopyOfCard { .. }
+            | Effect::CopyTokenOf { .. }
+            | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::CombineHost { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::PutCounter { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::PutChosenCounter { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::ChooseCounterAdjustment { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::MoveCounters { .. }
+            | Effect::ReproduceEventCounters { .. }
+            | Effect::Animate { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::Cleanup { .. }
+            | Effect::Mana { .. }
+            | Effect::Shuffle { .. }
+            | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::SearchOutsideGame { .. }
+            | Effect::OpenBoosterPack { .. }
+            | Effect::RevealHand { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealChosenNumbers { .. }
+            | Effect::RevealTop { .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Choose { .. }
+            | Effect::OpponentGuess { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::Suspect { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::Connive { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::SolveCase
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingETBCounters { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::CreateBoon { .. }
+            | Effect::NoteNumber { .. }
+            | Effect::PayCost { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::PreventDamage { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::CreateDrawReplacement { .. }
+            | Effect::CreatePlaneswalkReplacement { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::WinTheGame { .. }
+            | Effect::RollDie { .. }
+            | Effect::FlipCoins { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::ArrangePlanarDeckTop { .. }
+            | Effect::Planeswalk
+            | Effect::AbandonScheme
+            | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
+            | Effect::RedistributeLifeTotals
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptions { .. }
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::CrankContraptions { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ProcessRadCounters
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
+            | Effect::NoteManaSpent
+            | Effect::ForEachCategory { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::ChooseAndSacrificeRest { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::Exploit { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::GivePlayerCounter { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::RevealUntil { .. }
+            | Effect::Discover { .. }
+            | Effect::PhysicalContest { .. }
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::Manifest { .. }
+            | Effect::ManifestDread
+            | Effect::Cloak { .. }
+            | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::GrantExtraLoyaltyActivations { .. }
+            | Effect::SkipNextTurn { .. }
+            | Effect::SkipNextStep { .. }
+            | Effect::AdditionalPhase { .. }
+            | Effect::ModifyAnnouncedX { .. }
+            | Effect::Double { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Incubate { .. }
+            | Effect::Amass { .. }
+            | Effect::EmpowerJace { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::HordePlayCard { .. }
+            | Effect::Specialize
+            | Effect::Renown { .. }
+            | Effect::Bolster { .. }
+            | Effect::Adapt { .. }
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::CompletePlayerAction { .. }
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::Seek { .. }
+            | Effect::SetLifeTotal { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::Intensify { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::SetSchemeInMotion { .. }
+            | Effect::Unimplemented { .. } => {}
+        }
+    }
+    effect
+}
+
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,
@@ -1010,24 +1451,9 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
             })
         })
     {
-        // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
-        // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
-        // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
-        let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
-            value((), tag("up to ")).parse(i)
-        }) {
-            Some((_, after)) => (after, true),
-            None => (rest, false),
-        };
-        // CR 121.1 + CR 121.2: the draw count is the shared count position; an
-        // unparsed count or an unconsumed tail fails closed (`None` →
-        // `Effect::Unimplemented` upstream), never a literal.
-        let slot =
-            super::parse_verb_count_slot(rest, ctx).filter(|slot| is_draw_noun(slot.noun))?;
-        return Some(NumericImperativeAst::Draw {
-            count: slot.count,
-            up_to,
-        });
+        return parse_draw_instruction(rest, ctx)
+            .ok()
+            .map(|(_, (ast, _))| ast);
     }
 
     if let Some(after_gain) = parse_life_verb_remainder(text, lower, "gain", "gains") {
@@ -1038,20 +1464,16 @@ fn parse_numeric_imperative_ast_with_bare_card_source(
         if let Some(amount) = parse_gain_life_per_player(&after_gain.to_ascii_lowercase()) {
             return Some(NumericImperativeAst::GainLife { amount });
         }
-        // CR 119.3: the life amount is the shared count position.
-        let slot =
-            super::parse_verb_count_slot(after_gain, ctx).filter(|slot| is_life_noun(slot.noun))?;
-        return Some(NumericImperativeAst::GainLife { amount: slot.count });
+        let amount = parse_life_amount(after_gain, ctx, super::parse_verb_count_slot)?;
+        return Some(NumericImperativeAst::GainLife { amount });
     }
 
     if let Some(after_lose) = parse_life_verb_remainder(text, lower, "lose", "loses") {
         if let Some(expr) = try_parse_half_life_amount(&after_lose.to_ascii_lowercase()) {
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
-        // CR 119.3: the life amount is the shared count position.
-        let slot =
-            super::parse_count_slot(after_lose, ctx).filter(|slot| is_life_noun(slot.noun))?;
-        return Some(NumericImperativeAst::LoseLife { amount: slot.count });
+        let amount = parse_life_amount(after_lose, ctx, super::parse_count_slot)?;
+        return Some(NumericImperativeAst::LoseLife { amount });
     }
 
     if nom_primitives::scan_contains(lower, "gets +")
@@ -1414,7 +1836,7 @@ fn parse_discard_unless_filter<'a>(
 /// name", "nonland cards with that name"). The outer `None` means the noun is
 /// not recognized, so the instruction fails closed; the inner `None` means a
 /// plain "card(s)", which any card in the hand satisfies.
-fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
+pub(super) fn parse_discard_noun_filter(noun: &str) -> Option<Option<TargetFilter>> {
     // CR 201.2a + CR 608.2c: a trailing "with that name" binds the discard to the
     // card name chosen earlier in this resolution (Brain Pry). It composes onto
     // whatever type qualifier precedes it.
@@ -1887,6 +2309,82 @@ pub(super) fn starts_with_countless_plural_sacrifice(lower: &str) -> bool {
         .is_ok()
 }
 
+pub(super) fn discard_is_random(after_discard: &str) -> bool {
+    // CR 701.9b: a trailing "at random" makes the discard random. Read on the
+    // count position's normalized text, so a trailing period or " instead"
+    // does not hide it.
+    all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" at random"),
+        tag(" at random"),
+    ))
+    .parse(crate::parser::oracle_util::normalize_count_slot_text(
+        after_discard,
+    ))
+    .is_ok()
+}
+
+pub(super) fn parse_counted_discard<'a>(
+    input: &'a str,
+    lower: &str,
+    random: bool,
+    up_to: bool,
+    ctx: &mut ParseContext,
+) -> OracleResult<'a, CountedInstruction<TargetedImperativeAst>> {
+    // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
+    let (after_discard, unless_filter) = parse_discard_unless_filter(lower, input);
+    // Re-derive original_after for the narrowed (unless-stripped) text.
+    let original_after = &input[..after_discard.len()];
+    // CR 701.9a: the discard count is the shared count position ("two cards",
+    // "a number of cards equal to …", "a card for each …"). An unparsed count
+    // or noun fails closed (`None` → Unimplemented upstream).
+    let (remainder, slot) = counted_card_instruction(original_after, ctx)?;
+    let remainder = if remainder.is_empty() && unless_filter.is_some() {
+        &input[input.len()..]
+    } else {
+        &input[original_after.len() - remainder.len()..]
+    };
+    let count = match slot.count {
+        // CR 608.2c + CR 608.2h: "If you do, discard that many cards"
+        // anaphorizes the count from the preceding draw (Hordewing Skaab).
+        // EventContextAmount incorrectly prefers the combat-damage
+        // trigger's match count and can discard the entire hand (issue #3296).
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+                aggregate: crate::types::ability::AggregateFunction::Sum,
+            },
+        },
+        count => count,
+    };
+    // CR 701.9a + CR 608.2c: the noun is "card(s)" or a typed card phrase
+    // ("a creature card"), optionally followed by "at random". A typed phrase
+    // carries the same filter data as `AbilityCost::Discard.filter` (Dokuchi
+    // Silencer's "you may discard a creature card").
+    let noun_lower = slot.noun.to_lowercase();
+    let noun = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" at random"),
+        tag(" at random"),
+    ))
+    .parse(noun_lower.as_str())
+    .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
+    let filter = parse_discard_noun_filter(noun).ok_or_else(|| oracle_err(noun))?;
+    Ok((
+        remainder,
+        (
+            TargetedImperativeAst::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            },
+            slot.where_x,
+        ),
+    ))
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -2204,17 +2702,7 @@ pub(super) fn parse_targeted_action_ast(
                 target: TargetFilter::ParentTarget,
             });
         }
-        // CR 701.9b: a trailing "at random" makes the discard random. Read on the
-        // count position's normalized text, so a trailing period or " instead"
-        // does not hide it.
-        let random = all_consuming(terminated(
-            take_until::<_, _, OracleError<'_>>(" at random"),
-            tag(" at random"),
-        ))
-        .parse(crate::parser::oracle_util::normalize_count_slot_text(
-            after_discard,
-        ))
-        .is_ok();
+        let random = discard_is_random(after_discard);
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
         let (after_discard, up_to) =
             match tag::<_, _, OracleError<'_>>("up to ").parse(after_discard) {
@@ -2334,51 +2822,10 @@ pub(super) fn parse_targeted_action_ast(
                 filter,
             });
         }
-        // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
-        // Compute original-case offset before the unless strip narrows the slice.
         let original_after = &text[text.len() - after_discard.len()..];
-        let (after_discard, unless_filter) =
-            parse_discard_unless_filter(after_discard, original_after);
-        // Re-derive original_after for the narrowed (unless-stripped) text.
-        let original_after = &original_after[..after_discard.len()];
-        // CR 701.9a: the discard count is the shared count position ("two cards",
-        // "a number of cards equal to …", "a card for each …"). An unparsed count
-        // or noun fails closed (`None` → Unimplemented upstream).
-        let slot = super::parse_verb_count_slot(original_after, ctx)?;
-        let count = match slot.count {
-            // CR 608.2c + CR 608.2h: "If you do, discard that many cards"
-            // anaphorizes the count from the preceding draw (Hordewing Skaab).
-            // EventContextAmount incorrectly prefers the combat-damage
-            // trigger's match count and can discard the entire hand (issue #3296).
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            } => QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount {
-                    channel: crate::types::ability::DamageChannel::Total,
-                    aggregate: crate::types::ability::AggregateFunction::Sum,
-                },
-            },
-            count => count,
-        };
-        // CR 701.9a + CR 608.2c: the noun is "card(s)" or a typed card phrase
-        // ("a creature card"), optionally followed by "at random". A typed phrase
-        // carries the same filter data as `AbilityCost::Discard.filter` (Dokuchi
-        // Silencer's "you may discard a creature card").
-        let noun_lower = slot.noun.to_lowercase();
-        let noun = all_consuming(terminated(
-            take_until::<_, _, OracleError<'_>>(" at random"),
-            tag(" at random"),
-        ))
-        .parse(noun_lower.as_str())
-        .map_or(slot.noun, |(_, body)| &slot.noun[..body.len()]);
-        let filter = parse_discard_noun_filter(noun)?;
-        return Some(TargetedImperativeAst::Discard {
-            count,
-            random,
-            up_to,
-            unless_filter,
-            filter,
-        });
+        return parse_counted_discard(original_after, after_discard, random, up_to, ctx)
+            .ok()
+            .map(|(_, (ast, _))| ast);
     }
     // CR 601.2c + CR 608.2c: A chosen group is a named target antecedent,
     // not the battlefield population handled by the mass-return arm below.
@@ -4869,6 +5316,22 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
     }
 }
 
+pub(super) fn parse_possessive_hand_look(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, Option<QuantityExpr>, bool)> {
+    let (rest, _) = tag("look at ").parse(input)?;
+    let (rest, random_count) = opt(value(
+        QuantityExpr::Fixed { value: 1 },
+        alt((
+            tag::<_, _, OracleError<'_>>("a card at random in "),
+            tag("one card at random in "),
+        )),
+    ))
+    .parse(rest)?;
+    let (rest, target) = parse_hand_possessive_target(rest)?;
+    Ok((rest, (target, random_count.clone(), random_count.is_some())))
+}
+
 pub(super) fn parse_hand_reveal_ast(
     text: &str,
     lower: &str,
@@ -4902,19 +5365,9 @@ pub(super) fn parse_hand_reveal_ast(
         // explicitly so combat-trigger forms like "defending player's hand" and
         // random-card forms like "a card at random in target player's hand" do
         // not fall back to parsing "card" as the effect target.
-        if let Some(((target, count, random), _)) = nom_on_lower(text, lower, |input| {
-            let (rest, _) = tag("look at ").parse(input)?;
-            let (rest, random_count) = opt(value(
-                QuantityExpr::Fixed { value: 1 },
-                alt((
-                    tag::<_, _, OracleError<'_>>("a card at random in "),
-                    tag("one card at random in "),
-                )),
-            ))
-            .parse(rest)?;
-            let (rest, target) = parse_hand_possessive_target(rest)?;
-            Ok((rest, (target, random_count.clone(), random_count.is_some())))
-        }) {
+        if let Some(((target, count, random), _)) =
+            nom_on_lower(text, lower, parse_possessive_hand_look)
+        {
             return Some(HandRevealImperativeAst::LookAt {
                 target,
                 count,
@@ -15613,6 +16066,14 @@ fn attached_set_mass_effect(verb: AttachedSetVerb, population: TargetFilter) -> 
     })
 }
 
+pub(super) fn parse_become_monarch(input: &str) -> OracleResult<'_, ImperativeFamilyAst> {
+    value(
+        ImperativeFamilyAst::BecomeMonarch,
+        (alt((tag("becomes"), tag("become"))), tag(" the monarch")),
+    )
+    .parse(input)
+}
+
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
@@ -16708,13 +17169,10 @@ pub(super) fn parse_imperative_family_ast(
         // CR 701.51b: "open an Attraction" / "open two Attractions"
         "open" | "opens" => parse_open_attraction_imperative(lower),
         // CR 725.1: "become the monarch"
-        "become" | "becomes" => {
-            if lower == "become the monarch" || lower == "becomes the monarch" {
-                Some(ImperativeFamilyAst::BecomeMonarch)
-            } else {
-                None
-            }
-        }
+        "become" | "becomes" => all_consuming(parse_become_monarch)
+            .parse(lower)
+            .ok()
+            .map(|(_, ast)| ast),
         // CR 701.49: "venture into the dungeon" / "venture into the Undercity"
         "venture" => alt((
             value(

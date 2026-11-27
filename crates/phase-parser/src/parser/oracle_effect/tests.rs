@@ -9063,6 +9063,7 @@ fn effect_pump_creatures_attacking_opponents_and_planeswalkers() {
         panic!("expected typed target, got {target:?}");
     };
     assert!(typed.properties.contains(&FilterProp::Attacking {
+        scope: Default::default(),
         defender: Some(ControllerRef::Opponent),
     }));
     assert_eq!(power, PtValue::Fixed(2));
@@ -16090,7 +16091,8 @@ fn effect_mirror_match_copy_blockers_and_delayed_exile() {
             assert!(tf.properties.iter().any(|p| matches!(
                 p,
                 FilterProp::Attacking {
-                    defender: Some(ControllerRef::You)
+                    defender: Some(ControllerRef::You),
+                    ..
                 }
             )));
         }
@@ -43206,7 +43208,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
     for (input, expected_prop, expected_negated) in [
         (
             "draw a card if it was attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             false,
         ),
         (
@@ -43216,7 +43221,10 @@ fn strip_suffix_conditional_parses_lki_combat_status() {
         ),
         (
             "draw a card if it wasn't attacking",
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             true,
         ),
         (
@@ -44376,6 +44384,47 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn reflector_mage_bounces_one_target_then_restricts_its_owner() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return target creature an opponent controls to its owner's hand. That creature's owner can't cast spells with the same name as that creature until your next turn.",
+        "Reflector Mage",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one ETB trigger")
+    };
+    let bounce = trigger.execute.as_deref().expect("ETB bounce");
+    assert!(matches!(&*bounce.effect, Effect::Bounce { .. }));
+    assert_eq!(
+        bounce.effect.target_filter(),
+        Some(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent)
+        ))
+    );
+    let ban = bounce
+        .sub_ability
+        .as_deref()
+        .expect("restriction follows the bounce");
+    assert!(matches!(&*ban.effect, Effect::AddRestriction {
+        restriction: GameRestriction::ProhibitActivity {
+            affected_players: RestrictionPlayerScope::ParentObjectTarget { possession: PossessionAxis::Owner },
+            activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
+            ..
+        }
+    } if filter == &TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget])));
+    assert_eq!(
+        ban.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    assert!(ban.effect.target_filter().is_none());
+    assert!(ban.sub_ability.is_none());
+}
+
+#[test]
 fn render_silent_its_controller_cant_cast_spells() {
     // CR 109.4 + CR 608.2c + CR 701.6: Render Silent (DGM) — "Counter target
     // spell. Its controller can't cast spells this turn." The head is a counter;
@@ -44410,7 +44459,9 @@ fn render_silent_its_controller_cant_cast_spells() {
             &*sub.effect,
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
@@ -44420,6 +44471,8 @@ fn render_silent_its_controller_cant_cast_spells() {
         "sub got {:?}",
         sub.effect
     );
+    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    assert!(sub.effect.target_filter().is_none());
     // Discriminating guard: no Effect::Unimplemented anywhere in the parsed chain.
     // A swallowed "this turn" tail or an unrecognized "its controller" subject
     // would surface here as an Unimplemented sub-ability — the exact blind spot a
@@ -44832,10 +44885,12 @@ fn conjurers_ban_compound_cant_be_cast_and_cant_be_played() {
         "spell half must carry the shared 'until your next turn' duration"
     );
 
+    assert!(def.effect.target_filter().is_none());
     let land_sub = def
         .sub_ability
         .as_deref()
         .expect("the compound must chain a land-play restriction sub-ability");
+    assert!(land_sub.effect.target_filter().is_none());
     assert!(
         matches!(
             &*land_sub.effect,
@@ -47401,12 +47456,9 @@ fn my_wealth_will_bury_you_full_oracle_parses_treasure_floor() {
     );
 }
 
-/// CR 509.1h + CR 506.3e: only "that creature" binds the blocking anaphor.
-/// Flash Foliage's Oracle line 2 names "target creature", so the token head
-/// parses with `enters_blocking == None` and the trailing clause stays an
-/// honest gap (unasserted here to avoid pinning gap text).
+/// CR 509.1h + CR 506.3e + CR 509.4 + CR 115.1a: The rider announces an attacker target.
 #[test]
-fn flash_foliage_blocking_target_creature_leaves_enters_blocking_none() {
+fn flash_foliage_blocking_rider_targets_a_direct_attacker() {
     let def = parse_effect_chain(
         "Create a 1/1 green Saproling creature token that's blocking target creature attacking you.",
         AbilityKind::Spell,
@@ -47428,10 +47480,18 @@ fn flash_foliage_blocking_target_creature_leaves_enters_blocking_none() {
     assert_eq!(power, &PtValue::Fixed(1));
     assert_eq!(toughness, &PtValue::Fixed(1));
     assert_eq!(colors, &vec![ManaColor::Green]);
+    let Some(TargetFilter::Typed(filter)) = enters_blocking else {
+        panic!("expected a typed blocking target");
+    };
+    assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
     assert_eq!(
-        *enters_blocking, None,
-        "only 'that creature' binds the blocker"
+        filter.properties,
+        vec![FilterProp::Attacking {
+            defender: Some(ControllerRef::You),
+            scope: phase_ast::types::ability::AttackDefenderMatch::DirectPlayer,
+        }],
     );
+    assert_eq!(def.effect.target_filter(), enters_blocking.as_ref());
 }
 
 #[test]
@@ -47981,6 +48041,7 @@ fn effect_gain_life_for_each_creature_attacking_you() {
                     qty: QuantityRef::ObjectCount {
                         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                             FilterProp::Attacking {
+                                scope: Default::default(),
                                 defender: Some(ControllerRef::You)
                             }
                         ]),),
@@ -48533,7 +48594,10 @@ fn effect_target_player_draws_for_each_attacking_creature_they_control() {
                     filter: TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
                         controller: Some(ControllerRef::TargetPlayer),
-                        properties: vec![FilterProp::Attacking { defender: None }],
+                        properties: vec![FilterProp::Attacking {
+                            scope: Default::default(),
+                            defender: None
+                        }],
                     }),
                 },
             },
@@ -52642,7 +52706,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                     properties,
                     ..
                 }) if type_filters.contains(&TypeFilter::Creature)
-                    && properties.contains(&FilterProp::Attacking { defender: None })
+                    && properties.contains(&FilterProp::Attacking { scope: Default::default(), defender: None })
                     && properties.contains(&FilterProp::Another)
             ));
             assert!(matches!(
@@ -52656,7 +52720,7 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
                         })
                     }
                 }) if type_filters == &vec![TypeFilter::Creature]
-                    && properties == &vec![FilterProp::Attacking { defender: None }, FilterProp::Another]
+                    && properties == &vec![FilterProp::Attacking { scope: Default::default(), defender: None }, FilterProp::Another]
             ));
             assert_eq!(power, toughness);
         }
@@ -62558,7 +62622,7 @@ fn each_player_for_each_attacking_creature_they_control_binds_scoped_player() {
                     ..
                 })
             }
-        } if properties.as_slice() == [FilterProp::Attacking { defender: None }]
+        } if properties.as_slice() == [FilterProp::Attacking { scope: Default::default(), defender: None }]
     ));
 }
 
@@ -110244,7 +110308,6 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
     };
     for (name, card_type, target, oracle) in [
         ("Depthshaker Titan", "Creature", Some(TargetFilter::ParentTarget), "When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nEach artifact creature you control has melee, trample, and haste. (Whenever a creature with melee attacks, it gets +1/+1 until end of turn for each opponent you attacked this combat.)"),
-        ("Mardu Siegebreaker", "Creature", Some(tracked.clone()), "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens."),
         ("Tears of Rage", "Instant", Some(tracked), "Cast this spell only during the declare attackers step.\nAttacking creatures you control get +X/+0 until end of turn, where X is the number of attacking creatures. Sacrifice those creatures at the beginning of the next end step."),
         ("Malik, Grim Manipulator", "Creature", None, "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token."),
     ] {
@@ -110257,6 +110320,63 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
             assert!(sacrifices.iter().all(|(_, count)| *count == one), "{name}: {sacrifices:?}");
         }
     }
+}
+
+#[test]
+fn mardu_siegebreaker_lowers_to_one_named_copy_batch_and_one_cleanup() {
+    use crate::types::ability::{NamedDefenderScope, SacrificeSelection, TokenAttackDestination};
+
+    let oracle = "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens.";
+    let parsed = parse_named_face(oracle, "Mardu Siegebreaker", &["Creature"]);
+    let attack = parsed.triggers[1]
+        .execute
+        .as_deref()
+        .expect("attack effect");
+    assert!(
+        matches!(
+            attack.effect.as_ref(),
+            Effect::CopyTokenOf {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent
+                    },
+                },
+                tapped: true,
+                enters_attacking: true,
+                attack_destination: TokenAttackDestination::EachPlayer {
+                    filter: PlayerFilter::Opponent,
+                    scope: NamedDefenderScope::Player,
+                },
+                ..
+            }
+        ),
+        "{attack:#?}"
+    );
+    assert!(attack.repeat_for.is_none());
+    assert_eq!(attack.repeat_timing, Default::default());
+    let cleanup = attack.sub_ability.as_deref().expect("delayed cleanup");
+    let Effect::CreateDelayedTrigger {
+        condition:
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End, ..
+            },
+        effect,
+        uses_tracked_set: false,
+        ..
+    } = cleanup.effect.as_ref()
+    else {
+        panic!("expected controller-relative cleanup: {cleanup:#?}");
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: SacrificeSelection::EntireReferent,
+            ..
+        }
+    ));
+    assert!(cleanup.sub_ability.is_none());
 }
 
 #[test]
@@ -110452,4 +110572,265 @@ fn unbound_life_loss_difference_in_an_emblem() {
             let _ = crate::types::ability_visit::visit_trigger(trigger, &mut &mut *visit);
         }
     });
+}
+
+#[test]
+fn delayed_draw_discard_rejects_unconsumed_replacement_markers() {
+    let parse = |body| parse_delayed_player_damage_body(body, &mut ParseContext::default());
+    assert!(parse("draw a card, then discard a card.").is_some());
+    for body in [
+        "draw a card instead, then discard a card.",
+        "draw a card, then discard a card instead.",
+        "draw a card and discard a card at random.",
+        "draw a card and scry 1.",
+        "draw a card and and discard a card.",
+        "draw a card and discards a card.",
+    ] {
+        assert!(parse(body).is_none(), "{body}");
+    }
+}
+
+#[test]
+fn forth_eorlingas_exports_delayed_spell_ability_description() {
+    let delayed_sentence = "Whenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+    let oracle = format!(
+        "Create X 2/2 red Human Knight creature tokens with trample and haste.\n{delayed_sentence}"
+    );
+    let parsed = parse_oracle_text(&oracle, "Forth Eorlingas!", &[], &["Sorcery".into()], &[]);
+    let [_, delayed] = parsed.abilities.as_slice() else {
+        panic!("expected two spell abilities");
+    };
+    assert_eq!(delayed.kind, AbilityKind::Spell);
+    assert!(matches!(
+        delayed.effect.as_ref(),
+        Effect::CreateDelayedTrigger { .. }
+    ));
+    let exported = serde_json::to_value(delayed).expect("serialize delayed spell ability");
+    assert_eq!(exported["description"], delayed_sentence);
+}
+
+#[test]
+fn delayed_player_damage_full_faces_commit_compound_payloads() {
+    use crate::types::ability::DamageKindFilter;
+    use std::ops::ControlFlow;
+
+    const FORTH: &str = "Create X 2/2 red Human Knight creature tokens with trample and haste.\nWhenever one or more creatures you control deal combat damage to one or more players this turn, you become the monarch.";
+    const JACE: &str = "[+1]: Whenever one or more creatures you control deal combat damage to a player this turn, draw a card, then discard a card.\n[−2]: Create a 2/2 blue Illusion creature token with \"When this token becomes the target of a spell, sacrifice it.\"\n[−5]: Create two tokens that are copies of Jace, except they're not legendary.";
+    const RAVEN: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Create a 1/1 blue Bird creature token with flying. You gain 2 life.\nII — Whenever one or more creatures you control with flying deal combat damage to a player this turn, look at that player's hand and draw a card.\nIII — You may put a card you own from outside the game on top of your library.";
+
+    for (name, kind, subtypes, full, mutations, mode, expected) in [
+        (
+            "Forth Eorlingas!",
+            "Sorcery",
+            &[][..],
+            FORTH,
+            &[
+                ("the monarch.", "the monarch instead."),
+                ("the monarch.", "the monarch and scry 1."),
+                ("combat damage", "combat 3 or more damage"),
+                (
+                    "one or more players this turn",
+                    "one or more players with hexproof this turn",
+                ),
+            ][..],
+            TriggerMode::DamageDoneOnce,
+            &["monarch"][..],
+        ),
+        (
+            "Jace, Cunning Castaway",
+            "Planeswalker",
+            &["Jace"][..],
+            JACE,
+            &[
+                ("draw a card,", "draw a card instead,"),
+                ("combat damage", "combat 3 or more damage"),
+                ("a player this turn", "a player with hexproof this turn"),
+                ("discard a card.", "discard a card instead."),
+            ][..],
+            TriggerMode::DamageDone,
+            &["draw", "discard"][..],
+        ),
+        (
+            "The Raven's Warning",
+            "Enchantment",
+            &["Saga"][..],
+            RAVEN,
+            &[
+                ("and draw a card.", "and draw a card instead."),
+                (
+                    "with flying deal",
+                    "with flying and unknown qualifications deal",
+                ),
+            ][..],
+            TriggerMode::DamageDone,
+            &["look", "draw"][..],
+        ),
+    ] {
+        let parse = |text: &str| {
+            parse_oracle_text(
+                text,
+                name,
+                &[],
+                &[kind.to_owned()],
+                &subtypes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        let inspect = |face: &crate::parser::oracle::ParsedAbilities| {
+            let mut installers = 0;
+            let mut strict = Vec::new();
+            let mut payloads = Vec::new();
+            let mut visit = |effect: &Effect| {
+                if let Effect::CreateDelayedTrigger {
+                    condition:
+                        DelayedTriggerCondition::WheneverEvent {
+                            trigger,
+                            expiry: WheneverEventExpiry::EndOfTurn,
+                        },
+                    effect,
+                    ..
+                } = effect
+                {
+                    installers += 1;
+                    assert_eq!(trigger.mode, mode);
+                    assert!(trigger.batched);
+                    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+                    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+                    let mut node = Some(effect.as_ref());
+                    while let Some(def) = node {
+                        payloads.push(match def.effect.as_ref() {
+                            Effect::BecomeMonarch {
+                                target: TargetFilter::Controller,
+                            } => "monarch",
+                            Effect::Draw {
+                                target: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            } => "draw",
+                            Effect::Discard {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                ..
+                            } => "discard",
+                            Effect::RevealHand {
+                                target: TargetFilter::TriggeringPlayer,
+                                reveal: false,
+                                ..
+                            } => "look",
+                            Effect::RevealHand {
+                                target: TargetFilter::Controller,
+                                reveal: false,
+                                ..
+                            } => "look-controller",
+                            other => panic!("{name}: unexpected watcher payload {other:?}"),
+                        });
+                        node = def.sub_ability.as_deref();
+                    }
+                }
+                if let Effect::Unimplemented { name, description } = effect {
+                    if matches!(
+                        name.as_str(),
+                        "delayed_player_damage_body" | "delayed_player_damage_head"
+                    ) {
+                        strict.push(description.clone().expect("strict failure source text"));
+                    }
+                }
+                ControlFlow::Continue(())
+            };
+            for ability in &face.abilities {
+                let _ = crate::types::ability_visit::visit_ability_def(ability, &mut visit);
+            }
+            for trigger in &face.triggers {
+                let _ = crate::types::ability_visit::visit_trigger(trigger, &mut visit);
+            }
+            let mut immediate = |effect: &Effect| {
+                assert!(
+                    !matches!(
+                        effect,
+                        Effect::BecomeMonarch { .. }
+                            | Effect::Draw { .. }
+                            | Effect::Discard { .. }
+                            | Effect::RevealHand { .. }
+                    ),
+                    "{name} detached a delayed instruction: {effect:?}"
+                );
+                ControlFlow::Continue(())
+            };
+            for ability in face.abilities.iter().chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref()),
+            ) {
+                let _ = crate::types::ability_visit::visit_ability_def_scoped(
+                    ability,
+                    crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+                    &mut immediate,
+                );
+            }
+            (installers, strict, payloads)
+        };
+        assert_eq!(
+            inspect(&parse(full)),
+            (1, Vec::new(), expected.to_vec()),
+            "{name}"
+        );
+        if full == RAVEN {
+            // Structural variation on The Raven's Warning II: the controller
+            // is both the viewer and the owner of the hand being inspected.
+            let modified = full.replace("that player's hand", "your hand");
+            assert_eq!(
+                inspect(&parse(&modified)),
+                (1, Vec::new(), vec!["look-controller", "draw"])
+            );
+        }
+        for (from, to) in mutations {
+            let mutated = full.replace(from, to);
+            let (installers, strict, payloads) = inspect(&parse(&mutated));
+            assert_eq!(installers, 0, "{name}: {to}");
+            assert!(payloads.is_empty(), "{name}: {to}");
+            let [fragment] = strict.as_slice() else {
+                panic!("{name}: {to}: expected exactly one strict failure, got {strict:?}");
+            };
+            let expected_span = to.trim_end_matches('.');
+            let expected_span = expected_span
+                .strip_suffix(" this turn")
+                .unwrap_or(expected_span);
+            assert!(fragment.contains(expected_span), "{name}: {fragment:?}");
+        }
+    }
+}
+
+#[test]
+fn delayed_player_damage_forth_head_accepts_an_independent_body() {
+    // Structural variation on Forth Eorlingas!, with a draw before the
+    // printed monarch instruction. Both belong to the same delayed ability.
+    let printed = "Whenever one or more creatures you control deal combat damage to one or more players this turn,";
+    let face = parse_named_face(
+        &format!("{printed} draw a card and you become the monarch."),
+        "Combat Draw and Monarch",
+        &["Sorcery"],
+    );
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = face.abilities[0].effect.as_ref()
+    else {
+        panic!("expected a single installed watcher: {face:?}");
+    };
+    assert_eq!(trigger.mode, TriggerMode::DamageDoneOnce);
+    assert!(trigger.batched);
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+    let monarch = effect.sub_ability.as_deref().expect("monarch instruction");
+    assert!(matches!(
+        monarch.effect.as_ref(),
+        Effect::BecomeMonarch {
+            target: TargetFilter::Controller
+        }
+    ));
+    assert!(monarch.sub_ability.is_none());
+    assert!(face.abilities[0].sub_ability.is_none());
 }

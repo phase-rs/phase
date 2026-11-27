@@ -2856,7 +2856,10 @@ mod tests {
             FilterProp::Token,
             FilterProp::Another,
             FilterProp::EnteredThisTurn,
-            FilterProp::Attacking { defender: None },
+            FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None,
+            },
             FilterProp::SaddledSource,
             FilterProp::HasNoAbilities,
         ] {

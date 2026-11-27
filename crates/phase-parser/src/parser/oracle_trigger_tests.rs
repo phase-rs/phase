@@ -3630,7 +3630,10 @@ fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
             target: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
-                properties: vec![FilterProp::Attacking { defender: None }],
+                properties: vec![FilterProp::Attacking {
+                    scope: Default::default(),
+                    defender: None
+                }],
             }),
             scope: EffectScope::All,
             state: TapStateChange::Untap,
@@ -7632,6 +7635,7 @@ fn opponent_attacks_you_uses_attackers_declared() {
                 ..
             } if typed.type_filters.contains(&TypeFilter::Creature)
                 && typed.properties.contains(&FilterProp::Attacking {
+                    scope: Default::default(),
                     defender: Some(ControllerRef::You),
                 })
         ),
@@ -10879,7 +10883,7 @@ fn parse_cloud_ex_soldier_attack_trigger_structure() {
             && properties
                 == &vec![
                     FilterProp::EquippedBy,
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking { scope: Default::default(), defender: None },
                 ] => {}
         other => panic!(
             "outer execute must draw for each equipped attacking creature you control, got {other:?}"
@@ -11220,9 +11224,10 @@ fn shared_animosity_attack_pump_for_each_other_attacker_sharing_type() {
                 panic!("filter should be typed, got {filter:?}");
             };
             assert!(tf.properties.contains(&FilterProp::Another));
-            assert!(tf
-                .properties
-                .contains(&FilterProp::Attacking { defender: None }));
+            assert!(tf.properties.contains(&FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }));
             let shares = tf.properties.iter().find(|p| {
                 matches!(
                     p,
@@ -13462,7 +13467,7 @@ fn trigger_becomes_blocked_by_two_or_more_creatures_parses_threshold() {
     assert!(matches!(
         def.valid_card,
         Some(TargetFilter::Typed(ref tf)) if tf.type_filters == vec![TypeFilter::Creature]
-            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) }))
+            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) , .. }))
     ));
     let blocker_count = def
         .blocker_count
@@ -29012,7 +29017,7 @@ fn trigger_two_or_more_typed_creatures_attack() {
                 filter,
                 &add_property(
                     def.valid_card.clone().expect("valid_card"),
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking { scope: Default::default(), defender: None },
                 ),
                 "count = subject + Attacking"
             );
@@ -29103,10 +29108,12 @@ fn trigger_two_or_more_creatures_attack_argent_dais_any_player() {
             condition: Box::new(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }])
-                        ),
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None
+                            }
+                        ])),
                     },
                 },
                 comparator: Comparator::GE,
@@ -29258,7 +29265,10 @@ fn trigger_two_or_more_disjunctive_unscoped_subject_attack() {
                 filter,
                 &add_property(
                     def.valid_card.clone().expect("valid_card"),
-                    FilterProp::Attacking { defender: None },
+                    FilterProp::Attacking {
+                        scope: Default::default(),
+                        defender: None
+                    },
                 ),
                 "count = subject + Attacking"
             );
@@ -29356,10 +29366,12 @@ fn n_or_more_attacks_accepts_numeral_count() {
             condition: Box::new(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount {
-                        filter: TargetFilter::Typed(
-                            TypedFilter::creature()
-                                .properties(vec![FilterProp::Attacking { defender: None }])
-                        ),
+                        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                            FilterProp::Attacking {
+                                scope: Default::default(),
+                                defender: None
+                            }
+                        ])),
                     },
                 },
                 comparator: Comparator::GE,
@@ -36098,6 +36110,54 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
     );
 }
 
+#[test]
+fn player_led_attack_demonstratives_follow_the_head() {
+    use crate::types::ability::Effect;
+
+    let tomik = parse_trigger_line(
+        "Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.",
+        "Tomik, Wielder of Law",
+    );
+    let explicit_defender = parse_trigger_line(
+        "Whenever a creature attacks one of your opponents, that player loses 1 life.",
+        "Calculating Lich",
+    );
+    for (trigger, expected) in [
+        (tomik, TargetFilter::TriggeringPlayer),
+        (explicit_defender, TargetFilter::DefendingPlayer),
+    ] {
+        let execute = trigger.execute.expect("trigger has a parsed effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    target: Some(player),
+                    ..
+                } if *player == expected
+            ),
+            "{execute:?}"
+        );
+    }
+
+    // Tahngarth, First Mate: "that opponent" after the same player-led head is
+    // the attacking opponent who gains control.
+    let tahngarth = parse_trigger_line(
+        "Whenever an opponent attacks with one or more creatures, if Tahngarth is tapped, you may have that opponent gain control of Tahngarth until end of combat.",
+        "Tahngarth, First Mate",
+    );
+    let execute = tahngarth.execute.expect("trigger has a parsed effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::GiveControl {
+                recipient: TargetFilter::TriggeringPlayer,
+                ..
+            }
+        ),
+        "{execute:?}"
+    );
+}
+
 /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
 /// the attacked player in the condition; "that player controls" inside the
 /// effect must resolve to `ControllerRef::DefendingPlayer` so the runtime
@@ -41071,7 +41131,10 @@ fn dealt_damage_attacking_creature_source_parses() {
         Some(TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
-            properties: vec![FilterProp::Attacking { defender: None }],
+            properties: vec![FilterProp::Attacking {
+                scope: Default::default(),
+                defender: None
+            }],
         }))
     );
 }
@@ -43439,9 +43502,10 @@ fn assert_block_count_shape(condition: &TriggerCondition, minimum: i32, noun: &s
     let TargetFilter::Typed(mut expected) = parse_type_phrase_folding(noun).0 else {
         panic!("expected typed noun");
     };
-    expected
-        .properties
-        .push(FilterProp::Attacking { defender: None });
+    expected.properties.push(FilterProp::Attacking {
+        scope: Default::default(),
+        defender: None,
+    });
     expected.properties.push(FilterProp::CombatRelation {
         relation: CombatRelation::BlockPairing {
             direction: BlockPairDirection::Either,
@@ -44798,7 +44862,7 @@ fn copy_token_continuation_sentence_names_that_player_as_its_attack_destination(
             target,
             TargetFilter::Typed(typed) if typed.properties.iter().any(|prop| matches!(
                 prop,
-                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) }
+                FilterProp::Attacking { defender: Some(ControllerRef::DefendingPlayer) , .. }
             ))
         ),
         "the choose clause still reads the defending player: {target:?}"
@@ -48839,4 +48903,59 @@ fn trigger_observer_foreign_source_refinement_declines_to_unknown() {
         execute.effect
     );
     assert_no_unimplemented(execute);
+}
+
+#[test]
+fn delayed_player_damage_head_preserves_recipient_and_remainder() {
+    use BatchedDamageRecipient as Recipient;
+    for (recipient, expected) in [
+        ("a player", Recipient::APlayer),
+        ("one or more players", Recipient::OneOrMorePlayers),
+        ("defending player", Recipient::DefendingPlayer),
+    ] {
+        let head = format!("one or more creatures you control deal combat damage to {recipient}");
+        let (rest, parsed) = parse_batched_damage_head(&head).unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(parsed.recipient, expected);
+        assert_eq!(
+            parsed.source,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
+        assert_eq!(parsed.source_remainder, "");
+        let with_tail = format!("{head} with hexproof");
+        let (rest, parsed) = parse_batched_damage_head(&with_tail).unwrap();
+        assert_eq!(rest, " with hexproof");
+        assert_eq!(parsed.recipient, expected);
+    }
+    for recipient in ["a player", "one or more players"] {
+        let head = format!(
+            "one or more creatures you control deal combat 3 or more damage to {recipient}"
+        );
+        let (rest, parsed) = parse_batched_damage_head(&head).expect("shared threshold");
+        assert_eq!(rest, "");
+        assert_eq!(parsed.threshold.map(|(_, threshold)| threshold), Some(3));
+    }
+    let (_, printed) = try_parse_one_or_more_combat_damage_to_player(
+        "whenever one or more creatures you control deal combat 3 or more damage to a player",
+    )
+    .expect("printed wrapper accepts the consumed threshold");
+    assert_eq!(printed.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(printed.damage_amount, None);
+    let (rest, mixed) = parse_batched_damage_head(
+        "one or more creatures you control deal combat damage to a player or a battle",
+    )
+    .expect("mixed recipient");
+    assert_eq!(rest, "");
+    assert!(matches!(
+        mixed.recipient,
+        Recipient::Other(TargetFilter::Or { .. })
+    ));
+    let with_flying = "one or more creatures you control with flying and an unknown ability deal combat damage to a player";
+    let (_, parsed) = parse_batched_damage_head(with_flying).unwrap();
+    assert_eq!(parsed.recipient, Recipient::APlayer);
+    assert_eq!(parsed.source_remainder.trim(), "and an unknown ability");
+    assert!(try_parse_one_or_more_combat_damage_to_player(
+        "whenever one or more creatures you control deal combat damage to one or more players"
+    )
+    .is_none());
 }

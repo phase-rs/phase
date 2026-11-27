@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FilterProp::Attacking gains optional scope: DirectPlayer, omitted for the existing DefendingSide default. TokenSpec keeps its optional numeric blocking_attacker and adds optional numeric blocking_attacker_incarnation. CopyTokenSpec, LiminalEntry, PendingTokenBattlefieldEntry, and the FinalizeCopyTokenEntry, ApplyCopyTokenModificationsAndFinalize, and FinalizeCommittedLiminalTokenEntry counter continuations gain an optional blocking_attacker object with object_id and incarnation. Main saves retain ID-only blocking for proposals without a pin."
+}

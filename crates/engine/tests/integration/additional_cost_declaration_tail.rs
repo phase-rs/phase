@@ -4060,3 +4060,345 @@ fn choice_branch_affordable_only_with_the_defiler_is_castable() {
     assert_eq!(life(&runner), 18, "the Defiler's 2 life");
     assert_eq!(pool(&runner), 0, "{{2}}{{B}} + {{1}} less {{B}}");
 }
+
+fn add_asmo(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Asmoranomardicadaistinaculdacar",
+            3,
+            3,
+            ASMORANOMARDICADAISTINACULDACAR,
+        )
+        .with_mana_cost(ManaCost::NoCost)
+        .as_legendary()
+        .with_color(vec![ManaColor::Black, ManaColor::Red])
+        .id()
+}
+
+fn asmo_looting_board(
+    commander: bool,
+    color: ManaType,
+    tax_mana: usize,
+    as_foretold: bool,
+) -> (GameRunner, ObjectId, Option<ObjectId>) {
+    let mut scenario = if commander {
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 647)
+    } else {
+        GameScenario::new()
+    };
+    scenario.at_phase(Phase::PreCombatMain);
+    let asmo = add_asmo(&mut scenario);
+    let grant = as_foretold.then(|| {
+        scenario
+            .add_enchantment_from_oracle(P0, "As Foretold", AS_FORETOLD)
+            .id()
+    });
+    if commander {
+        scenario.with_commander(asmo);
+    }
+    let looting = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Faithless Looting",
+            false,
+            "Draw two cards, then discard two cards.\nFlashback {2}{R}",
+        )
+        .with_mana_cost(cost(0, &[ManaCostShard::Red]))
+        .id();
+    scenario.add_spell_to_hand(P0, "Shock", true);
+    scenario.add_card_to_library_top(P0, "Swamp");
+    scenario.add_card_to_library_top(P1, "Plains");
+    let draws = [
+        scenario.add_card_to_library_top(P0, "Island"),
+        scenario.add_card_to_library_top(P0, "Mountain"),
+    ];
+    scenario.with_mana_pool(
+        P0,
+        mana(&[
+            (ManaType::Red, 1),
+            (color, 1),
+            (ManaType::Colorless, tax_mana),
+        ]),
+    );
+    let mut runner = scenario.build();
+    if commander {
+        runner.state_mut().commander_cast_count.insert(asmo, 1);
+    }
+    if grant.is_none() {
+        assert!(!offered(&runner, asmo));
+        assert!(
+            runner.act(cast_action(&runner, asmo)).is_err(),
+            "dispatch must also reject an attempted cast before discarding"
+        );
+    }
+    runner.cast(looting).commit();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    runner
+        .act(GameAction::SelectCards {
+            cards: draws.to_vec(),
+        })
+        .unwrap();
+    assert!(draws.iter().all(|id| zone(&runner, *id) == Zone::Graveyard));
+    (runner, asmo, grant)
+}
+
+fn asmo_after_looting(commander: bool, color: ManaType, tax: usize) {
+    let (mut runner, asmo, _) = asmo_looting_board(commander, color, tax, false);
+    assert!(offered(&runner, asmo), "Asmo must be offered after Looting");
+    assert_eq!(
+        engine::game::casting::display_spell_cost(runner.state(), P0, asmo),
+        Some(cost(tax as u32, &[ManaCostShard::BlackRed]))
+    );
+
+    let trail = cast(&mut runner, asmo, &ACCEPT_BOTH);
+    assert_cast_completes(&runner, asmo, &trail);
+    assert_eq!(
+        trail.count("OptionalCostChoice"),
+        0,
+        "only the hybrid payment is possible"
+    );
+    assert_eq!(
+        runner.state().commander_cast_count.get(&asmo).copied(),
+        commander.then_some(2)
+    );
+    assert_eq!(pool(&runner), 0);
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert_eq!(zone(&runner, asmo), Zone::Battlefield);
+}
+
+#[test]
+fn asmo_after_discard_from_hand() {
+    asmo_after_looting(false, ManaType::Black, 0);
+}
+
+#[test]
+fn asmo_after_discard_from_command_with_tax() {
+    asmo_after_looting(true, ManaType::Red, 2);
+}
+
+#[test]
+fn asmo_after_discard_rejects_wrong_color_and_short_commander_tax() {
+    for (commander, color, tax) in [(false, ManaType::Blue, 0), (true, ManaType::Red, 1)] {
+        let (mut runner, asmo, _) = asmo_looting_board(commander, color, tax, false);
+        assert_eq!(
+            engine::game::casting::display_spell_cost(runner.state(), P0, asmo),
+            Some(cost(
+                if commander { 2 } else { 0 },
+                &[ManaCostShard::BlackRed]
+            ))
+        );
+        assert!(!offered(&runner, asmo));
+        assert!(runner.act(cast_action(&runner, asmo)).is_err());
+        assert_eq!(
+            zone(&runner, asmo),
+            if commander { Zone::Command } else { Zone::Hand }
+        );
+        assert_eq!(pool(&runner), tax + 1);
+        let missing = if commander {
+            ManaType::Colorless
+        } else {
+            ManaType::Black
+        };
+        runner.state_mut().players[0]
+            .mana_pool
+            .add(mana(&[(missing, 1)]).pop().unwrap());
+        assert!(
+            offered(&runner, asmo),
+            "supplying the missing mana opens the same cast"
+        );
+    }
+}
+
+#[test]
+fn asmo_after_discard_chooses_between_own_cost_and_as_foretold() {
+    for index in [0, 1] {
+        let (mut runner, asmo, grant) = asmo_looting_board(false, ManaType::Red, 0, true);
+        runner.act(cast_action(&runner, asmo)).unwrap();
+        let WaitingFor::OptionalCostChoice {
+            cost: engine::types::ability::AdditionalCost::Choice(options),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the caster should be able to choose either alternative")
+        };
+        assert_eq!(
+            options,
+            &[
+                engine::types::ability::AbilityCost::Mana {
+                    cost: cost(0, &[ManaCostShard::BlackRed])
+                },
+                engine::types::ability::AbilityCost::Mana {
+                    cost: ManaCost::zero()
+                },
+            ]
+        );
+        let trail = drive(
+            &mut runner,
+            GameAction::DecideOptionalCost { index },
+            &ACCEPT_BOTH,
+        );
+        assert_cast_completes(&runner, asmo, &trail);
+        assert_eq!(pool(&runner), index);
+        assert_eq!(
+            runner
+                .state()
+                .alt_cost_grant_permissions_used
+                .contains(&grant.unwrap()),
+            index == 1
+        );
+    }
+}
+
+#[test]
+fn asmo_opponents_discard_does_not_open_its_alternative() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let asmo = add_asmo(&mut scenario);
+    let mut add_crime = || {
+        scenario.add_spell_to_hand_from_oracle(P0, "Raven's Crime", false,
+        "Target player discards a card.\nRetrace (You may cast this card from your graveyard by discarding a land card in addition to paying its other costs.)")
+        .with_mana_cost(cost(0, &[ManaCostShard::Black])).id()
+    };
+    let crime = add_crime();
+    let second_crime = add_crime();
+    let own_card = scenario.add_spell_to_hand(P0, "Shock", true).id();
+    let card = scenario.add_spell_to_hand(P1, "Shock", true).id();
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Black, 3)]));
+    let mut runner = scenario.build();
+    runner.cast(crime).target_player(P1).resolve();
+    assert_eq!(zone(&runner, card), Zone::Graveyard);
+    assert_eq!(pool(&runner), 2);
+    assert!(!offered(&runner, asmo));
+    assert!(runner.act(cast_action(&runner, asmo)).is_err());
+    runner
+        .cast(second_crime)
+        .target_player(P0)
+        .discard(&[own_card])
+        .resolve();
+    assert_eq!(zone(&runner, own_card), Zone::Graveyard);
+    assert!(offered(&runner, asmo));
+    let trail = cast(&mut runner, asmo, &ACCEPT_BOTH);
+    assert_cast_completes(&runner, asmo, &trail);
+    assert_eq!(pool(&runner), 0);
+}
+
+#[test]
+fn asmo_after_discard_expires_before_the_next_own_main_phase() {
+    let (mut runner, asmo, _) = asmo_looting_board(false, ManaType::Black, 0, false);
+    assert!(offered(&runner, asmo));
+    let start_turn = runner.state().turn_number;
+    for _ in 0..128 {
+        if runner.state().turn_number > start_turn
+            && runner.state().active_player == P0
+            && runner.state().phase == Phase::PreCombatMain
+        {
+            break;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                attacks: vec![],
+                bands: vec![],
+            },
+            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                assignments: vec![],
+            },
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            unexpected => panic!("unexpected turn-advance prompt: {unexpected:?}"),
+        };
+        runner.act(action).expect("the empty board advances");
+    }
+    assert!(runner.state().turn_number > start_turn);
+    assert_eq!(
+        (runner.state().active_player, runner.state().phase),
+        (P0, Phase::PreCombatMain)
+    );
+    assert_eq!(pool(&runner), 0);
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(mana(&[(ManaType::Black, 1)]).pop().unwrap());
+    assert_eq!(pool(&runner), 1);
+    assert!(!offered(&runner, asmo));
+    assert!(runner.act(cast_action(&runner, asmo)).is_err());
+}
+
+#[test]
+fn asmo_after_discard_can_be_paid_with_skirge_familiar_in_the_mana_window() {
+    for has_fodder in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let asmo = add_asmo(&mut scenario);
+        let familiar = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Skirge Familiar",
+                3,
+                2,
+                "Flying\nDiscard a card: Add {B}.",
+            )
+            .id();
+        let fodder = has_fodder.then(|| scenario.add_land_to_hand(P0, "Swamp").id());
+        let looting = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Faithless Looting",
+                false,
+                "Draw two cards, then discard two cards.\nFlashback {2}{R}",
+            )
+            .with_mana_cost(cost(0, &[ManaCostShard::Red]))
+            .id();
+        let draws = [
+            scenario.add_card_to_library_top(P0, "Island"),
+            scenario.add_card_to_library_top(P0, "Mountain"),
+        ];
+        scenario.with_mana_pool(P0, mana(&[(ManaType::Red, 1)]));
+        let mut runner = scenario.build();
+        runner.cast(looting).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .act(GameAction::SelectCards {
+                cards: draws.to_vec(),
+            })
+            .unwrap();
+        assert!(draws.iter().all(|id| zone(&runner, *id) == Zone::Graveyard));
+        assert_eq!(pool(&runner), 0);
+        let action = engine::ai_support::legal_actions(runner.state()).into_iter().find(|action| matches!(action, GameAction::CastSpell{object_id,..} if *object_id == asmo));
+        let Some(fodder) = fodder else {
+            assert!(
+                action.is_none(),
+                "the Familiar cannot discard the spell being cast"
+            );
+            assert!(runner.act(cast_action(&runner, asmo)).is_err());
+            continue;
+        };
+        runner
+            .act(action.expect("Asmo must be offered with a payable manual mana source"))
+            .unwrap();
+        assert_eq!(runner.waiting_for_kind(), "ManaPayment");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: familiar,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
+            panic!("missing discard selection")
+        };
+        assert_eq!(choices, &[fodder]);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![fodder],
+            })
+            .unwrap();
+        assert_eq!(zone(&runner, fodder), Zone::Graveyard);
+        assert_eq!(pool(&runner), 1);
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(zone(&runner, asmo), Zone::Stack);
+        assert!(runner.state().stack.iter().any(|entry| entry.id == asmo));
+        assert_eq!(pool(&runner), 0);
+    }
+}

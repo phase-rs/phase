@@ -3320,7 +3320,7 @@ enum UnwindowedWhenever {
 }
 
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::Delayed)
+    try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::Delayed).map(|(clause, _)| clause)
 }
 
 /// CR 603.4 + CR 608.2c: does this delayed body's intervening-if test the
@@ -3403,10 +3403,135 @@ fn condition_reads_the_event_subject(condition: &AbilityCondition) -> bool {
     }
 }
 
-fn try_parse_whenever_this_turn_from(
-    tp: TextPair,
+enum DelayedPlayerDamageAdmission {
+    OutsideFamily,
+    Unsupported,
+    Admitted(Box<TriggerDefinition>),
+}
+
+fn delayed_player_damage_admission(head: &str) -> DelayedPlayerDamageAdmission {
+    use super::oracle_trigger::{parse_batched_damage_head, BatchedDamageRecipient};
+    use crate::types::ability::DamageKindFilter;
+    use DelayedPlayerDamageAdmission as Admission;
+
+    let Ok((rest, head)) = parse_batched_damage_head(head) else {
+        return Admission::OutsideFamily;
+    };
+    let TargetFilter::Typed(source) = &head.source else {
+        return Admission::OutsideFamily;
+    };
+    if source.type_filters != [TypeFilter::Creature]
+        || source.controller != Some(ControllerRef::You)
+        || head.damage_kind != DamageKindFilter::CombatOnly
+    {
+        return Admission::OutsideFamily;
+    }
+    // CR 603.2c: “one or more players” groups the damage step into one occurrence,
+    // while “a player” triggers separately for each damaged player.
+    let mode = match (&head.recipient, source.properties.as_slice()) {
+        (BatchedDamageRecipient::DefendingPlayer | BatchedDamageRecipient::Other(_), _) => {
+            return Admission::OutsideFamily;
+        }
+        // The whole-step matcher currently requires an unqualified creature filter.
+        (BatchedDamageRecipient::OneOrMorePlayers, []) => TriggerMode::DamageDoneOnce,
+        (
+            BatchedDamageRecipient::APlayer,
+            []
+            | [FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            }],
+        ) => TriggerMode::DamageDone,
+        (BatchedDamageRecipient::APlayer | BatchedDamageRecipient::OneOrMorePlayers, _) => {
+            return Admission::Unsupported;
+        }
+    };
+    if !rest.is_empty() || !head.source_remainder.trim().is_empty() || head.threshold.is_some() {
+        return Admission::Unsupported;
+    }
+    let mut trigger = TriggerDefinition::new(mode).trigger_zones(vec![Zone::Battlefield]);
+    trigger.valid_source = Some(head.source);
+    trigger.valid_target = Some(TargetFilter::Player);
+    trigger.damage_kind = head.damage_kind;
+    trigger.batched = true;
+    Admission::Admitted(Box::new(trigger))
+}
+
+// CR 608.2c: consume every instruction before lowering or installing the watcher.
+fn parse_delayed_player_damage_body(
+    body: &str,
+    ctx: &mut ParseContext,
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
+    type Instruction<'a> = (
+        &'a str,
+        (ImperativeFamilyAst, Option<TargetFilter>),
+        Option<ClauseBoundary>,
+    );
+
+    fn parse_instruction<'a>(
+        input: &'a str,
+        ctx: &mut ParseContext,
+    ) -> OracleResult<'a, Instruction<'a>> {
+        let (remainder, instruction) = recognize(many_till(
+            anychar,
+            peek(alt((
+                value((), sequence::parse_delayed_body_separator),
+                value((), tag(".")),
+                value((), eof),
+            ))),
+        ))
+        .parse(input)?;
+        let instruction = instruction.trim();
+        let (_, ast) =
+            all_consuming(|input| imperative::parse_delayed_player_instruction(input, ctx))
+                .parse(instruction)?;
+        let (_, boundary) = opt(peek(sequence::parse_delayed_body_separator)).parse(remainder)?;
+        Ok((remainder, (instruction, ast, boundary)))
+    }
+
+    let lower = body.trim().to_lowercase();
+    let (_, instructions) = all_consuming(terminated(
+        separated_list1(sequence::parse_delayed_body_separator, |input| {
+            parse_instruction(input, ctx)
+        }),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+
+    let mut builder = ClauseIrBuilder::new(&lower);
+    for (text, instruction, boundary) in instructions {
+        builder
+            .clause(
+                text,
+                parsed_clause(imperative::lower_delayed_player_instruction(instruction)),
+                boundary,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+    }
+    Some(lower::lower_effect_chain_ir_with_provenance(
+        &EffectChainIr {
+            clauses: builder.finish(),
+            kind: AbilityKind::Spell,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor: ctx.actor.clone(),
+            in_trigger: ctx.in_trigger,
+            repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
+        },
+    ))
+}
+
+fn try_parse_whenever_this_turn_from<'a>(
+    tp: TextPair<'a>,
     unwindowed: UnwindowedWhenever,
-) -> Option<ParsedEffectClause> {
+) -> Option<(ParsedEffectClause, Option<&'a str>)> {
+    let source_text = tp.original;
     // CR 603.7b: capture a leading stated duration as the delayed trigger's
     // EXPIRY (its own lifetime), not the enclosing clause's duration. This runs
     // at the head so it precedes the outer `strip_leading_duration` dispatch site,
@@ -3526,14 +3651,36 @@ fn try_parse_whenever_this_turn_from(
         spell_anaphor_binding: SpellAnaphorBinding::EventSource,
         ..ParseContext::default()
     };
-    let mut trigger_def = parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
-        .unwrap_or_else(|| {
-            let (_, trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
-                condition_text,
-                &mut inner_ctx,
-            );
-            trigger_def
-        });
+    let admission = if leading.is_none() {
+        parse_delayed_this_turn_head(tp)
+            .map(|(head, body)| (delayed_player_damage_admission(head), body))
+    } else {
+        None
+    };
+    let (strict_body, mut trigger_def, effect_text) = match admission {
+        Some((DelayedPlayerDamageAdmission::Admitted(trigger), body)) => (true, *trigger, body),
+        Some((DelayedPlayerDamageAdmission::Unsupported, _)) => {
+            return Some((
+                parsed_clause(Effect::unimplemented(
+                    "delayed_player_damage_head",
+                    before.original,
+                )),
+                None,
+            ));
+        }
+        None | Some((DelayedPlayerDamageAdmission::OutsideFamily, _)) => (
+            false,
+            parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
+                .unwrap_or_else(|| {
+                    let (_, trigger_def) = super::oracle_trigger::parse_trigger_condition(
+                        condition_text,
+                        &mut inner_ctx,
+                    );
+                    trigger_def
+                }),
+            effect_text,
+        ),
+    };
     trigger_def.execute = None; // Effect lives in DelayedTrigger.ability, not here
 
     // CR 109.4 + CR 115.1 + CR 506.2: The trigger condition may
@@ -3546,6 +3693,10 @@ fn try_parse_whenever_this_turn_from(
     // is already lowercase (`before.lower`).
     inner_ctx.relative_player_scope =
         crate::parser::oracle_trigger::relative_player_scope_for_condition(condition_text);
+    if strict_body {
+        inner_ctx.relative_player_scope = (trigger_def.mode == TriggerMode::DamageDone)
+            .then_some(ControllerRef::TriggeringPlayer);
+    }
     // CR 608.2k: an untargeted object anaphor in the delayed effect body names
     // the object the trigger condition referred to — the per-firing attacker or
     // blocker ("it gets +0/+1" — Battle Cry), the damage recipient ("is dealt
@@ -3560,12 +3711,25 @@ fn try_parse_whenever_this_turn_from(
     inner_ctx.object_pronoun_ref = anaphors.object_pronoun_ref;
     inner_ctx.condition_object_antecedent = anaphors.condition_object_antecedent;
     inner_ctx.demonstrative_object_ref = anaphors.demonstrative_object_ref;
-    let inner_lowered = parse_nested_effect_chain_with_damage_context_and_provenance(
-        effect_text,
-        AbilityKind::Spell,
-        &mut inner_ctx,
-        DamageTargetContext::InheritedTargets,
-    );
+    let inner_lowered = if strict_body {
+        let Some(body) = parse_delayed_player_damage_body(effect_text, &mut inner_ctx) else {
+            return Some((
+                parsed_clause(Effect::unimplemented(
+                    "delayed_player_damage_body",
+                    effect_text,
+                )),
+                None,
+            ));
+        };
+        body
+    } else {
+        parse_nested_effect_chain_with_damage_context_and_provenance(
+            effect_text,
+            AbilityKind::Spell,
+            &mut inner_ctx,
+            DamageTargetContext::InheritedTargets,
+        )
+    };
     let inner = inner_lowered.value;
     // CR 603.4: a delayed body that opens with an intervening "if" clause must
     // carry that condition on its root ability. When the shared conditional
@@ -3601,7 +3765,7 @@ fn try_parse_whenever_this_turn_from(
         inner
     };
 
-    Some(ParsedEffectClause {
+    let clause = ParsedEffectClause {
         history: inner_lowered
             .history
             .into_iter()
@@ -3632,7 +3796,8 @@ fn try_parse_whenever_this_turn_from(
         optional: false,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
-    })
+    };
+    Some((clause, strict_body.then_some(source_text)))
 }
 
 /// Decompose the spell qualifier from `"when you next cast a <payload> this turn, ..."`
@@ -4496,16 +4661,23 @@ pub(crate) fn try_parse_temporal_delayed_trigger_ability(
 ) -> Option<AbilityIr> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    let clause = try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine)
-        .or_else(|| try_parse_when_next_event(tp))
-        .or_else(|| try_parse_copy_next_spell_when_cast(tp))
-        .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))?;
+    let (clause, description) =
+        try_parse_whenever_this_turn_from(tp, UnwindowedWhenever::PrintedLine).or_else(|| {
+            try_parse_when_next_event(tp)
+                .or_else(|| try_parse_copy_next_spell_when_cast(tp))
+                .or_else(|| try_parse_at_next_phase_delayed_trigger(text, kind, antecedents))
+                .map(|clause| (clause, None))
+        })?;
+    let root_transforms = description
+        .map(|sentence| AbilityRootTransform::SetDescription(sentence.to_string()))
+        .into_iter()
+        .collect();
     Some(AbilityIr {
         source_text: text.to_string(),
         body: EffectChainIr::single_clause(text, kind, clause, None, None, false),
         shell: AbilityShellIr::default(),
         die_results: vec![],
-        root_transforms: vec![],
+        root_transforms,
         modal: None,
     })
 }
@@ -6421,6 +6593,58 @@ fn rebind_triggering_source_to_parent_target(ability: &mut AbilityDefinition) {
     }
 }
 
+/// CR 603.7b: Split a delayed "When/Whenever <event> this turn, <body>" head at its
+/// effect boundary, returning the event text before the stated duration and the body.
+pub(super) fn parse_delayed_this_turn_head(tp: TextPair<'_>) -> Option<(&str, &str)> {
+    let (head, _) = terminated(
+        alt((tag::<_, _, OracleError<'_>>("whenever"), tag("when"))),
+        space1,
+    )
+    .parse(tp.lower)
+    .ok()?;
+    let boundary = super::oracle_trigger::find_effect_boundary(head)?;
+    let comma = tp.lower.len() - head.len() + boundary;
+    let head = &head[..boundary];
+    let window = nom_primitives::scan_at_word_boundaries(head, |input| {
+        recognize(all_consuming(pair(
+            tag("this"),
+            preceded(space1, tag("turn")),
+        )))
+        .parse(input)
+    })?;
+    let event = head[..head.len() - window.len()].trim_end();
+    if event.is_empty() {
+        return None;
+    }
+    let body = TextPair::new(&tp.original[comma..], &tp.lower[comma..]);
+    let ((), body) = nom_on_lower(body.original, body.lower, |input| {
+        value((), pair(tag(","), space1)).parse(input)
+    })?;
+    Some((event, body))
+}
+
+/// CR 603.7b + CR 603.7c: "When that creature dies this turn, ..." naming the single
+/// declared slot "that creature" resolves to; the stated duration keeps the watcher
+/// until cleanup.
+fn parse_declared_creature_death_this_turn<'a>(
+    tp: TextPair<'a>,
+    ctx: &ParseContext,
+) -> Option<(DelayedTriggerCondition, &'a str)> {
+    let (head, body) = parse_delayed_this_turn_head(tp)?;
+    let (verb, _) = tag::<_, _, OracleError<'_>>("that creature")
+        .parse(head)
+        .ok()?;
+    let (slot, _) = resolve_declared_slot_anaphor(head, ctx)?;
+    let trigger = super::oracle_trigger::parse_declared_creature_death(verb, slot)?;
+    Some((
+        DelayedTriggerCondition::WheneverEvent {
+            trigger: Box::new(trigger),
+            expiry: WheneverEventExpiry::EndOfTurn,
+        },
+        body,
+    ))
+}
+
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
 fn try_parse_inline_delayed_trigger(
@@ -6461,6 +6685,8 @@ fn try_parse_inline_delayed_trigger(
     // single-event `scan_delayed_condition_kind` path, which would otherwise
     // drop the second disjunct.
     let mut self_disjunction = false;
+    let mut declared_death = false;
+    let mut effect_text = effect_text;
     let condition = if let Some(trigger) =
         parse_dealt_damage_this_way_dies_trigger(condition_text, ctx)
     {
@@ -6485,6 +6711,10 @@ fn try_parse_inline_delayed_trigger(
             or_trigger: Some(Box::new(or_trigger)),
             lifetime: DelayedTriggerLifetime::Persistent,
         }
+    } else if let Some((condition, body)) = parse_declared_creature_death_this_turn(tp, ctx) {
+        declared_death = true;
+        effect_text = body;
+        condition
     } else {
         match scan_delayed_condition_kind(condition_text) {
             Some(DelayedConditionKind::Dies | DelayedConditionKind::PutIntoGraveyard) => {
@@ -6515,7 +6745,7 @@ fn try_parse_inline_delayed_trigger(
     // "that creature/permanent/token" references the parent spell's target.
     // "the exiled creature/card" and "the targeted creature" also reference
     // the parent's tracked set.
-    let uses_tracked_set = scan_tracked_set_reference(condition_text);
+    let uses_tracked_set = !declared_death && scan_tracked_set_reference(condition_text);
 
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed `inner` is
     // kept, `inner_ctx` is dropped.
@@ -6523,6 +6753,10 @@ fn try_parse_inline_delayed_trigger(
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     inner_ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
     inner_ctx.subject = match &condition {
+        DelayedTriggerCondition::WheneverEvent { trigger, .. } if declared_death => trigger
+            .valid_card
+            .as_ref()
+            .map(|_| TargetFilter::ParentTarget),
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
         | DelayedTriggerCondition::WhenEntersBattlefield { filter }
@@ -7404,8 +7638,8 @@ fn try_parse_standing_top_library_permission(
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 
-    let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
-        alt((
+    let (affected_players, predicate) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
+        let scope = alt((
             value(
                 RestrictionPlayerScope::OpponentsOfSourceController,
                 tag("your opponents"),
@@ -7430,7 +7664,9 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             // add_restriction + parent_target_controller. The sub-ability inherits
             // the counter's target at effects/mod.rs:7441-7450.
             value(
-                RestrictionPlayerScope::ParentObjectTargetController,
+                RestrictionPlayerScope::ParentObjectTarget {
+                    possession: crate::types::ability::PossessionAxis::Controller,
+                },
                 tag("its controller"),
             ),
             // CR 508.5: "defending player" — the player being attacked by the
@@ -7445,50 +7681,65 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             // Ordered LAST so the longer "your opponents" possessive tag above
             // cannot be shadowed by this "you" prefix.
             value(RestrictionPlayerScope::SourceController, tag("you")),
-        ))
-        .parse(input)
+        ));
+        terminated(scope, tag(" ")).parse(input)
     })?;
-    let rest_lower = &scope_tp.lower[scope_tp.lower.len() - rest_orig.len()..];
+    let predicate_lower = &scope_tp.lower[scope_tp.lower.len() - predicate.len()..];
+    parse_cant_cast_predicate(
+        tp.original,
+        TextPair::new(predicate, predicate_lower),
+        affected_players,
+        expiry,
+        duration,
+    )
+}
 
-    let (spell_filter_text, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+/// CR 601.3: both a printed player prefix and an already-bound subject use
+/// the same cast prohibition, spell filter, duration and continuation grammar.
+fn parse_cant_cast_predicate(
+    clause_text: &str,
+    predicate: TextPair<'_>,
+    affected_players: RestrictionPlayerScope,
+    expiry: RestrictionExpiry,
+    duration: Option<Duration>,
+) -> Option<ParsedEffectClause> {
+    let (spell_filter, remaining) = nom_on_lower(predicate.original, predicate.lower, |input| {
+        let (input, _) = (alt((tag("can't"), tag("cannot"))), tag(" cast ")).parse(input)?;
         alt((
-            value(None, tag(" can't cast spells")),
-            value(None, tag(" cannot cast spells")),
-            // CR 101.2: "additional/more/another spell(s)" is an incremental
-            // BLANKET ban (spell_filter None), not a spell-type filter — consume
-            // the qualifier wholesale before the generic filtered arm below can
-            // mis-read "additional" as a type phrase. Composed as two
-            // independent axes (can't/cannot × additional/more/another) rather
-            // than enumerating the permutations.
+            map(
+                preceded(
+                    tag("spells "),
+                    verify(super::oracle_target::parse_same_name_suffix, |prop| {
+                        matches!(prop, FilterProp::SameNameAsParentTarget)
+                    }),
+                ),
+                |prop| {
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![prop]),
+                    ))
+                },
+            ),
             value(
                 None,
-                (
-                    alt((tag(" can't cast "), tag(" cannot cast "))),
-                    alt((
-                        tag("additional spells"),
-                        tag("more spells"),
-                        tag("another spell"),
-                    )),
-                ),
+                alt((
+                    tag("spells"),
+                    tag("additional spells"),
+                    tag("more spells"),
+                    tag("another spell"),
+                )),
             ),
-            map(
-                preceded(
-                    tag(" can't cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
-                ),
-                |text: &str| Some(text.to_string()),
-            ),
-            map(
-                preceded(
-                    tag(" cannot cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
-                ),
-                |text: &str| Some(text.to_string()),
+            map_opt(
+                terminated(take_until(" spells"), tag(" spells")),
+                |text: &str| {
+                    let (filter, rem) = parse_type_phrase_folding(text.trim());
+                    (rem.trim().is_empty() && !matches!(filter, TargetFilter::Any))
+                        .then_some(Some(filter))
+                },
             ),
         ))
         .parse(input)
     })?;
-    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+    let remaining_lower = &predicate.lower[predicate.lower.len() - remaining.len()..];
 
     if tag::<_, _, OracleError<'_>>(" from")
         .parse(remaining_lower)
@@ -7526,17 +7777,6 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         _ => (duration, remaining),
     };
 
-    let spell_filter = match spell_filter_text {
-        None => None,
-        Some(text) => {
-            let (filter, rem) = parse_type_phrase_folding(text.trim());
-            if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
-                return None;
-            }
-            Some(filter)
-        }
-    };
-
     let tail = remaining
         .trim_start()
         .trim_start_matches([',', ' '])
@@ -7567,7 +7807,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     let clause = ParsedEffectClause {
         history,
         // The continuation owns its text and history, independently of this restriction.
-        head_text: Some(tp.original[..tp.original.len() - tail.len()].to_string()),
+        head_text: Some(clause_text[..clause_text.len() - tail.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         linked_exile_return: None,
@@ -34931,20 +35171,31 @@ fn lower_subject_predicate_ast_body(
             {
                 return parsed_clause(Effect::Shuffle { target: affected });
             }
+            let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+            if affected == TargetFilter::ParentTargetOwner {
+                if let Some(clause) = parse_cant_cast_predicate(
+                    original_clause,
+                    pred_tp,
+                    RestrictionPlayerScope::ParentObjectTarget {
+                        possession: crate::types::ability::PossessionAxis::Owner,
+                    },
+                    RestrictionExpiry::EndOfTurn,
+                    None,
+                ) {
+                    return clause;
+                }
+            }
             // CR 701.20a: "<player> reveals cards from the top of their library
             // until they reveal a [filter]" — third-person form. The subject
             // (e.g., "its controller", "that player", "target opponent") was
             // extracted into `affected` and identifies whose library is
             // revealed. Must be checked BEFORE the RevealTop fallback below,
             // which would otherwise greedy-match the "reveals/top/library" verbs.
-            {
-                let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
-                if let Some(clause) = try_parse_exile_from_top_until(pred_tp, affected.clone()) {
-                    return clause;
-                }
-                if let Some(clause) = try_parse_reveal_until(pred_tp, affected.clone()) {
-                    return clause;
-                }
+            if let Some(clause) = try_parse_exile_from_top_until(pred_tp, affected.clone()) {
+                return clause;
+            }
+            if let Some(clause) = try_parse_reveal_until(pred_tp, affected.clone()) {
+                return clause;
             }
             // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
             if alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))
@@ -42740,6 +42991,14 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
+    if let Some(gap) = tag::<_, _, OracleError<'_>>("create ")
+        .parse(tp.lower)
+        .ok()
+        .and_then(|_| token::try_fence_token_naming(tp))
+    {
+        return parsed_clause(gap);
+    }
+
     // CR 611.2a + CR 608.2g (run boon-blockers-20261010): pre-`YouMay`
     // one-of-batch interceptor — see `try_parse_one_of_batch_cast_preface`.
     // Matches duration-stated `[you may ](play|cast) one of those
@@ -50240,6 +50499,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     let source_filter =
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::Attacking {
+                scope: Default::default(),
                 defender: Some(ControllerRef::You),
             }]),
         );
@@ -54777,6 +55037,7 @@ fn parse_effect_chain_ir_body(
             // that many tokens" chunk needs it to back-reference the cast spell's
             // colored-pip count instead of the generic EventContextAmount.
             pending_mana_symbol_count_color: ctx.pending_mana_symbol_count_color,
+            blocking_rider_antecedent: ctx.blocking_rider_antecedent.clone(),
             // CR 701.22a + CR 603.2: The completed-scry condition stages its
             // bottom-count provenance on the trigger body. Every chunk must
             // retain it so a following "exile that many cards from the bottom"
@@ -58112,17 +58373,42 @@ fn try_fold_loses_other_sibling(clauses: &mut Vec<ClauseIr>) {
 /// would need a product expression that no bare-token card uses, so it falls
 /// through to the existing `repeat_for` loop.
 fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> bool {
-    if let Effect::Token {
-        count, attach_to, ..
-    } = effect
-    {
-        if attach_to.is_none() && matches!(count, QuantityExpr::Fixed { value: 1 }) {
-            *count = qty.clone();
-            rebind_iteration_destination(effect, qty);
-            return true;
+    let count = match effect {
+        Effect::Token {
+            count,
+            attach_to: None,
+            ..
+        } => count,
+        // CR 608.2c + CR 508.4: the donor is the same linked card for
+        // every opponent and the destination names the iterated player.
+        Effect::CopyTokenOf {
+            target: TargetFilter::ExiledBySource,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            attack_destination:
+                TokenAttackDestination::Player {
+                    player: ControllerRef::DefendingPlayer,
+                    ..
+                },
+            count,
+            ..
+        } if matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { .. }
+            }
+        ) =>
+        {
+            count
         }
+        _ => return false,
+    };
+    if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+        return false;
     }
-    false
+    *count = qty.clone();
+    rebind_iteration_destination(effect, qty);
+    true
 }
 
 /// CR 608.2c: a "for each <players>" iteration folded into one token batch
@@ -58136,6 +58422,9 @@ fn rebind_iteration_destination(effect: &mut Effect, qty: &QuantityExpr) {
         return;
     };
     if let Effect::Token {
+        attack_destination, ..
+    }
+    | Effect::CopyTokenOf {
         attack_destination, ..
     } = effect
     {
