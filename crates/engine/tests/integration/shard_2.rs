@@ -157,6 +157,7 @@ mod birgi;
 mod black_bolt_lethal_voice_destroys_triggering_opponents_permanent;
 mod black_cat_exile_two_face_down;
 mod blessed_orator_other_anthem;
+mod blight_cost_payloads;
 mod block_capacities_blocker_prompt;
 mod block_pairing_relations;
 mod block_trigger_cardinality;

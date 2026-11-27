@@ -77,6 +77,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "UnlessBounceChoice":
     case "ChooseRingBearer":
     case "BlightChoice":
+    case "UnlessBlightChoice":
     case "CrewVehicle":
     case "StationTarget":
     case "SaddleMount":

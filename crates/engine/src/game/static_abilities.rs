@@ -1548,9 +1548,19 @@ pub fn build_cost_permission_context(
     player_id: PlayerId,
     mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
 ) -> crate::types::mana::CostPermissionContext {
+    build_cost_permission_context_for_payment(state, player_id, mana_spend_permission, None)
+}
+
+/// Resolve life substitution permissions for the exact kind of mana payment.
+pub(super) fn build_cost_permission_context_for_payment(
+    state: &GameState,
+    player_id: PlayerId,
+    mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    ctx: Option<&crate::types::mana::PaymentContext<'_>>,
+) -> crate::types::mana::CostPermissionContext {
     crate::types::mana::CostPermissionContext {
         mana_spend_permission,
-        max_life: super::life_costs::max_phyrexian_life_payments(state, player_id),
+        max_life: super::life_costs::max_phyrexian_life_payments_for_payment(state, player_id, ctx),
         life_colors: player_life_payment_colors(state, player_id),
     }
 }

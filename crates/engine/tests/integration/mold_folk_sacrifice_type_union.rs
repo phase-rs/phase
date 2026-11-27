@@ -517,17 +517,12 @@ fn greater_gargadon_activates_from_its_exile_row_after_suspend() {
     let mut runner = scenario.build();
     let hand = public_activations(&runner, gargadon);
     assert_eq!(hand.len(), 1, "select Suspend on the card in hand");
-    let GameAction::ActivateAbility {
-        ability_index: suspend,
-        ..
-    } = hand[0]
-    else {
-        panic!("main still models suspend as an activation (CR 116.2f gap)");
-    };
-    runner
-        .activate(gargadon, suspend)
-        .target_object(gargadon)
-        .resolve();
+    runner.act(hand[0].clone()).unwrap();
+    assert!(
+        runner.state().stack.is_empty(),
+        "suspend doesn't use the stack (CR 116.2f)"
+    );
+    assert_eq!(runner.state().priority_player, P0, "CR 116.3");
     assert_eq!(runner.state().objects[&gargadon].zone, Zone::Exile);
     assert_eq!(
         runner.state().objects[&gargadon].counters[&CounterType::Time],
@@ -948,4 +943,73 @@ fn an_independent_exile_cast_and_the_sacrifice_are_separate_choices() {
     runner.act(activation).unwrap();
     assert_sacrifice_prompt(&runner, &mountains);
     assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+}
+
+/// CR 116.2f: a real non-mana activation triggers Burning-Tree Shaman, but Suspend does not.
+#[test]
+fn suspend_generates_no_activation_event_or_history() {
+    use engine::types::events::{ActivatedAbilityKind, GameEvent};
+
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let mountain = s.add_basic_land(P0, ManaColor::Red);
+    let shaman = s.add_creature_from_oracle(
+        P1, "Burning-Tree Shaman", 3, 4,
+        "Whenever a player activates an ability that isn't a mana ability, this creature deals 1 damage to that player.",
+    ).id();
+    let card = s
+        .add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7, GARGADON)
+        .id();
+    let spare = s
+        .add_creature_to_hand_from_oracle(P0, "Greater Gargadon", 9, 7, GARGADON)
+        .id();
+    let mut r = s.build();
+    let action = public_activations(&r, card)
+        .pop()
+        .expect("Suspend is offered");
+    let finished = r.act(action).expect("take the offered Suspend action");
+    assert!(r.state().stack.is_empty());
+    assert!(r.state().objects[&mountain].tapped);
+    assert_eq!(r.state().objects[&spare].zone, Zone::Hand);
+    assert!(r.state().objects[&spare].counters.is_empty());
+    assert!(!r.state().objects[&card].face_down);
+    assert!(r.state().abilities_activated_this_turn_by_player.is_empty());
+    assert!(finished.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated { source_id, kind: ActivatedAbilityKind::Mana, .. }
+            if *source_id == mountain
+    )));
+    assert!(!finished.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated { source_id, .. } if *source_id == card
+    )));
+    assert!(finished.events.iter().any(|event| matches!(event,
+        GameEvent::CounterAdded { object_id, counter_type: CounterType::Time, count: 10, actor: P0 }
+            if *object_id == card
+    )));
+
+    let sacrifice = public_activations(&r, card)
+        .pop()
+        .expect("real exile activation");
+    r.act(sacrifice).expect("announce the real activation");
+    let result = r
+        .act(GameAction::SelectCards {
+            cards: vec![mountain],
+        })
+        .expect("pay the sacrifice");
+    assert!(result.events.iter().any(
+        |event| matches!(event, GameEvent::AbilityActivated { source_id, .. } if *source_id == card)
+    ));
+    assert_eq!(
+        r.state().abilities_activated_this_turn_by_player[&P0].len(),
+        1
+    );
+    assert_eq!(
+        r.state().stack.last().expect("Shaman's trigger").source_id,
+        shaman
+    );
+    let life = r.state().players[P0.0 as usize].life;
+    r.resolve_top();
+    assert_eq!(r.state().players[P0.0 as usize].life, life - 1);
+    assert_eq!(r.state().objects[&card].counters[&CounterType::Time], 10);
+    r.resolve_top();
+    assert_eq!(r.state().objects[&card].counters[&CounterType::Time], 9);
 }

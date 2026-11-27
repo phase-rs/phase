@@ -3054,6 +3054,9 @@ pub struct AttackDeclarationRecord {
     /// legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<u64>,
+    /// CR 508.3a: This incarnation's declaration ordinal within the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal_this_turn: Option<u32>,
     pub lki: LKISnapshot,
     /// CR 111.1: Token identity at declaration time.
     #[serde(default)]
@@ -12963,6 +12966,9 @@ pub struct PendingCast {
     /// rollback-able announcement choice.
     #[serde(default)]
     pub activation_cost_committed: bool,
+    /// The exact recipient of a Blight payment staged for replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blight_in_flight: Option<ObjectIncarnationRef>,
     /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
     /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
     /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
@@ -13570,6 +13576,8 @@ pub enum PendingCostMoveResume {
         /// the active draw frame (CR 614.11a), never by this suffix.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unpaid_suffix: Option<Box<UnpaidCostSuffix>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blight: Option<UnlessBlightPlacement>,
     },
     /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
     /// a replacement choice (Library of Leng, Madness) partway through its batch.
@@ -13815,6 +13823,13 @@ pub struct UnpaidCostSuffix {
     pub remainder: UnpaidCostRemainder,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessBlightPlacement {
+    pub payer: PlayerId,
+    pub recipient: ObjectIncarnationRef,
+    pub affected_object: Option<ObjectId>,
+}
+
 /// CR 118.12 + CR 702.24a: the shape of an unless-payment's unpaid remainder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UnpaidCostRemainder {
@@ -14014,6 +14029,7 @@ impl PendingCast {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -15113,6 +15129,10 @@ impl WaitingFor {
                 ..
             }
             | WaitingFor::UnlessPaymentChooseCost {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::UnlessBlightChoice {
                 trigger_event: Some(event),
                 ..
             }
@@ -21837,10 +21857,78 @@ impl GameState {
     ///   cursor; any other prompt there would be answered as a fresh choice
     ///   over a payment already begun.
     fn validate_parked_unless_payment(&self) -> Result<(), String> {
+        let in_flight_placement_matches =
+            |payer, recipient: ObjectIncarnationRef, expected_count: Option<u32>| {
+                self.objects
+                .get(&recipient.object_id)
+                .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
+                && self.pending_replacement.as_ref().is_some_and(|pending| {
+                    matches!(
+                        pending.proposed,
+                        ProposedEvent::AddCounter {
+                            placement: super::proposed_event::CounterPlacement::Object {
+                                actor,
+                                object_id,
+                                counter_type: CounterType::Minus1Minus1,
+                                ..
+                            },
+                            count,
+                            ref applied,
+                        } if actor == payer
+                            && object_id == recipient.object_id
+                            && (!applied.is_empty() || expected_count.is_none_or(|expected| expected == count))
+                    )
+                })
+            };
+        let cast_in_flight = self.pending_cast.as_deref().and_then(|cast| {
+            cast.blight_in_flight
+                .map(|recipient| (cast.ability.controller, recipient))
+        });
+        if cast_in_flight
+            .is_some_and(|(payer, recipient)| !in_flight_placement_matches(payer, recipient, None))
+        {
+            return Err("parked cast Blight does not own its counter placement".to_string());
+        }
+        if let WaitingFor::UnlessBlightChoice {
+            player,
+            counters,
+            creatures,
+            cost,
+            pending_effect,
+            trigger_event,
+            ..
+        } = &self.waiting_for
+        {
+            if !self
+                .players
+                .iter()
+                .any(|seat| seat.id == *player && !seat.is_eliminated)
+                || creatures.is_empty()
+                || *creatures
+                    != crate::game::effects::blight::eligible_blight_creatures(
+                        self, *player, *counters,
+                    )
+                || crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
+                    != Some(*counters)
+                || self.pending_cost_move_resume.is_some()
+                || cast_in_flight.is_some()
+                || !valid_unless_blight_referent(
+                    self,
+                    *player,
+                    pending_effect,
+                    trigger_event.as_ref(),
+                )
+            {
+                return Err("invalid parked Blight selection".to_string());
+            }
+        }
         let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
             cost,
+            pending_effect,
+            trigger_event,
             remaining,
             unpaid_suffix,
+            blight,
             ..
         }) = &self.pending_cost_move_resume
         else {
@@ -21852,6 +21940,25 @@ impl GameState {
                 .iter()
                 .any(|seat| seat.id == player && !seat.is_eliminated)
         };
+        if let Some(blight) = blight {
+            let Some(count) = crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
+            else {
+                return Err("invalid parked unless Blight counter placement".to_string());
+            };
+            if !in_game(blight.payer)
+                || cast_in_flight.is_some()
+                || unpaid_suffix.is_some()
+                || !valid_unless_blight_referent(
+                    self,
+                    blight.payer,
+                    pending_effect,
+                    trigger_event.as_ref(),
+                )
+                || !in_flight_placement_matches(blight.payer, blight.recipient, Some(count))
+            {
+                return Err("invalid parked unless Blight counter placement".to_string());
+            }
+        }
         if let Some(player) = remaining.iter().find(|player| !seated(**player)) {
             return Err(format!(
                 "parked unless payment polls {player:?}, who is not a seat"
@@ -24913,6 +25020,18 @@ pub enum WaitingFor {
         #[serde(default)]
         filter: Option<TargetFilter>,
     },
+    /// CR 701.68a: a player chooses the creature receiving an unless payment.
+    UnlessBlightChoice {
+        player: PlayerId,
+        counters: u32,
+        creatures: Vec<ObjectId>,
+        cost: AbilityCost,
+        pending_effect: Box<ResolvedAbility>,
+        trigger_event: Option<GameEvent>,
+        effect_description: Option<String>,
+        remaining: Vec<PlayerId>,
+        affected_object: Option<ObjectId>,
+    },
     /// CR 702.21a: Player must choose a permanent to sacrifice as ward cost payment.
     WardSacrificeChoice {
         player: PlayerId,
@@ -26761,6 +26880,7 @@ impl WaitingFor {
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::UnlessBlightChoice { .. } => "UnlessBlightChoice",
             WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
@@ -26970,6 +27090,7 @@ impl WaitingFor {
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
             | WaitingFor::WardSacrificeChoice { player, .. }
+            | WaitingFor::UnlessBlightChoice { player, .. }
             | WaitingFor::UnlessBounceChoice { player, .. }
             | WaitingFor::ConniveDiscard { player, .. }
             | WaitingFor::CombatTaxPayment { player, .. }
@@ -27307,6 +27428,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseRoomDoor { .. }
@@ -27527,6 +27649,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseRoomDoor { .. }
@@ -34662,6 +34785,11 @@ fn visit_waiting_for_chains<'a>(
             pending_effect,
             trigger_event,
             ..
+        }
+        | WaitingFor::UnlessBlightChoice {
+            pending_effect,
+            trigger_event,
+            ..
         } => f(
             pending_effect,
             SuspendedChainEvent::Bound(trigger_event.as_ref()),
@@ -34872,6 +35000,33 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::PhyrexianPayment { .. } => {}
     }
     Ok(())
+}
+
+fn valid_unless_blight_referent(
+    state: &GameState,
+    payer: PlayerId,
+    pending_effect: &ResolvedAbility,
+    event: Option<&GameEvent>,
+) -> bool {
+    if !matches!(
+        pending_effect.effect,
+        super::ability::Effect::Counter {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ) {
+        return true;
+    }
+    event.is_some_and(|event| {
+        matches!(
+            event,
+            GameEvent::BecomesTarget {
+            target: super::ability::TargetRef::Object(id),
+            targeter: Some(_),
+            ..
+            } if *id == pending_effect.source_id
+        ) && crate::game::targeting::event_referent_controller(state, event) == Some(payer)
+    })
 }
 
 /// Checked persistence compatibility for unresolved attacked-recipient reads.
@@ -36525,6 +36680,16 @@ pub struct DrawSequenceFrame {
     /// the working copy of the seat `player`; the dealer holds the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dealer: Option<DrawDealer>,
+    /// CR 608.2c + CR 121.6b + CR 614.6: the "… this way" zone-change ledger in force
+    /// when this draw instruction began, held only when the instruction is directly
+    /// followed by a "… this way" head naming an earlier instruction
+    /// (`effects::keeps_this_way_ledger_for_following_head`). An action replacing one
+    /// of its draws (Dredge's mill-and-return, Notion Thief's draw) runs as its own
+    /// chain and publishes its own ledger; completion restores this one, so the head
+    /// reads its antecedent whether each draw was performed, replaced at once, or
+    /// replaced after a choice. Omitted when absent; older payloads decode as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_way_antecedent_ledger: Option<Vec<ObjectId>>,
 }
 
 /// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
@@ -36732,6 +36897,7 @@ impl DrawSequenceStack {
             capture_next_child_delivery: false,
             accumulated: 0,
             dealer: None,
+            this_way_antecedent_ledger: None,
         });
         debug_assert!(
             self.validate().is_ok(),
@@ -43552,6 +43718,34 @@ impl GameState {
         // to exist.
         let live: HashSet<ObjectId> = clone.objects.keys().copied().collect();
         clone.last_created_token_ids.retain(|id| live.contains(id));
+        // CR 508.3a + CR 732.2a: a declaration ordinal gates trigger matching.
+        // Once a firing is on the stack, its retained events are resolution
+        // context and never run the attack matcher again.
+        let clear_matched_attack_ordinal = |event: &mut GameEvent| {
+            if let GameEvent::AttackersDeclared {
+                declaration_records,
+                ..
+            } = event
+            {
+                for record in declaration_records {
+                    record.ordinal_this_turn = None;
+                }
+            }
+        };
+        for entry in clone.stack.iter_mut() {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &mut entry.kind
+            {
+                clear_matched_attack_ordinal(event);
+            }
+        }
+        clone
+            .stack_trigger_event_batches
+            .values_mut()
+            .flatten()
+            .for_each(clear_matched_attack_ordinal);
         clone.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
                 if let Some(cards) = record
@@ -62707,6 +62901,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: Some(named),
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62720,6 +62915,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: None,
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62819,6 +63015,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         declaration_records: vec![AttackDeclarationRecord {
                             object_id: x,
                             incarnation: Some(named),
+                            ordinal_this_turn: None,
                             lki,
                             is_token: false,
                             is_commander: false,
@@ -65114,7 +65311,9 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
-                    cost: Box::new(crate::types::ability::AbilityCost::Blight { count: 1 }),
+                    cost: Box::new(crate::types::ability::AbilityCost::Blight {
+                        count: crate::types::ability::BlightCount::Fixed(1),
+                    }),
                     pending_effect: Box::new(ResolvedAbility::new(
                         Effect::NoOp,
                         vec![],
@@ -69121,6 +69320,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 activation_residual: ActivationResidual::None,
                 activation_target_selection: ActivationTargetSelection::Pending,
                 activation_cost_committed: false,
+                blight_in_flight: None,
                 alt_cost_grant_source: None,
                 activation_trigger_collection: None,
                 activation_phyrexian_intent: None,
@@ -69375,7 +69575,9 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
             cost: AdditionalCost::Optional {
-                cost: crate::types::ability::AbilityCost::Blight { count: 1 },
+                cost: crate::types::ability::AbilityCost::Blight {
+                    count: crate::types::ability::BlightCount::Fixed(1),
+                },
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
             times_kicked: 0,
@@ -69824,6 +70026,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -76134,6 +76337,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_event: trigger_event.clone(),
                             effect_description: None,
                             remaining: vec![],
+                            blight: None,
                             unpaid_suffix: None,
                         });
                     state.waiting_for.clone()

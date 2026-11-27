@@ -304,6 +304,34 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], undefined)).toBe(true);
   });
 
+  it("maps Ward Blight to a singleton choice with an explicit decline", () => {
+    const choice = getBoardChoiceView({
+      type: "UnlessBlightChoice",
+      data: {
+        player: 1,
+        counters: 2,
+        creatures: [10, 11],
+        pending_effect: {},
+        cost: { type: "Blight", count: 2 },
+        remaining: [],
+        affected_object: 20,
+        effect_description: "Ward",
+      },
+    });
+    expect(choice).toEqual({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "blight",
+      blightCounters: 2,
+      affectedObject: 20,
+      effectDescription: "Ward",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      skipAction: { type: "PayUnlessCost", data: { pay: false } },
+      skipLabel: "decline",
+    });
+  });
+
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
     const choice = getBoardChoiceView(
       {
@@ -1286,6 +1314,7 @@ const PARTITION_FIXTURES: Record<
   MiracleReveal: NO_TARGET_REF_LEGAL_SET,
   PayCost: NO_TARGET_REF_LEGAL_SET,
   BlightChoice: NO_TARGET_REF_LEGAL_SET,
+  UnlessBlightChoice: NO_TARGET_REF_LEGAL_SET,
   PayManaAbilityMana: NO_TARGET_REF_LEGAL_SET,
   ManaAbilityManaPayment: NO_TARGET_REF_LEGAL_SET,
   ChooseManaColor: NO_TARGET_REF_LEGAL_SET,

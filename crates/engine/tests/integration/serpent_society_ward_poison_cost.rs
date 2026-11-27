@@ -1117,30 +1117,30 @@ fn unmodeled_ward_cost_is_a_parse_gap_not_a_free_ward() {
         unimplemented_mechanics(owlin)
     );
 
-    for (id, ward_line) in [
-        (axebane, "Ward—Collect evidence 4."),
-        (auntie, "Ward—Blight 2."),
-    ] {
-        let obj = &objects[&id];
-        assert!(
-            !obj.keywords.iter().any(|kw| matches!(kw, Keyword::Ward(_))),
-            "{ward_line}: {:?}",
-            obj.keywords
-        );
-        assert!(
-            obj.abilities.iter().any(|def| matches!(
-                &*def.effect,
-                Effect::Unimplemented { description: Some(d), .. } if d == ward_line
-            )),
-            "{ward_line}: {:?}",
-            obj.abilities
-        );
-        assert!(
-            unimplemented_mechanics(obj)
-                .iter()
-                .any(|i| i == "Effect: unknown"),
-            "{ward_line}: {:?}",
-            unimplemented_mechanics(obj)
-        );
-    }
+    assert!(objects[&auntie]
+        .keywords
+        .contains(&Keyword::Ward(WardCost::Blight(2))));
+
+    let obj = &objects[&axebane];
+    let ward_line = "Ward—Collect evidence 4.";
+    assert!(
+        !obj.keywords.iter().any(|kw| matches!(kw, Keyword::Ward(_))),
+        "{ward_line}: {:?}",
+        obj.keywords
+    );
+    assert!(
+        obj.abilities.iter().any(|def| matches!(
+            &*def.effect,
+            Effect::Unimplemented { description: Some(d), .. } if d == ward_line
+        )),
+        "{ward_line}: {:?}",
+        obj.abilities
+    );
+    assert!(
+        unimplemented_mechanics(obj)
+            .iter()
+            .any(|i| i == "Effect: unknown"),
+        "{ward_line}: {:?}",
+        unimplemented_mechanics(obj)
+    );
 }

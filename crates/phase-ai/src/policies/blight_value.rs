@@ -12,30 +12,38 @@ use super::strategy_helpers::sacrifice_cost;
 
 pub struct BlightValuePolicy;
 
-/// Cost of placing a -1/-1 counter on `obj_id`.
+/// Cost of placing `counters` -1/-1 counters on `obj_id`.
 ///
-/// CR 121.3: A -1/-1 counter reduces both power and toughness by 1.
+/// CR 122.1a: A -1/-1 counter reduces both power and toughness by 1.
 /// CR 704.5f: A creature with toughness 0 or less is put into its owner's
 /// graveyard as a state-based action.
 ///
-/// If the creature's toughness is 1 or less, the counter kills it outright —
+/// If the counters reach the creature's toughness, they kill it outright —
 /// cost equals its full sacrifice value. Otherwise, the creature loses
-/// roughly `1 / toughness` of its stat line, so cost scales inversely with
+/// roughly `counters / toughness` of its stat line, so cost scales inversely with
 /// toughness.
-fn blight_cost(state: &GameState, obj_id: ObjectId, penalties: &PolicyPenalties) -> f64 {
+fn blight_cost(
+    state: &GameState,
+    obj_id: ObjectId,
+    counters: u32,
+    penalties: &PolicyPenalties,
+) -> f64 {
+    if counters == 0 {
+        return 0.0;
+    }
     let Some(obj) = state.objects.get(&obj_id) else {
         return 0.0;
     };
     let base = sacrifice_cost(state, obj_id, penalties);
     let toughness = obj.toughness.unwrap_or(0);
-    if toughness <= 1 {
-        // CR 704.5f: at toughness <= 1 the counter kills the creature, so this
+    if toughness.max(0) as u32 <= counters {
+        // CR 704.5f: the counters kill the creature, so this
         // really is a surrender and `sacrifice_cost` is right; above that the
         // divisor damps the residual. A branch-level split is task #38. Pinned
         // by F3(e).
         return base;
     }
-    base / (toughness as f64)
+    base * f64::from(counters) / f64::from(toughness)
 }
 
 impl BlightValuePolicy {
@@ -44,14 +52,16 @@ impl BlightValuePolicy {
         let GameAction::SelectCards { cards } = &ctx.candidate.action else {
             return 0.0;
         };
-        if !matches!(ctx.decision.waiting_for, WaitingFor::BlightChoice { .. }) {
-            return 0.0;
-        }
+        let counters = match ctx.decision.waiting_for {
+            WaitingFor::BlightChoice { counters, .. }
+            | WaitingFor::UnlessBlightChoice { counters, .. } => counters,
+            _ => return 0.0,
+        };
 
         // Score inversely to cost: cheap blight targets produce less negative scores.
         let total_cost: f64 = cards
             .iter()
-            .map(|&obj_id| blight_cost(ctx.state, obj_id, ctx.penalties()))
+            .map(|&obj_id| blight_cost(ctx.state, obj_id, counters, ctx.penalties()))
             .sum();
         -total_cost
     }
@@ -202,6 +212,30 @@ mod tests {
             "Should prefer blighting the 3/5 ({big_score}) over the 3/1 ({small_score}) — \
              the 3/1 dies to its -1/-1 counter"
         );
+        let ward_decision = AiDecisionContext {
+            waiting_for: WaitingFor::UnlessBlightChoice {
+                player: PlayerId(0),
+                counters: 5,
+                creatures: vec![big],
+                cost: engine::types::ability::AbilityCost::Blight {
+                    count: engine::types::ability::BlightCount::Fixed(5),
+                },
+                pending_effect: dummy_pending().ability,
+                trigger_event: None,
+                effect_description: None,
+                remaining: Vec::new(),
+                affected_object: None,
+            },
+            candidates: Vec::new(),
+        };
+        let ward_ctx = PolicyContext {
+            decision: &ward_decision,
+            ..big_ctx
+        };
+        assert_eq!(
+            BlightValuePolicy.score(&ward_ctx),
+            -sacrifice_cost(&state, big, ward_ctx.penalties()),
+        );
     }
 
     /// F3(e): the lethal branch intentionally carries the full commander
@@ -240,7 +274,8 @@ mod tests {
             state.objects.get_mut(&commander).unwrap().toughness = Some(toughness);
             state.objects.get_mut(&bear).unwrap().toughness = Some(toughness);
             assert_eq!(
-                blight_cost(&state, commander, &penalties) - blight_cost(&state, bear, &penalties),
+                blight_cost(&state, commander, 1, &penalties)
+                    - blight_cost(&state, bear, 1, &penalties),
                 expected_delta,
                 "toughness {toughness}: task #38's partial-surrender behavior"
             );
