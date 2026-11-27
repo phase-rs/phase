@@ -1053,6 +1053,7 @@ fn ruric_thar_prowess_only_sees_its_controllers_noncreature_casts() {
     let mut runner = sc.build();
     assert_eq!(runner.state().objects[&ruric].owner, P1);
     assert_eq!(runner.state().objects[&ruric].controller, P0);
+    assert_eq!(prowess_instances(&runner, ruric), 2);
 
     cast(&mut runner, ornithopter, CastPaymentMode::Auto);
     assert!(spell_on_stack(&runner, ornithopter));

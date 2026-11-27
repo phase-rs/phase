@@ -521,8 +521,8 @@ pub fn has_alternative_cost_instance_choice(state: &GameState, object_id: Object
 
 /// CR 113.2c: every effective instance of `kind` on `object_id`, in keyword-list
 /// order (printed first, then grants in application order). Distinct payloads
-/// are distinct instances; identical grants were already collapsed to one by
-/// the keyword-grant policy.
+/// are distinct instances. The keyword-grant policy determines whether
+/// repeated grants remain separate.
 pub fn effective_keyword_instances(
     state: &GameState,
     object_id: ObjectId,
