@@ -715,7 +715,7 @@ fn scan_game_restriction(r: &GameRestriction, mode: ScanMode) -> Axes<'_> {
                 | RestrictionPlayerScope::SpecificPlayer(_)
                 | RestrictionPlayerScope::TargetedPlayer
                 | RestrictionPlayerScope::ParentTargetedPlayer
-                | RestrictionPlayerScope::ParentObjectTargetController
+                | RestrictionPlayerScope::ParentObjectTarget { .. }
                 | RestrictionPlayerScope::OpponentsOfSourceController
                 | RestrictionPlayerScope::DefendingPlayer
                 | RestrictionPlayerScope::SourceController => Axes::NONE,

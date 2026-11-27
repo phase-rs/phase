@@ -4557,9 +4557,9 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    if let Some((prop, consumed)) = parse_same_name_suffix(&lower[pos..]) {
+    if let Ok((rest, prop)) = parse_same_name_suffix(&lower[pos..]) {
         properties.push(prop);
-        pos += consumed;
+        pos = lower.len() - rest.len();
     }
 
     if controller.is_none()
@@ -9645,13 +9645,9 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
 ///     Pulse, the Echoing cycle, Bile Blight, Homing Lightning, Detention Sphere.
 ///     Without it the secondary mass effect drops the name constraint and
 ///     degrades into an unconditional board wipe.
-fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-    let (rest, _) = tag::<_, _, OracleError<'_>>("with the same name as ")
-        .parse(trimmed)
-        .ok()?;
-    let (after, prop) = alt((
+pub(crate) fn parse_same_name_suffix(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, _) = (multispace0, tag("with the same name as ")).parse(input)?;
+    alt((
         value(FilterProp::SameName, tag("~")),
         value(
             FilterProp::SameName,
@@ -9663,8 +9659,6 @@ fn parse_same_name_suffix(text: &str) -> Option<(FilterProp, usize)> {
         ),
     ))
     .parse(rest)
-    .ok()?;
-    Some((prop, leading_ws + (trimmed.len() - after.len())))
 }
 
 /// CR 205: The permanent-type noun naming the "same name" referent ("that
