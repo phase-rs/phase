@@ -31,11 +31,11 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, QuantityExpr,
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::events::{ActivatedAbilityKind, GameEvent};
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor};
 use engine::types::phase::Phase;
@@ -215,6 +215,160 @@ fn ajani_unqualified_loyalty_trigger_uses_production_activation_scope() {
         0,
         "an opponent's loyalty activation must not satisfy Ajani's 'you' scope"
     );
+}
+
+#[test]
+fn ajani_unrelenting_minus_three_spares_activators_tokens_after_control_changes() {
+    const P1: PlayerId = PlayerId(1);
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ajani = scenario
+        .add_planeswalker_from_oracle(P0, "Ajani Unrelenting", "Ajani", 5, AJANI_ORACLE)
+        .as_legendary()
+        .id();
+    let friendly_nontoken = scenario.add_creature(P0, "Friendly Nontoken", 1, 5).id();
+    let opposing_nontoken = scenario.add_creature(P1, "Opposing Nontoken", 1, 5).id();
+    let friendly_token = scenario
+        .add_creature(P1, "Friendly Token", 1, 5)
+        .controlled_by(P0)
+        .id();
+    let opposing_token = scenario
+        .add_creature(P0, "Opposing Token", 1, 5)
+        .controlled_by(P1)
+        .id();
+    let mut runner = scenario.build();
+    for token in [friendly_token, opposing_token] {
+        runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+    }
+    let battlefield_size = runner.state().battlefield.len();
+
+    let walker = &runner.state().objects[&ajani];
+    assert_eq!(walker.loyalty, Some(5));
+    let ability_index = walker
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -3 })))
+        .expect("Ajani's parsed −3 loyalty ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ajani,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Ajani's −3 activates through the public action");
+
+    // CR 606.4: Pay three loyalty up front. CR 115.10a: No targets are declared.
+    assert_eq!(runner.state().objects[&ajani].loyalty, Some(2));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    let stack = &runner.state().stack;
+    // CR 405.2 + CR 603.3: The Cadet trigger goes above the loyalty ability.
+    assert_eq!(stack.len(), 2);
+    let activation = stack.front().unwrap();
+    let trigger = stack.back().unwrap();
+    assert!(matches!(
+        activation.kind,
+        StackEntryKind::ActivatedAbility { .. }
+    ));
+    assert!(matches!(
+        trigger.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    for entry in stack {
+        assert_eq!(entry.source_id, ajani);
+        assert_eq!(entry.controller, P0);
+    }
+    let activation_id = activation.id;
+    let trigger_id = trigger.id;
+
+    // CR 113.8: Both stack entries keep P0 when Ajani changes controllers.
+    runner.state_mut().debug_mode = true;
+    runner
+        .act(GameAction::Debug(DebugAction::SetController {
+            object_id: ajani,
+            controller: P1,
+        }))
+        .expect("transfer Ajani while both abilities are on the stack");
+    assert_eq!(runner.state().objects[&ajani].controller, P1);
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| (entry.id, entry.controller))
+            .collect::<Vec<_>>(),
+        [(activation_id, P0), (trigger_id, P0)],
+    );
+    assert_eq!(runner.state().battlefield.len(), battlefield_size);
+
+    // CR 117.4 + CR 111.2: Resolve the trigger first and create P0's Cadet.
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack.front().unwrap().id, activation_id);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().battlefield.len(), battlefield_size + 1);
+    let cadet = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| runner.state().objects[id].name == "Cadet")
+        .expect("the trigger created Cadet before the loyalty ability resolved");
+    let cadet_object = &runner.state().objects[&cadet];
+    assert!(cadet_object.is_token);
+    assert_eq!((cadet_object.owner, cadet_object.controller), (P0, P0));
+    assert_eq!(cadet_object.card_types.core_types, [CoreType::Creature]);
+    assert_eq!(cadet_object.card_types.subtypes.len(), 2);
+    for subtype in ["Wizard", "Soldier"] {
+        assert!(cadet_object
+            .card_types
+            .subtypes
+            .iter()
+            .any(|name| name == subtype));
+    }
+    assert_eq!(
+        (cadet_object.power, cadet_object.toughness),
+        (Some(2), Some(2))
+    );
+    assert!(cadet_object.color.is_empty());
+    for creature in [
+        friendly_nontoken,
+        opposing_nontoken,
+        friendly_token,
+        opposing_token,
+        cadet,
+    ] {
+        assert_eq!(runner.state().objects[&creature].damage_marked, 0);
+    }
+    for (token, owner, controller) in [(friendly_token, P1, P0), (opposing_token, P0, P1)] {
+        let object = &runner.state().objects[&token];
+        assert!(object.is_token);
+        assert_eq!((object.owner, object.controller), (owner, controller));
+    }
+
+    runner.resolve_top();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    // CR 109.5 + CR 120.3e: Damage hits both nontokens and the opposing token.
+    for (creature, damage) in [
+        (friendly_nontoken, 4),
+        (opposing_nontoken, 4),
+        (opposing_token, 4),
+        (friendly_token, 0),
+        (cadet, 0),
+    ] {
+        let object = &runner.state().objects[&creature];
+        assert_eq!(object.zone, Zone::Battlefield, "{} survives", object.name);
+        assert_eq!(object.damage_marked, damage, "{} damage", object.name);
+    }
 }
 
 /// CR 603.4 + CR 606.4: drive Way's verbatim Oracle trigger through a public

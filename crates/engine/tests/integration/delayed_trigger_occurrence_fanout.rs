@@ -2190,11 +2190,14 @@ fn delayed_event_subject_intervening_if_fails_closed() {
 fn primary_trigger_event(
     item: &engine::types::game_state::StackEntry,
 ) -> Option<&engine::types::events::GameEvent> {
+    use engine::types::game_state::StackEntryKind;
+
     match &item.kind {
-        engine::types::game_state::StackEntryKind::TriggeredAbility { trigger_event, .. } => {
-            trigger_event.as_ref()
-        }
-        _ => None,
+        StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::ActivatedAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
     }
 }
 
@@ -2406,6 +2409,7 @@ fn assert_ravens_warning_looks_before_drawing(oracle: &str, looks_at_controller:
         .act(GameAction::OrderTriggers { order: vec![1, 0] })
         .expect("reverse firing order");
 
+    let mut recipients = Vec::new();
     for _ in 0..2 {
         let item = runner.state().stack.last().expect("chapter firing");
         assert_eq!(item.source_id, saga);
@@ -2446,6 +2450,7 @@ fn assert_ravens_warning_looks_before_drawing(oracle: &str, looks_at_controller:
             .collect();
         let before = controller_hand.len();
         let damaged = *player_id;
+        recipients.push(damaged);
         let before_life = runner.life(damaged);
         let result = loop {
             let result = runner
@@ -2493,6 +2498,9 @@ fn assert_ravens_warning_looks_before_drawing(oracle: &str, looks_at_controller:
             WaitingFor::Priority { .. }
         ));
     }
+    recipients.sort_unstable();
+    assert_eq!(recipients, [P1, P2]);
+    assert!(runner.state().stack.is_empty());
 }
 
 /// CR 510.4 + CR 603.2c + CR 700.1: player damage in separate

@@ -21674,13 +21674,9 @@ pub(super) fn parse_batched_damage_head(input: &str) -> OracleResult<'_, Batched
         let direct = if extra_props.is_empty() {
             (filter, remainder)
         } else {
-            let qualified = match filter {
-                TargetFilter::Typed(mut tf) => {
-                    tf.properties.extend(extra_props);
-                    TargetFilter::Typed(tf)
-                }
-                other => other,
-            };
+            let qualified = extra_props
+                .into_iter()
+                .fold(filter, conjoin_filter_property);
             (qualified, rem)
         };
         if direct.1.is_empty() {

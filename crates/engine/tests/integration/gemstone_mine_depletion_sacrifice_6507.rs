@@ -19,9 +19,10 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::Effect;
 use engine::types::actions::{AlternativeCastDecision, GameAction};
 use engine::types::counter::parse_counter_type;
-use engine::types::game_state::{CastingVariant, ManaChoice, WaitingFor};
+use engine::types::game_state::{CastingVariant, ManaChoice, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -291,7 +292,24 @@ fn peat_bog_merged_death_during_autopayment_draws_once() {
     }));
     assert_eq!(pool_count(&runner, P0, ManaType::Black), 0);
 
-    let outcome = runner.cast(ritual).resolve();
+    let committed = runner.cast(ritual).commit();
+    assert_eq!(committed.state().objects[&bog].zone, Zone::Graveyard);
+    let stack = &committed.state().stack;
+    assert_eq!(
+        stack.len(),
+        2,
+        "expected Dark Ritual and one delayed trigger"
+    );
+    let (spell, trigger) = (&stack[0], &stack[1]);
+    assert_eq!(spell.source_id, ritual);
+    assert!(matches!(spell.kind, StackEntryKind::Spell { .. }));
+    assert_eq!(trigger.source_id, day);
+    let StackEntryKind::TriggeredAbility { ability, .. } = &trigger.kind else {
+        panic!("expected the delayed draw above Dark Ritual");
+    };
+    assert!(matches!(ability.effect, Effect::Draw { .. }));
+
+    let outcome = committed.resolve();
     outcome.assert_zone(&[bog, gemrazer, ritual], Zone::Graveyard);
     // CR 603.2c: the merged creature's single death triggers one draw.
     outcome.assert_hand_drawn(P0, 1);

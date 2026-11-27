@@ -9220,19 +9220,19 @@ fn is_amplify_etb_replacement(replacement: &ReplacementDefinition, expected_n: u
     *counter_type == CounterType::Plus1Plus1 && *count == amplify_counter_quantity(expected_n)
 }
 
-/// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
-/// carrying `Keyword::Suspend { count, cost }`:
+/// CR 702.62a: Each face carrying `Keyword::Suspend { count, cost }` gets two exile triggers.
+/// A fixed count also gets a hand ability.
 ///
-///   1. **Hand-activated alt-cost** ("Rather than cast this card from your hand,
+///   1. **Hand-activated alt-cost** (not for Suspend X)
+///      ("Rather than cast this card from your hand,
 ///      you may pay [cost] and exile it with N time counters on it. This action
 ///      doesn't use the stack."). Modeled as an activated ability with
 ///      `activation_zone = Hand` and `ActivationRestriction::MatchesCardCastTiming`
 ///      (CR 702.62a "if you could begin to cast this card by putting it onto the
 ///      stack from your hand"). Cost is composite (mana + exile self from hand);
-///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. The
-///      synthesized activation does land on the stack as an activated ability,
-///      which is a controlled approximation of the rule's "doesn't use the stack"
-///      — no card today interacts with that distinction.
+///      effect is a Time-counter `PutCounter` on the now-exiled SelfRef. Stifle
+///      can counter the synthesized activation on the stack. Under CR 116.2f and
+///      CR 702.62a, suspending is a special action that skips the stack.
 ///
 ///   2. **Upkeep counter-removal trigger** ("At the beginning of your upkeep,
 ///      if this card is suspended, remove a time counter from it.") fires from
@@ -9281,7 +9281,9 @@ pub fn synthesize_suspend(face: &mut CardFace) {
                     if *counter_type == CounterType::Time
             )
     });
-    if !already_has_activation {
+    // CR 702.62a: no card prints suspend 0 ("X can't be 0", Aeon Chronicler); a count of 0 is
+    // the placeholder for an unread X, whose cost reads {0} too.
+    if time_counters > 0 && !already_has_activation {
         let composite_cost = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Mana {
