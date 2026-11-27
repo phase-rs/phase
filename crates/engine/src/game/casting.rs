@@ -3291,18 +3291,20 @@ pub(super) fn granted_spell_alternative_cost(
     caster: PlayerId,
     object_id: ObjectId,
 ) -> Option<GrantedSpellAlternativeCost> {
-    granted_spell_alternative_cost_for(state, caster, object_id, false)
+    granted_spell_alternative_cost_for(state, caster, object_id, false, None)
 }
 
 /// Fuse-aware sibling of [`granted_spell_alternative_cost`]. `fused` projects a
 /// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
 /// so `CastWithAlternativeCost` `affected` filters keyed on mana value / colors
 /// see the fused spell. The non-`_for` entry delegates with `fused = false`.
+/// `timing` keeps only the grants that carry it; `None` keeps all.
 pub(super) fn granted_spell_alternative_cost_for(
     state: &GameState,
     caster: PlayerId,
     object_id: ObjectId,
     fused: bool,
+    timing: Option<CastTimingPermission>,
 ) -> Option<GrantedSpellAlternativeCost> {
     let spell_obj = state.objects.get(&object_id)?;
     // CR 601.2a: same origin chain as the keyword-grant walkers, so a re-ask
@@ -3320,6 +3322,12 @@ pub(super) fn granted_spell_alternative_cost_for(
         else {
             continue;
         };
+
+        // CR 601.3c: only a grant carrying the asked-for timing, whichever grant this cast
+        // would apply and whether or not it can be paid.
+        if timing.is_some() && *timing_permission != timing {
+            continue;
+        }
 
         // CR 118.9 + CR 601.2b: a once-per-turn grant already applied this turn
         // offers nothing further (As Foretold's slot is spent for the turn).
@@ -4557,7 +4565,16 @@ pub(super) fn cast_pays_nonexistent_printed_cost(
     obj: &crate::game::game_object::GameObject,
     casting_permission_index: Option<CastingPermissionIndex>,
     casting_variant: CastingVariant,
+    origin: Zone,
 ) -> bool {
+    if casting_permission_index.is_none()
+        && casting_variant == CastingVariant::Normal
+        && matches!(obj.mana_cost, ManaCost::NoCost)
+        && matches!(origin, Zone::Hand | Zone::Command)
+    {
+        return !unlimited_hand_cast_free_applies(state, player, obj, casting_variant)
+            && !next_spell_without_paying_applies(state, player, obj.id, casting_variant);
+    }
     casting_permission_index
         .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
         .is_some_and(|permission| match permission {
@@ -10494,68 +10511,10 @@ fn prepare_spell_cast_announced_inner(
         ));
     }
 
-    // CR 601.3 + CR 101.2 + CR 109.5: "Can't" beats "can" — check CantCastFrom statics.
-    // Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
-    // Drannith Magistrate: "Your opponents can't cast spells from anywhere other
-    // than their hands." This overrides graveyard/library/exile/command casting
-    // permissions (Escape, Lurrus, flashback, foretell, commander, etc.).
-    if mode == CastingMode::Actual && is_blocked_from_casting_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2: Continuous casting prohibition — "can't" overrides "can".
-    // E.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
-    if mode == CastingMode::Actual && is_blocked_by_cant_cast_during(state, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents casting during this phase/turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Temporary blanket prohibition — "can't cast spells this turn."
-    // E.g., Silence: "Your opponents can't cast spells this turn."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_cast_spells_for(state, player, Some(obj), is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents you from casting spells this turn".to_string(),
-        ));
-    }
-
-    // CR 101.2: Blanket casting prohibition — "you can't cast [type] spells."
-    // E.g., Steel Golem: "You can't cast creature spells."
-    if mode == CastingMode::Actual
-        && is_blocked_by_cant_be_cast_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability prevents you from casting this spell".to_string(),
-        ));
-    }
-
-    if mode == CastingMode::Actual && is_blocked_by_cast_only_from_zones(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents casting from this zone".to_string(),
-        ));
-    }
-
-    // CR 116.2a + CR 601.2a: A `ProhibitPlayFromZone` deny prevents casting a
-    // spell from the named zone (Memory Vessel: "can't play cards from their
-    // hand" — the cast half of "play").
-    if mode == CastingMode::Actual && is_blocked_by_prohibit_play_from_zone(state, obj, player) {
-        return Err(EngineError::ActionNotAllowed(
-            "A temporary effect prevents playing cards from this zone".to_string(),
-        ));
-    }
-
-    // CR 101.2 + CR 604.1: Per-turn casting limit — "can't cast more than N spells each turn."
-    // E.g., Rule of Law, High Noon, Deafening Silence.
-    if mode == CastingMode::Actual
-        && is_blocked_by_per_turn_cast_limit_for(state, player, obj, is_fuse_variant)
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A static ability limits the number of spells you can cast this turn".to_string(),
-        ));
+    if mode == CastingMode::Actual {
+        if let Some(reason) = cast_prohibition(state, player, obj, is_fuse_variant) {
+            return Err(EngineError::ActionNotAllowed(reason.to_string()));
+        }
     }
 
     // Only Spell-kind abilities define the spell's on-cast effect and targets.
@@ -11189,23 +11148,54 @@ fn prepare_spell_cast_announced_inner(
         next_spell_without_paying_applies(state, player, object_id, casting_variant);
     // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
     // printed mana cost is refused, unless a payable alternative cost will be
-    // applied for it. `check_additional_cost_or_pay` (a `Normal` cast) and the
-    // skipped-election branch of `finish_pending_cast_cost_or_pay` apply it
-    // without a choice.
-    if cast_pays_nonexistent_printed_cost(
+    // applied for it. Price the first payable alternative for the preview.
+    // The declaration step elects the actual cost if there is more than one.
+    let required_alternative = if cast_pays_nonexistent_printed_cost(
         state,
         player,
         obj,
         casting_permission_index,
         casting_variant,
-    ) && !(casting_variant == CastingVariant::Normal
-        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
-            .is_some())
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
-        ));
-    }
+        obj.zone,
+    ) {
+        let alternative = (casting_variant == CastingVariant::Normal)
+            .then(|| {
+                casting_costs::payable_spell_alternative_cost_details_at_index(
+                    state,
+                    player,
+                    object_id,
+                    casting_permission_index,
+                )
+                .or_else(|| {
+                    if mode == CastingMode::Display {
+                        casting_costs::spell_alternative_costs_matching(
+                            state,
+                            player,
+                            object_id,
+                            casting_permission_index,
+                            |_| true,
+                        )
+                        .into_iter()
+                        .next()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+                )
+            })?;
+        Some(
+            split_alt_cost_components(&alternative.cost)
+                .0
+                .unwrap_or_else(ManaCost::zero),
+        )
+    } else {
+        None
+    };
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from the origin scope carried by the static. Auto-application is
@@ -11477,6 +11467,7 @@ fn prepare_spell_cast_announced_inner(
             .or(prowl_cost)
             .or(surge_cost)
             .or(face_down_cost)
+            .or(required_alternative)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     // CR 601.3b + CR 702.8a: A spell has effective flash from its own keywords
@@ -11570,28 +11561,7 @@ fn prepare_spell_cast_announced_inner(
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
-    if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
-        if tax > 0 {
-            match &mut mana_cost {
-                crate::types::mana::ManaCost::Cost { generic, .. } => {
-                    *generic += tax;
-                }
-                crate::types::mana::ManaCost::NoCost => {
-                    mana_cost = crate::types::mana::ManaCost::Cost {
-                        shards: vec![],
-                        generic: tax,
-                    };
-                }
-                crate::types::mana::ManaCost::SelfManaCost
-                | crate::types::mana::ManaCost::SelfManaValue
-                | crate::types::mana::ManaCost::SelfManaCostReduced { .. } => {
-                    // Self-referential placeholders should have been resolved before
-                    // reaching here; treat as no-op for commander tax purposes.
-                }
-            }
-        }
-    }
+    add_commander_tax(state, object_id, obj.zone, &mut mana_cost);
 
     // CR 702.102c: The total cost of a fused split spell includes the mana cost
     // of each half. The front face's cost is already in `mana_cost`; add the
@@ -13538,6 +13508,28 @@ pub(super) fn apply_cost_modifiers_to_base_for_variant(
     )
 }
 
+/// CR 903.8: include the tax when building a cost from its printed or alternative base.
+pub(super) fn add_commander_tax(
+    state: &GameState,
+    object_id: ObjectId,
+    origin: Zone,
+    cost: &mut ManaCost,
+) {
+    if origin != Zone::Command {
+        return;
+    }
+    let tax = super::commander::commander_tax(state, object_id);
+    if tax == 0 {
+        return;
+    }
+    match cost {
+        ManaCost::Cost { generic, .. } => *generic += tax,
+        ManaCost::NoCost => *cost = ManaCost::generic(tax),
+        ManaCost::SelfManaCost | ManaCost::SelfManaValue | ManaCost::SelfManaCostReduced { .. } => {
+        }
+    }
+}
+
 /// CR 601.2f: as [`apply_cost_modifiers_to_base_for_variant`], with `ctx`'s
 /// reductions joining the ordered set ahead of the floor.
 fn apply_cost_modifiers_to_base_with(
@@ -13551,24 +13543,8 @@ fn apply_cost_modifiers_to_base_with(
 ) -> Option<ManaCost> {
     let obj = state.objects.get(&object_id)?;
     let mut mana_cost = base;
-    // CR 903.8: Commanders cast from the command zone incur a tax.
-    if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
-        if tax > 0 {
-            match &mut mana_cost {
-                ManaCost::Cost { generic, .. } => *generic += tax,
-                ManaCost::NoCost => {
-                    mana_cost = ManaCost::Cost {
-                        shards: vec![],
-                        generic: tax,
-                    };
-                }
-                ManaCost::SelfManaCost
-                | ManaCost::SelfManaValue
-                | ManaCost::SelfManaCostReduced { .. } => {}
-            }
-        }
-    }
+    let origin = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
+    add_commander_tax(state, object_id, origin, &mut mana_cost);
     apply_all_cost_modifiers_with(
         state,
         player,
@@ -20043,6 +20019,11 @@ fn normal_cast_choice_cost_and_affordability(
         return (ManaCost::NoCost, true);
     }
 
+    // CR 118.6a: increasing an unpayable printed cost leaves it unpayable.
+    if matches!(obj.mana_cost, ManaCost::NoCost) {
+        return (ManaCost::NoCost, false);
+    }
+
     // CR 601.2f + CR 118.9d: normal-path affordability and displayed cost
     // reflect active cost modifiers before comparing against alternative costs.
     // A matching Defiler's optional reduction counts toward affordability
@@ -20050,16 +20031,8 @@ fn normal_cast_choice_cost_and_affordability(
     // it payable); the displayed cost is the plain total.
     let normal_cost = apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
         .unwrap_or_else(|| obj.mana_cost.clone());
-    // CR 118.6: a printed `NoCost` (no mana cost) is an UNPAYABLE cost; the normal
-    // (face-up) cast is not a legal play absent a free-cast permission (handled by
-    // the two short-circuits above). `can_pay_cost_after_auto_tap` returns true for
-    // `NoCost` unconditionally, so guard against reporting an unpayable normal cast
-    // as affordable — that would offer a free face-up cast instead of the {3}
-    // face-down alternative. A cost reduced to nothing is `{0}` (CR 601.2f), a
-    // distinct value from `ManaCost::NoCost`, so this never misfires on a
-    // cost-reduced-to-zero card.
-    let normal_affordable = !matches!(normal_cost, ManaCost::NoCost)
-        && alternative_cost_mana_affordable(state, player, object_id, &obj.mana_cost);
+    let normal_affordable =
+        alternative_cost_mana_affordable(state, player, object_id, &obj.mana_cost);
     (normal_cost, normal_affordable)
 }
 
@@ -20187,6 +20160,8 @@ pub fn handle_cast_spell_with_payment_mode(
             // rejection stands (nothing downstream re-guards NoCost).
             if matches!(obj.mana_cost, ManaCost::NoCost)
                 && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
+                && !next_spell_without_paying_applies(state, player, object_id, CastingVariant::Normal)
+                && casting_costs::payable_spell_alternative_cost_details(state, player, object_id).is_none()
                 // CR 715.3a + CR 118.6a: A land-front Adventure card has no
                 // payable normal-face cost, but its instant/sorcery Adventure
                 // face may be cast for its own mana cost.
@@ -23550,21 +23525,8 @@ fn can_cast_prepared_now_with_probe(
         return false;
     };
 
-    // CR 202.1b: A card with no mana cost (suspend-only cards like Inevitable
-    // Betrayal) has an unpayable cost.
-    // CR 118.6: it therefore can't be cast from hand by paying that cost. Its
-    // only legal plays are via an effect/keyword — Suspend's exile activation,
-    // the free-cast from exile, or an effect-granted `CastSpellForFree` — none
-    // of which take this normal-hand-cast path.
-    // CR 118.6a: the exception is an effect that lets you cast it WITHOUT paying
-    // its mana cost. The only such effect routed through this normal-CastSpell
-    // path is an `Unlimited` `CastFromHandFree` permission (Omniscience / Tamiyo
-    // emblem), which `prepare_spell_cast` recognizes via the same predicate and
-    // zeroes the cost. `OncePerTurn` sources (Zaffai) opt in via the dedicated
-    // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
-    // Exile-zone copies (Prepare, Suspend, Discover, etc.) carry their own
-    // `ExileWithAltCost` permission and must not hit this hand/command guard.
-    //
+    // CR 118.6a: a hand or command-zone spell without a mana cost needs
+    // a free-cast permission, a payable alternative, or a variant with its own cost.
     // CR 118.6a + CR 702.37c / CR 702.168b: candidate/legal-action twin of the
     // dispatch-path exception at the `Zone::Hand` NoCost gate — a NoCost card with
     // an effective morph/megamorph/disguise keyword IS castable (face down for {3}),
@@ -23573,6 +23535,8 @@ fn can_cast_prepared_now_with_probe(
     if matches!(obj.zone, Zone::Hand | Zone::Command)
         && matches!(obj.mana_cost, ManaCost::NoCost)
         && !unlimited_hand_cast_free_applies(state, player, obj, prepared.casting_variant)
+        && !next_spell_without_paying_applies(state, player, obj.id, prepared.casting_variant)
+        && granted_alternative_cost(state, player, prepared).is_none()
         // CR 702.162a + CR 118.6a + CR 712.8c: a More Than Meets the Eye cast pays its
         // own cost rather than the mana cost, and `obj` here is the converted spell
         // (back face, whose mana cost is `NoCost`), not the printed front face whose
@@ -38286,6 +38250,63 @@ fn is_blocked_from_casting_from_zone(
     false
 }
 
+/// CR 601.3 + CR 101.2: the effect that stops `player` from beginning to cast `obj` from its
+/// current zone, as the message shown for it. The cast proposal and suspend's hand ability
+/// (CR 702.62c) both read it; split second (CR 702.61a) is asked beside it. `fused` projects a
+/// pre-payment fused split spell (CR 702.102b).
+fn cast_prohibition(
+    state: &GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    fused: bool,
+) -> Option<&'static str> {
+    // CR 101.2: "can't" beats a casting permission for the zone (Grafdigger's Cage,
+    // Drannith Magistrate).
+    if is_blocked_from_casting_from_zone(state, obj, player) {
+        return Some("A static ability prevents casting from this zone");
+    }
+    // Teferi, Time Raveler: "Each opponent can cast spells only any time they could cast a
+    // sorcery."
+    if is_blocked_by_cant_cast_during(state, player) {
+        return Some("A static ability prevents casting during this phase/turn");
+    }
+    // Silence: "Your opponents can't cast spells this turn."
+    if is_blocked_by_cant_cast_spells_for(state, player, Some(obj), fused) {
+        return Some("A temporary effect prevents you from casting spells this turn");
+    }
+    // Steel Golem: "You can't cast creature spells."
+    if is_blocked_by_cant_be_cast_for(state, player, obj, fused) {
+        return Some("A static ability prevents you from casting this spell");
+    }
+    if is_blocked_by_cast_only_from_zones(state, obj, player) {
+        return Some("A temporary effect prevents casting from this zone");
+    }
+    // Memory Vessel: "they can't play cards from their hand", the cast half of "play".
+    if is_blocked_by_prohibit_play_from_zone(state, obj, player) {
+        return Some("A temporary effect prevents playing cards from this zone");
+    }
+    // CR 604.1: Rule of Law: "Each player can't cast more than one spell each turn."
+    if is_blocked_by_per_turn_cast_limit_for(state, player, obj, fused) {
+        return Some("A static ability limits the number of spells you can cast this turn");
+    }
+    None
+}
+
+/// CR 702.62a + CR 702.62c + CR 601.3: could `player` begin to cast the hand card `object_id`,
+/// timing aside (`restrictions::restriction_confines_to_sorcery_timing`)? Costs, targets and a
+/// missing mana cost (CR 118.6, Ancestral Vision) don't stop a cast from beginning.
+pub(super) fn hand_cast_may_begin(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        // CR 702.61a: "players can't cast other spells".
+        !super::keywords::stack_has_split_second(state)
+            && cast_prohibition(state, player, obj, false).is_none()
+    })
+}
+
 /// CR 602.5 + CR 605.1a: shared predicate — does one `CantBeActivated` static
 /// (`bf_obj`/`def`) prohibit `activating_ability` on `activating_source_id` for
 /// `caster`? Sole authority the bool enforcement shim and the source collector
@@ -38468,21 +38489,27 @@ fn evaluate_casting_prohibition_condition(
 ) -> bool {
     match when {
         // CR 109.5: "during your turn" — bound to the static's source controller.
-        CastingProhibitionCondition::DuringYourTurn => state.active_player == source_controller,
+        CastingProhibitionCondition::DuringYourTurn => {
+            super::players::is_turn_player(state, source_controller)
+        }
         // CR 506.1: "during combat" — any combat phase, game-wide.
         CastingProhibitionCondition::DuringCombat => state.phase.is_combat(),
         // CR 109.5 + CR 117.1a + CR 604.1: "only during your turn" — blocked
         // when it is NOT the source-controller's turn (Fires of Invention's
         // "your turn"). Differs from `NotDuringAffectedPlayersTurn`: this
         // binds to the static source's controller per CR 109.5.
-        CastingProhibitionCondition::NotDuringYourTurn => state.active_player != source_controller,
+        CastingProhibitionCondition::NotDuringYourTurn => {
+            !super::players::is_turn_player(state, source_controller)
+        }
         // CR 102.1 + CR 117.1a + CR 604.1: "only during their own turn" —
         // distributive per-affected-player binding (Dosan / City of Solitude).
         // Blocked when it is NOT the *caster's* turn. The pronoun "their own"
         // is not governed by CR 109.5 (which binds "you/your"); the
         // distributive reading follows from CR 102.1 + the template structure
         // of "[every player] can [action] only during their own [time]".
-        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => state.active_player != caster,
+        CastingProhibitionCondition::NotDuringAffectedPlayersTurn => {
+            !super::players::is_turn_player(state, caster)
+        }
         // CR 117.1a + CR 117.1b: "only any time they could cast a sorcery"
         // — blocked when not at sorcery speed. `restrictions` owns the
         // sorcery-speed timing predicate (CR 307.1); never re-derive it.

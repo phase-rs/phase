@@ -110261,7 +110261,6 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
     };
     for (name, card_type, target, oracle) in [
         ("Depthshaker Titan", "Creature", Some(TargetFilter::ParentTarget), "When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nEach artifact creature you control has melee, trample, and haste. (Whenever a creature with melee attacks, it gets +1/+1 until end of turn for each opponent you attacked this combat.)"),
-        ("Mardu Siegebreaker", "Creature", Some(tracked.clone()), "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens."),
         ("Tears of Rage", "Instant", Some(tracked), "Cast this spell only during the declare attackers step.\nAttacking creatures you control get +X/+0 until end of turn, where X is the number of attacking creatures. Sacrifice those creatures at the beginning of the next end step."),
         ("Malik, Grim Manipulator", "Creature", None, "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token."),
     ] {
@@ -110274,6 +110273,63 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
             assert!(sacrifices.iter().all(|(_, count)| *count == one), "{name}: {sacrifices:?}");
         }
     }
+}
+
+#[test]
+fn mardu_siegebreaker_lowers_to_one_named_copy_batch_and_one_cleanup() {
+    use crate::types::ability::{NamedDefenderScope, SacrificeSelection, TokenAttackDestination};
+
+    let oracle = "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens.";
+    let parsed = parse_named_face(oracle, "Mardu Siegebreaker", &["Creature"]);
+    let attack = parsed.triggers[1]
+        .execute
+        .as_deref()
+        .expect("attack effect");
+    assert!(
+        matches!(
+            attack.effect.as_ref(),
+            Effect::CopyTokenOf {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent
+                    },
+                },
+                tapped: true,
+                enters_attacking: true,
+                attack_destination: TokenAttackDestination::EachPlayer {
+                    filter: PlayerFilter::Opponent,
+                    scope: NamedDefenderScope::Player,
+                },
+                ..
+            }
+        ),
+        "{attack:#?}"
+    );
+    assert!(attack.repeat_for.is_none());
+    assert_eq!(attack.repeat_timing, Default::default());
+    let cleanup = attack.sub_ability.as_deref().expect("delayed cleanup");
+    let Effect::CreateDelayedTrigger {
+        condition:
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End, ..
+            },
+        effect,
+        uses_tracked_set: false,
+        ..
+    } = cleanup.effect.as_ref()
+    else {
+        panic!("expected controller-relative cleanup: {cleanup:#?}");
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: SacrificeSelection::EntireReferent,
+            ..
+        }
+    ));
+    assert!(cleanup.sub_ability.is_none());
 }
 
 #[test]
@@ -110577,57 +110633,57 @@ fn delayed_player_damage_full_faces_commit_compound_payloads() {
             let mut strict = Vec::new();
             let mut payloads = Vec::new();
             let mut visit = |effect: &Effect| {
-                match effect {
-                    Effect::CreateDelayedTrigger {
-                        condition:
-                            DelayedTriggerCondition::WheneverEvent {
-                                trigger,
-                                expiry: WheneverEventExpiry::EndOfTurn,
-                            },
-                        effect,
-                        ..
-                    } => {
-                        installers += 1;
-                        assert_eq!(trigger.mode, mode);
-                        assert!(trigger.batched);
-                        assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
-                        assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
-                        let mut node = Some(effect.as_ref());
-                        while let Some(def) = node {
-                            payloads.push(match def.effect.as_ref() {
-                                Effect::BecomeMonarch {
-                                    target: TargetFilter::Controller,
-                                } => "monarch",
-                                Effect::Draw {
-                                    target: TargetFilter::Controller,
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                } => "draw",
-                                Effect::Discard {
-                                    count: QuantityExpr::Fixed { value: 1 },
-                                    ..
-                                } => "discard",
-                                Effect::RevealHand {
-                                    target: TargetFilter::TriggeringPlayer,
-                                    reveal: false,
-                                    ..
-                                } => "look",
-                                Effect::RevealHand {
-                                    target: TargetFilter::Controller,
-                                    reveal: false,
-                                    ..
-                                } => "look-controller",
-                                other => panic!("{name}: unexpected watcher payload {other:?}"),
-                            });
-                            node = def.sub_ability.as_deref();
-                        }
+                if let Effect::CreateDelayedTrigger {
+                    condition:
+                        DelayedTriggerCondition::WheneverEvent {
+                            trigger,
+                            expiry: WheneverEventExpiry::EndOfTurn,
+                        },
+                    effect,
+                    ..
+                } = effect
+                {
+                    installers += 1;
+                    assert_eq!(trigger.mode, mode);
+                    assert!(trigger.batched);
+                    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+                    assert_eq!(trigger.damage_kind, DamageKindFilter::CombatOnly);
+                    let mut node = Some(effect.as_ref());
+                    while let Some(def) = node {
+                        payloads.push(match def.effect.as_ref() {
+                            Effect::BecomeMonarch {
+                                target: TargetFilter::Controller,
+                            } => "monarch",
+                            Effect::Draw {
+                                target: TargetFilter::Controller,
+                                count: QuantityExpr::Fixed { value: 1 },
+                            } => "draw",
+                            Effect::Discard {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                ..
+                            } => "discard",
+                            Effect::RevealHand {
+                                target: TargetFilter::TriggeringPlayer,
+                                reveal: false,
+                                ..
+                            } => "look",
+                            Effect::RevealHand {
+                                target: TargetFilter::Controller,
+                                reveal: false,
+                                ..
+                            } => "look-controller",
+                            other => panic!("{name}: unexpected watcher payload {other:?}"),
+                        });
+                        node = def.sub_ability.as_deref();
                     }
-                    Effect::Unimplemented { name, description }
-                        if name == "delayed_player_damage_body"
-                            || name == "delayed_player_damage_head" =>
-                    {
+                }
+                if let Effect::Unimplemented { name, description } = effect {
+                    if matches!(
+                        name.as_str(),
+                        "delayed_player_damage_body" | "delayed_player_damage_head"
+                    ) {
                         strict.push(description.clone().expect("strict failure source text"));
                     }
-                    _ => {}
                 }
                 ControlFlow::Continue(())
             };

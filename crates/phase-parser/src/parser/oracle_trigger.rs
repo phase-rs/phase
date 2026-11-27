@@ -1586,34 +1586,24 @@ fn effect_body_introduces_defending_player(effect_lower: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(effect_lower, parse_if_defending_player).is_some()
 }
 
-/// CR 508.1 + CR 603.2c: "Whenever a player attacks with [N or more] creatures,
-/// ... that player ..." introduces the ATTACKING player (TriggeringPlayer) as the
-/// relative-player anaphor for a trailing "that player"/"that player controls"
-/// clause (Total War). Mirrors the any-player actor arm of
-/// `try_parse_attack_with_n_creatures` — the "you attack"/"another player
-/// attacks"/"an opponent attacks" forms fix the actor statically (no dynamic
-/// per-trigger player for "that player" to bind to; no in-corpus card phrases
-/// those forms with a trailing "that player" anaphor), so only the bare
-/// "a player attacks with" head-noun form needs this scope.
+/// CR 508.3d + CR 608.2c: a third-person actor in an attack-with head
+/// supplies the player antecedent for the effect body.
 fn condition_introduces_attacking_player(cond_lower: &str) -> bool {
-    // Walk word boundaries — the actor phrase may be preceded by "whenever"/"when".
-    let mut remaining = cond_lower;
-    while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("a player attacks with")
-            .parse(remaining)
-            .is_ok()
-        {
-            return true;
-        }
-        // structural: not dispatch — advance to the next word boundary so the
-        // nom tag above is retried at every word position (mirrors
-        // `condition_introduces_defending_player`).
-        remaining = match remaining.find(' ') {
-            Some(i) => remaining[i + 1..].trim_start(),
-            None => "",
-        };
-    }
-    false
+    nom_primitives::scan_at_word_boundaries(cond_lower, |input| {
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>("a player"),
+                    tag("another player"),
+                    tag("an opponent"),
+                )),
+                tag(" attacks with "),
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
 }
 
 /// CR 603.2e + CR 115.1 + CR 608.2c: A "becomes the target of a spell or
@@ -21692,13 +21682,9 @@ pub(super) fn parse_batched_damage_head(input: &str) -> OracleResult<'_, Batched
         let direct = if extra_props.is_empty() {
             (filter, remainder)
         } else {
-            let qualified = match filter {
-                TargetFilter::Typed(mut tf) => {
-                    tf.properties.extend(extra_props);
-                    TargetFilter::Typed(tf)
-                }
-                other => other,
-            };
+            let qualified = extra_props
+                .into_iter()
+                .fold(filter, conjoin_filter_property);
             (qualified, rem)
         };
         if direct.1.is_empty() {

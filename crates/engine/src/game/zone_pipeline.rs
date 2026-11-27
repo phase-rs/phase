@@ -2186,8 +2186,26 @@ fn deliver_simultaneous_batch(
             to: r.to,
         })
         .collect();
-    let logical_zone_change_group =
+    let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &announced);
+    // CR 730.3: component routing delivers the announcing parent's
+    // permanent departure. Use its combat snapshot for the surviving object.
+    if let Some(snapshot) = merged_departure
+        .and_then(|identity| zones::simultaneous_departure_combat(state, identity))
+        .filter(|snapshot| {
+            logical_zone_change_group
+                .prospective_battlefield_members
+                .iter()
+                .any(|member| member.identity == snapshot.identity)
+        })
+    {
+        logical_zone_change_group
+            .departure_combat
+            .retain(|member| member.identity != snapshot.identity);
+        logical_zone_change_group
+            .departure_combat
+            .push(snapshot.clone());
+    }
     let group_id = logical_zone_change_group.logical_group_id;
     let staged_parent = if staged_entry.is_some() {
         component_delivery_parent.take()
@@ -2478,33 +2496,46 @@ fn standalone_batch_record(state: &mut GameState, destination: Zone) -> PendingB
 /// so an as-enters roll made during that delivery is not observed by a
 /// co-entrant (`simultaneous_entrants_of`). A delivery loop collects them once,
 /// before its first member, and every member's delivery reuses that one list.
-pub(crate) struct SimultaneousEntrants(Vec<ObjectId>);
+/// CR 603.10a: the same delivery window publishes the departing member's
+/// combat snapshot before the physical move writes its record.
+pub(crate) struct SimultaneousEntrants {
+    entrants: Vec<ObjectId>,
+    departure_combat: Vec<crate::types::game_state::DepartureCombatSnapshot>,
+}
 
 impl SimultaneousEntrants {
-    /// The entrants `group` announced.
+    /// The group's delivery-time observations.
     pub(crate) fn of(group: &LogicalZoneChangeGroup) -> Self {
-        Self(
-            group
+        Self {
+            entrants: group
                 .prospective_entrants
                 .iter()
                 .map(|member| member.identity.object_id)
                 .collect(),
-        )
+            departure_combat: group.departure_combat.clone(),
+        }
     }
 
-    /// Deliver one member of the change with its entrants published. The list
-    /// is swapped in and back, so publishing it takes constant time per member,
-    /// and
-    /// the outer publication is restored: a member's own continuation can run
-    /// a nested simultaneous change, which publishes and restores its own.
+    /// Deliver one member with its group's observations published. Swapping
+    /// the entrants preserves the existing allocation. A nested delivery
+    /// publishes its own observations and restores the outer window.
     pub(crate) fn deliver_member<R>(
         &mut self,
         state: &mut GameState,
+        member: ObjectId,
         deliver: impl FnOnce(&mut GameState) -> R,
     ) -> R {
-        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.entrants);
+        let previous = std::mem::replace(
+            &mut state.active_departure_combat,
+            self.departure_combat
+                .iter()
+                .find(|snapshot| snapshot.identity.object_id == member)
+                .cloned(),
+        );
         let result = deliver(state);
-        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.0);
+        state.active_departure_combat = previous;
+        std::mem::swap(&mut state.active_simultaneous_entrants, &mut self.entrants);
         result
     }
 }
@@ -2657,7 +2688,7 @@ fn deliver_batch(
             });
         // CR 508.4: the batch owner resumes a paused member and takes its stamp.
         // CR 603.6a: the member is delivered as part of the batch's one event.
-        match entrants.deliver_member(state, |state| {
+        match entrants.deliver_member(state, object_id, |state| {
             move_batch_member_with_terminal(
                 state,
                 req,
@@ -5184,6 +5215,19 @@ fn deliver_staged_members(
     events: &mut Vec<GameEvent>,
 ) -> StagedStop {
     let segment_start = events.len();
+    if owner.paused_current.is_none()
+        && owner.staged.as_ref().is_some_and(|staged| {
+            staged.cursor == 0
+                && staged
+                    .members
+                    .first()
+                    .is_some_and(|member| member.merged_departure.is_none())
+        })
+    {
+        // CR 603.10a: consultation side effects happened before this event.
+        // After delivery starts, retain the same view across any pauses.
+        zones::capture_batch_departure_combat(state, &mut owner.logical_zone_change_group);
+    }
     let mut entrants = SimultaneousEntrants::of(&owner.logical_zone_change_group);
     loop {
         let Some(member) = owner
@@ -5285,7 +5329,7 @@ fn deliver_staged_members(
             approved_post_replacement,
             inherited_arrangements,
         });
-        match entrants.deliver_member(state, |state| {
+        match entrants.deliver_member(state, member.identity.object_id, |state| {
             deliver_replaced_zone_change_with_aura_host(
                 state,
                 member.identity.object_id,
@@ -20582,10 +20626,10 @@ mod simultaneous_entry_tests {
 
         let mut nested_entrants = SimultaneousEntrants::of(&empty);
         let (outer, nested, restored) =
-            SimultaneousEntrants::of(&group).deliver_member(&mut state, |state| {
+            SimultaneousEntrants::of(&group).deliver_member(&mut state, b, |state| {
                 let outer = simultaneous_entrants_of(state, b);
                 let nested = nested_entrants
-                    .deliver_member(state, |state| simultaneous_entrants_of(state, b));
+                    .deliver_member(state, b, |state| simultaneous_entrants_of(state, b));
                 (outer, nested, simultaneous_entrants_of(state, b))
             });
         assert_eq!(outer, vec![a, b]);
@@ -20656,15 +20700,16 @@ mod simultaneous_entry_tests {
         let empty = state.allocate_logical_zone_change_group(&[]);
         let mut entrants = SimultaneousEntrants::of(&group);
         let mut nested_entrants = SimultaneousEntrants::of(&empty);
-        let allocation = entrants.0.as_ptr();
+        let allocation = entrants.entrants.as_ptr();
 
         for member in members {
             let (published, during, nested, restored) =
-                entrants.deliver_member(&mut state, |state| {
+                entrants.deliver_member(&mut state, member, |state| {
                     let during = state.active_simultaneous_entrants.as_ptr();
                     let published = simultaneous_entrants_of(state, member);
-                    let nested = nested_entrants
-                        .deliver_member(state, |state| simultaneous_entrants_of(state, member));
+                    let nested = nested_entrants.deliver_member(state, member, |state| {
+                        simultaneous_entrants_of(state, member)
+                    });
                     let restored = state.active_simultaneous_entrants.as_ptr();
                     (published, during, nested, restored)
                 });
@@ -20679,7 +20724,7 @@ mod simultaneous_entry_tests {
                 "the nested change restores the loop's list"
             );
             assert_eq!(
-                entrants.0.as_ptr(),
+                entrants.entrants.as_ptr(),
                 allocation,
                 "the loop gets the same list back after member {member:?}"
             );
@@ -20689,7 +20734,7 @@ mod simultaneous_entry_tests {
             );
         }
         assert_eq!(
-            entrants.0,
+            entrants.entrants,
             members.to_vec(),
             "the list is intact after the loop"
         );
@@ -20763,8 +20808,9 @@ mod simultaneous_entry_tests {
                     replacement_applied: HashSet::new(),
                 },
             );
-            let published = SimultaneousEntrants::of(&group)
-                .deliver_member(&mut state, |state| simultaneous_entrants_of(state, b));
+            let published =
+                SimultaneousEntrants::of(&group)
+                    .deliver_member(&mut state, b, |state| simultaneous_entrants_of(state, b));
             let outside = simultaneous_entrants_of(&state, b);
             if is_token {
                 assert_eq!(

@@ -184,6 +184,21 @@ pub(crate) fn resolve_copy_token_specs(
                 .flat_map(|zone| targeting::zone_object_ids(state, zone))
                 .filter(|id| matches_target_filter(state, *id, source_filter, &filter_ctx))
                 .collect()
+        } else if matches!(target_filter, TargetFilter::ExiledBySource) {
+            // CR 607.2a + CR 400.7: read the linked exile of the acting
+            // incarnation. A departed trigger source keeps its own pile even
+            // if the permanent returned and exiled a different card.
+            let linked = match ability.trigger_source.as_ref() {
+                Some(source) if !ability.source_is_current(state) => {
+                    crate::game::players::linked_exile_pile(state, source)
+                }
+                _ => crate::game::players::linked_exile_cards_for_source(state, ability.source_id),
+            };
+            linked
+                .into_iter()
+                .filter(|entry| entry.is_still_exiled(state))
+                .map(|entry| entry.exiled_id)
+                .collect()
         } else if matches!(target_filter, TargetFilter::CostPaidObject) {
             // CR 400.7: resolve through the shared live-reference guard — a
             // referent that changed zones is a new object and must not become the
@@ -1447,7 +1462,8 @@ fn apply_copy_token_batch_on_board(
         entry_events_start = events.len();
         // CR 508.4: this token's own destination, selected by its creation
         // ordinal within the batch.
-        let attack_destination = attack_request.for_entrant(created_ids.len() - prefix_len);
+        let creation_ordinal = created_ids.len() - prefix_len;
+        let attack_destination = attack_request.for_entrant(creation_ordinal);
         if liminal_immediate {
             let (token_id, mut token) =
                 super::token::reserve_liminal_token_object(state, token_owner, name.clone());
@@ -1764,8 +1780,7 @@ fn apply_copy_token_batch_on_board(
         // tokens from zero, so its request starts past the tokens created so
         // far, this one included.
         let mut resume_copy = copy_spec.clone();
-        resume_copy.attack_request =
-            attack_request.after_entrants(created_ids.len() - prefix_len + 1);
+        resume_copy.attack_request = attack_request.after_entrants(creation_ordinal + 1);
         let tail = CopyTokenEntryTail {
             owner: token_owner,
             copy: resume_copy,
@@ -5214,20 +5229,7 @@ mod tests {
         // Set up combat
         state.combat = Some(crate::game::combat::CombatState::default());
 
-        let source_id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Attacker".to_string(),
-            Zone::Battlefield,
-        );
-        {
-            let source = state.objects.get_mut(&source_id).unwrap();
-            source.base_power = Some(2);
-            source.base_toughness = Some(2);
-            source.power = Some(2);
-            source.toughness = Some(2);
-        }
+        let source_id = add_copy_source(&mut state, "Grizzly Bears");
 
         let mut events = Vec::new();
         let ability = ResolvedAbility::new(
