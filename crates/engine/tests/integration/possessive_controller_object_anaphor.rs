@@ -1437,7 +1437,7 @@ fn inferno_hellion_end_step_shuffles_by_owner_after_becoming_a_land() {
     let trigger_id = trigger.id;
     let incarnation = runner.state().objects[&hellion].incarnation;
 
-    // CR 702.8a: Orrery allows the Aura to be cast in response.
+    // CR 609.4 + CR 702.8a: Orrery lets P0 cast the Aura as though it had flash.
     let mut cast = runner.cast(moon).target_object(hellion).commit();
     assert_eq!(cast.state().stack.len(), 2);
     assert_eq!(cast.state().stack[1].id, moon);
