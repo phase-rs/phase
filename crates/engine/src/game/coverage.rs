@@ -9255,7 +9255,11 @@ fn check_replacements(
             );
         });
 
-        if let Some(ReplacementCondition::Unrecognized { ref text }) = def.condition {
+        if let Some(text) = def
+            .condition
+            .as_ref()
+            .and_then(ReplacementCondition::first_unrecognized)
+        {
             let label = format!("Replacement:Unrecognized({})", truncate_label(text, 60));
             if !missing.contains(&label) {
                 missing.push(label);

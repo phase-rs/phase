@@ -275,6 +275,7 @@ mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;
 mod petals_of_insight;
 mod play_trace;
+mod polukranos_escape;
 mod power_fist_combat_damage_regression;
 mod power_without_equal;
 mod preacher_of_the_schism_life_gates;

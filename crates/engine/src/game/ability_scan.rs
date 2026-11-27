@@ -6919,6 +6919,7 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes<'_> {
 
 fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<'_> {
     match x {
+        ReplacementCondition::Not { condition } => scan_replacement_condition(condition, mode),
         ReplacementCondition::And { conditions } => {
             let mut acc = Axes::NONE;
             for x in conditions {
@@ -7018,7 +7019,11 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes<
         }
         ReplacementCondition::HasMaxSpeed => Axes::NONE,
         ReplacementCondition::OnlyIfStatic { condition } => scan_static_condition(condition, mode),
-        ReplacementCondition::CastViaEscape => Axes::NONE,
+        // CR 702.138b: entry eligibility reads the exact resolving spell for this event.
+        ReplacementCondition::CastViaEscape => Axes {
+            event: true,
+            ..Axes::NONE
+        },
         ReplacementCondition::CastVariantPaid { variant: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
         }
@@ -7858,6 +7863,7 @@ pub(crate) fn replacement_condition_reads_sibling_mutable(
 /// fail-closed for every other consumer.
 pub(crate) fn replacement_condition_reads_event(condition: &ReplacementCondition) -> bool {
     match condition {
+        ReplacementCondition::Not { condition } => replacement_condition_reads_event(condition),
         ReplacementCondition::And { conditions } => {
             conditions.iter().any(replacement_condition_reads_event)
         }

@@ -1629,6 +1629,7 @@ fn replacement_condition(condition: &$($mut_)? ReplacementCondition, v: &mut imp
         }
         ReplacementCondition::UnlessControlsCountMatching { filter: f, .. } => filter(f, v),
         ReplacementCondition::OnlyIfStatic { condition: c } => static_condition(c, v),
+        ReplacementCondition::Not { condition: c } => replacement_condition(c, v),
         ReplacementCondition::And { conditions } => {
             for c in conditions {
                 replacement_condition(c, v);

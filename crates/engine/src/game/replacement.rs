@@ -30,14 +30,14 @@ use crate::types::ability::{DamageGuardReading, SettledDamageGuard};
 use crate::types::events::GameEvent;
 use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
-    CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry, LiminalEntryKind,
-    NamedChoiceSource, NamedChoiceSourceBinding, ParentTargetOccurrences, PayableResource,
-    PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume, PendingReplacement,
-    PendingTokenSubstitute, PostReplacementDrain, ReplacementAutoChoiceId,
+    CastingVariant, CombatPreventionTally, DrainStatus, GameState, HeldBatchRider, LiminalEntry,
+    LiminalEntryKind, NamedChoiceSource, NamedChoiceSourceBinding, ParentTargetOccurrences,
+    PayableResource, PendingCombatLegChoice, PendingCombatLegProgress, PendingCostMoveResume,
+    PendingReplacement, PendingTokenSubstitute, PostReplacementDrain, ReplacementAutoChoiceId,
     ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord,
     ReplacementAutoChoiceTail, ReplacementCandidateSummary, ReplacementChoiceKind,
     ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin, RiderTiming,
-    TokenSubstituteChoice, WaitingFor,
+    StackEntryKind, TokenSubstituteChoice, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use crate::types::keywords::{
@@ -8950,6 +8950,141 @@ fn replacement_active_player_matches(
     }
 }
 
+/// CR 400.7d + CR 702.138b: read the paid variant of the exact spell
+/// resolving into this permanent. The copy finisher consults the same entry
+/// after the move, when the arrival record ties it to the resolving Stack pin.
+fn entry_was_cast_with_escape(state: &GameState, event: &ProposedEvent) -> bool {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    let (Some(entry), Some(stack_pin), Some(entrant)) = (
+        state.resolving_stack_entry.as_ref(),
+        state.resolving_stack_object,
+        state.objects.get(object_id),
+    ) else {
+        return false;
+    };
+    if entry.id != *object_id
+        || stack_pin.object_id != *object_id
+        || entrant.zone != *from
+        || entrant.cast_origin_zone() != Some(Zone::Graveyard)
+        || !matches!(
+            &entry.kind,
+            StackEntryKind::Spell {
+                casting_variant: CastingVariant::Escape,
+                ..
+            }
+        )
+    {
+        return false;
+    }
+
+    let current = ObjectIncarnationRef::from_object(entrant);
+    match from {
+        Zone::Stack => stack_pin == current,
+        Zone::Battlefield => state
+            .incarnation_entry_record(current)
+            .is_some_and(|arrival| {
+                arrival.from_zone == Some(Zone::Stack)
+                    && arrival.trigger_source_context().is_some_and(|departure| {
+                        departure.identity.reference == stack_pin
+                            && departure.identity.expected_zone == Zone::Stack
+                    })
+                    && arrival.recorded_zone_change_successor() == Some(current)
+            }),
+        _ => false,
+    }
+}
+
+/// CR 614.1c: the fixed counter modifier of a mandatory self-entry replacement.
+fn fixed_self_entry_counter_body(
+    definition: &ReplacementDefinition,
+) -> Option<(&AbilityDefinition, &CounterType)> {
+    if definition.event != ReplacementEvent::Moved
+        || definition.destination_zone != Some(Zone::Battlefield)
+        || definition.valid_card != Some(TargetFilter::SelfRef)
+        || !matches!(definition.mode, ReplacementMode::Mandatory)
+        || definition.runtime_execute.is_some()
+    {
+        return None;
+    }
+
+    let body = definition.execute.as_deref()?;
+    let Effect::PutCounter {
+        counter_type,
+        count: QuantityExpr::Fixed { .. },
+        target: TargetFilter::SelfRef,
+    } = body.effect.as_ref()
+    else {
+        return None;
+    };
+
+    (body.sub_ability.is_none() && body.else_ability.is_none()).then_some((body, counter_type))
+}
+
+/// CR 616.1 + CR 702.138c: an older pending entry can still list the ordinary
+/// counter replacement or already include its counters. Its ordinal still
+/// identifies the ordinary replacement, but that effect cannot apply here.
+pub(crate) fn has_ambiguous_legacy_escape_entry(state: &GameState) -> bool {
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return false;
+    };
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from: Zone::Stack,
+        to: Zone::Battlefield,
+        ..
+    } = &pending.proposed
+    else {
+        return false;
+    };
+    if !entry_was_cast_with_escape(state, &pending.proposed) {
+        return false;
+    }
+
+    state.objects[object_id]
+        .replacement_definitions
+        .iter_all()
+        .as_slice()
+        .windows(2)
+        .enumerate()
+        .any(|(index, pair)| {
+            let [ordinary, escape] = pair else {
+                return false;
+            };
+            let id = ReplacementId {
+                source: *object_id,
+                index: index as u64,
+            };
+            if ordinary.condition.is_some()
+                || escape.condition != Some(ReplacementCondition::CastViaEscape)
+                || !(pending.proposed.already_applied(&id)
+                    || pending.candidates.contains(&id)
+                    || pending.ordering_peers.contains(&id))
+            {
+                return false;
+            }
+
+            match (
+                fixed_self_entry_counter_body(ordinary),
+                fixed_self_entry_counter_body(escape),
+            ) {
+                (Some((ordinary, ordinary_counter)), Some((escape, escape_counter))) => {
+                    ordinary.condition.is_none()
+                        && escape.condition.is_none()
+                        && ordinary_counter == escape_counter
+                }
+                _ => false,
+            }
+        })
+}
+
 fn evaluate_replacement_condition(
     condition: &ReplacementCondition,
     controller: PlayerId,
@@ -8959,6 +9094,19 @@ fn evaluate_replacement_condition(
     event: &ProposedEvent,
 ) -> bool {
     match condition {
+        ReplacementCondition::Not { condition } => {
+            // Preserve the bare legacy enters-tapped fallback without letting
+            // an unsupported predicate authorize a negated replacement.
+            condition.first_unrecognized().is_none()
+                && !evaluate_replacement_condition(
+                    condition,
+                    controller,
+                    source_id,
+                    state,
+                    affected_object_id,
+                    event,
+                )
+        }
         ReplacementCondition::And { conditions } => conditions.iter().all(|condition| {
             evaluate_replacement_condition(
                 condition,
@@ -9184,12 +9332,8 @@ fn evaluate_replacement_condition(
             super::layers::evaluate_condition(state, condition, controller, source_id)
         }
         ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
-        // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
-        // Check cast_from_zone on the entering permanent as a proxy for escape.
-        ReplacementCondition::CastViaEscape => state
-            .objects
-            .get(&source_id)
-            .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 702.138b–c: check whether the entering permanent escaped.
+        ReplacementCondition::CastViaEscape => entry_was_cast_with_escape(state, event),
         // CR 702.188a: applies only when the source permanent's spell was cast
         // using the named alternative cost. Mirrors
         // `TriggerCondition::CastVariantPaid` (triggers.rs).
@@ -9198,8 +9342,8 @@ fn evaluate_replacement_condition(
             .get(&source_id)
             .is_some_and(|o| o.cast_variant_paid == Some((*variant, state.turn_number))),
         // CR 603.4: "if you cast it from [zone]" — applies only when the source
-        // permanent was cast from the gated zone. Equivalent to CastViaEscape
-        // for arbitrary zones (Hand for Myojin, Exile for foretell-style, etc.).
+        // permanent was cast from the gated zone (Hand for Myojin, Exile
+        // for foretell-style, etc.).
         ReplacementCondition::CastFromZone { zone } => state
             .objects
             .get(&source_id)
@@ -29401,6 +29545,32 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    #[test]
+    fn negated_replacement_condition_fails_closed_for_unsupported_predicates() {
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let event = dummy_begin_turn_event();
+        let applies = |condition: &ReplacementCondition| {
+            evaluate_replacement_condition(
+                condition,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &event,
+            )
+        };
+        let unknown = ReplacementCondition::Unrecognized {
+            text: "unsupported".into(),
+        };
+        assert!(applies(&unknown));
+        let double_negation = ReplacementCondition::Not {
+            condition: Box::new(ReplacementCondition::Not {
+                condition: Box::new(unknown),
+            }),
+        };
+        assert!(!applies(&double_negation));
     }
 
     #[test]

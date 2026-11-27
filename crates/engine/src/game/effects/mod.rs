@@ -13129,6 +13129,7 @@ fn replacement_condition_reads_filter_population(
         |inner: &ReplacementCondition| replacement_condition_reads_filter_population(inner, leaf);
     match condition {
         ReplacementCondition::And { conditions } => conditions.iter().any(recurse),
+        ReplacementCondition::Not { condition } => recurse(condition),
         ReplacementCondition::UnlessControlsOtherLeq { filter, .. } => has_typed(filter),
         ReplacementCondition::UnlessControlsMatching { filter } => has_filter(filter),
         ReplacementCondition::UnlessControlsCountMatching { filter, .. } => has_filter(filter),
