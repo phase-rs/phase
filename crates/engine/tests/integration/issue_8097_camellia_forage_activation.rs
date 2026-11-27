@@ -5,8 +5,10 @@
 //! `{2}` mana leg, and CR 601.2h + CR 602.2b require the TOTAL cost to be
 //! payable — each branch is judged with the sibling mana leg, never alone.
 
+use crate::support::shared_card_db;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
 };
@@ -431,15 +433,9 @@ fn add_camellia_and_foods(scenario: &mut GameScenario, count: usize) -> Vec<Obje
         .add_creature(P0, "Camellia, the Seedmiser", 3, 3)
         .with_subtypes(vec!["Squirrel", "Warlock"])
         .from_oracle_text(CAMELLIA_ORACLE);
+    let db = shared_card_db().expect("Golden Egg is in the integration fixture");
     (0..count)
-        .map(|_| {
-            scenario
-                .add_creature(P0, "Food", 0, 0)
-                .as_artifact()
-                .with_subtypes(vec!["Food"])
-                .from_oracle_text("{2}, {T}, Sacrifice this artifact: You gain 3 life.")
-                .id()
-        })
+        .map(|_| scenario.add_real_card(P0, "Golden Egg", Zone::Battlefield, db))
         .collect()
 }
 
@@ -457,11 +453,11 @@ fn squirrel_tokens(runner: &GameRunner) -> usize {
         .count()
 }
 
-fn activate_first_ability(runner: &mut GameRunner, source_id: ObjectId) {
+fn activate_printed_ability(runner: &mut GameRunner, source_id: ObjectId, ability_index: usize) {
     runner
         .act(GameAction::ActivateAbility {
             source_id,
-            ability_index: 0,
+            ability_index,
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the printed ability");
@@ -476,7 +472,7 @@ fn camellia_food_batch_peregrin_three_foods_one_squirrel() {
     scenario.with_library_top(P0, &["Forest"]);
     let mut runner = scenario.build();
     let hand_before = runner.state().players[0].hand.len();
-    activate_first_ability(&mut runner, peregrin);
+    activate_printed_ability(&mut runner, peregrin, 0);
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -510,7 +506,7 @@ fn camellia_food_batch_two_food_activations_two_squirrels() {
     let mut runner = scenario.build();
     let starting_life = runner.state().players[0].life;
     for (index, food) in foods.into_iter().enumerate() {
-        activate_first_ability(&mut runner, food);
+        activate_printed_ability(&mut runner, food, 1);
         runner.advance_until_stack_empty();
         assert!(!runner.state().battlefield.contains(&food));
         assert_eq!(
