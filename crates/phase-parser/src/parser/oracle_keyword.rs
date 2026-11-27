@@ -9,7 +9,8 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::oracle_cost::{
-    parse_discard_cost_body, parse_fixed_energy_amount, parse_oracle_cost, parse_single_cost,
+    parse_blight_head, parse_discard_cost_body, parse_fixed_energy_amount, parse_oracle_cost,
+    parse_single_cost,
 };
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
@@ -18,8 +19,8 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
-    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement,
+    AbilityCost, ActivationRestriction, AdditionalCost, BlightCount, CostObjectCount,
+    CostReduction, DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement,
     TapCreaturesRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
@@ -705,11 +706,16 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
             // so every comma-separated leg is part of the one cost; a leg the
             // grammar declines leaves the cost unmodeled — decline rather than
             // re-read the whole text as one leg.
-            return parts
+            let legs = parts
                 .iter()
                 .map(|part| parse_ward_cost_single(part.trim()))
-                .collect::<Option<Vec<WardCost>>>()
-                .map(|legs| Keyword::Ward(WardCost::Compound(legs)));
+                .collect::<Option<Vec<WardCost>>>()?;
+            // CR 702.21a + CR 616.1: only standalone Blight can resume its
+            // payment after a counter placement replacement choice.
+            if legs.iter().any(|leg| matches!(leg, WardCost::Blight(_))) {
+                return None;
+            }
+            return Some(Keyword::Ward(WardCost::Compound(legs)));
         }
     }
 
@@ -806,6 +812,52 @@ fn parse_ward_mana_leg(text: &str) -> Option<ManaCost> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 701.68a: Auntie Ool's Ward uses the same fixed Blight cost
+    // grammar as a spell cost. An unrecognized Blight leg remains unsupported.
+    if parse_blight_head(lower).is_ok() {
+        return match parse_single_cost(lower) {
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(count),
+            } => Some(WardCost::Blight(count)),
+            AbilityCost::Blight {
+                count: BlightCount::AnnouncedX { .. },
+            }
+            | AbilityCost::Composite { .. }
+            | AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::SayPhrase { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::PerCounter { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => None,
+        };
+    }
+
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
     // current power on resolution, or its last known information if it left its
     // expected public zone.
@@ -3839,9 +3891,9 @@ mod tests {
 
         for unmodeled in [
             "Collect evidence 4.",
-            "Blight 2.",
-            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
-            "{2}, Blight 2.",
+            "Blight 2 nonsense.",
+            // No printed Ward has this shape; extends Auntie Ool, Cursewretch's "Ward—Blight 2.".
+            "{2}, Blight X.",
             // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
             "Waterbend frob.",
             // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
@@ -3860,6 +3912,14 @@ mod tests {
         assert_eq!(
             parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
             Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Blight 2.").and_then(|r| r.keyword),
+            None
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward\u{2014}blight 2"),
+            Some(Keyword::Ward(WardCost::Blight(2)))
         );
         for unread_tail in [
             // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".

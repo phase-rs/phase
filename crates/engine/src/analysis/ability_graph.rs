@@ -691,22 +691,29 @@ fn effect_projection(effect: &Effect) -> Projection {
     let mut b = Proj::default();
     // CR 111.1 + CR 603.6a: a token's entry is an enters-the-battlefield event.
     if let Some(count) = resolution_token_mint(effect) {
-        let (a, mag) = count_seed(count);
-        b.add_tokens(a, mag);
-        b.add_etb(a, mag);
-        for ability in minted_mana_abilities(effect) {
-            let mut resolved = Vec::new();
-            collect_effects(&ability, &mut resolved);
-            for (added, _) in resolved {
-                if let Effect::Mana { produced, .. } = added {
-                    let (seeds, each) = project_mana_production(produced);
-                    // A fixed number of tokens each adding a fixed amount is a fixed amount.
-                    let mag = match (mag, each) {
-                        (AxisMagnitude::Fixed(_), AxisMagnitude::Fixed(_)) => mag,
-                        _ => AxisMagnitude::Unbounded,
-                    };
-                    for (slot, amount) in seeds {
-                        b.add_mana(slot, a * amount, mag);
+        let additional_mints = effect.token_creation_members().skip(1).map(|effect| {
+            let count =
+                resolution_token_mint(effect).expect("a token creation member mints tokens");
+            (effect, count)
+        });
+        for (member, count) in std::iter::once((effect, count)).chain(additional_mints) {
+            let (a, mag) = count_seed(count);
+            b.add_tokens(a, mag);
+            b.add_etb(a, mag);
+            for ability in minted_mana_abilities(member) {
+                let mut resolved = Vec::new();
+                collect_effects(&ability, &mut resolved);
+                for (added, _) in resolved {
+                    if let Effect::Mana { produced, .. } = added {
+                        let (seeds, each) = project_mana_production(produced);
+                        // A fixed number of tokens each adding a fixed amount is a fixed amount.
+                        let mag = match (mag, each) {
+                            (AxisMagnitude::Fixed(_), AxisMagnitude::Fixed(_)) => mag,
+                            _ => AxisMagnitude::Unbounded,
+                        };
+                        for (slot, amount) in seeds {
+                            b.add_mana(slot, a * amount, mag);
+                        }
                     }
                 }
             }
@@ -1784,7 +1791,7 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
             *acc.net
                 .counters
                 .entry((CounterClass::Minus1Minus1, ObjectClass::Creature))
-                .or_insert(0) += *count as i64;
+                .or_insert(0) += i64::from(count.with_announced_x(0));
         }
         // CR 701.21a: sacrificing PRODUCES sac/LTB (and dies) events (R3-SAC-POLARITY).
         // CR 700.4: the dies (Death) event is gated to creature-or-undeterminable
@@ -3066,7 +3073,9 @@ mod tests {
         )));
 
         let mut blight = activated(Effect::unimplemented("t", "blight"));
-        blight.cost = Some(AbilityCost::Blight { count: 1 });
+        blight.cost = Some(AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(1),
+        });
         let nb = build_node(ORIGIN, &blight, None);
         assert!(nb.produces.contains(&AxisKey::Counter(
             CounterClass::Minus1Minus1,
@@ -3256,6 +3265,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
     fn sacrifice(target: TargetFilter) -> Effect {
@@ -4017,6 +4027,12 @@ mod tests {
     /// ("They have "Sacrifice this token: Add {C}.""), in a fixed number or not.
     #[test]
     fn a_mint_produces_the_mana_its_tokens_add() {
+        let fae = first_trigger_node("Fae Offering");
+        assert_eq!(fae.net.tokens_created, 3);
+        assert_eq!(fae.net.etb_triggers, 3);
+        assert_eq!(fae.net.mana.iter().sum::<i64>(), 1);
+        assert!(fae.produces.contains(&AxisKey::Mana));
+
         let gnawbone = first_trigger_node("Old Gnawbone");
         assert!(gnawbone.produces.contains(&AxisKey::Mana));
         assert!(gnawbone.unbounded_production.contains(&AxisKey::Mana));

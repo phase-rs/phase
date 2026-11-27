@@ -2171,6 +2171,27 @@ fn reconcile_parked_unless_payment_after_departure(
     if departure.is_none() {
         return Ok(false);
     }
+    if let WaitingFor::UnlessBlightChoice {
+        player,
+        counters,
+        creatures,
+        ..
+    } = &mut result.waiting_for
+    {
+        let eligible = effects::blight::eligible_blight_creatures(state, *player, *counters);
+        if eligible.is_empty() {
+            *result = engine_payment_choices::handle_unless_blight_choice(
+                state,
+                result.waiting_for.clone(),
+                None,
+                &mut result.events,
+            )?;
+        } else {
+            *creatures = eligible;
+        }
+        state.waiting_for = result.waiting_for.clone();
+        return Ok(true);
+    }
     match parked_unless_payment_repair(state, &result.waiting_for) {
         Some(ParkedPaymentRepair::StalePrompt) => {
             sync_waiting_for(state, &result.waiting_for);
@@ -9016,6 +9037,7 @@ pub(super) fn apply_for_seat_with_mode(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostMoveDrainBoundary {
     ReplacementDelivered { action_event_start: usize },
+    ReplacementAbandoned { action_event_start: usize },
     ReplacementPrevented { action_event_start: usize },
     PriorityBoundary,
 }
@@ -9036,7 +9058,8 @@ pub(crate) fn drain_pending_cost_move_resume(
         return Ok(None);
     }
     let eligible = match boundary {
-        CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
+        CostMoveDrainBoundary::ReplacementDelivered { .. }
+        | CostMoveDrainBoundary::ReplacementAbandoned { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
                 PendingCostMoveResume::Cast { .. }
@@ -9124,6 +9147,7 @@ pub(crate) fn drain_pending_cost_move_resume(
 
     let action_event_start = match boundary {
         CostMoveDrainBoundary::ReplacementDelivered { action_event_start }
+        | CostMoveDrainBoundary::ReplacementAbandoned { action_event_start }
         | CostMoveDrainBoundary::ReplacementPrevented { action_event_start } => {
             Some(action_event_start)
         }
@@ -14954,6 +14978,28 @@ fn apply_non_priority_pass_action(
             )?
         }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
+        (
+            waiting_for @ WaitingFor::UnlessBlightChoice { .. },
+            GameAction::SelectCards { cards },
+        ) => {
+            return engine_payment_choices::handle_unless_blight_choice(
+                state,
+                waiting_for.clone(),
+                Some(&cards),
+                &mut events,
+            );
+        }
+        (
+            waiting_for @ WaitingFor::UnlessBlightChoice { .. },
+            GameAction::PayUnlessCost { pay: false },
+        ) => {
+            return engine_payment_choices::handle_unless_blight_choice(
+                state,
+                waiting_for.clone(),
+                None,
+                &mut events,
+            );
+        }
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
             return engine_payment_choices::handle_unless_payment(
                 state,
@@ -15227,6 +15273,22 @@ fn apply_non_priority_pass_action(
                 // Payment restrictions ("Spend only [colors] mana on X") are carried as payment-allocation
                 // metadata in SpellMeta and enforced during mana payment.
                 let mut trial = pending.as_ref().clone();
+                if let Some(crate::types::ability::AdditionalCost::Required(cost)) =
+                    &trial.additional_cost_flow
+                {
+                    if casting_costs::bounded_blight_cost_max(state, player, trial.object_id, cost)
+                        .is_some_and(|max| {
+                            value > max
+                                || !casting_costs::bounded_blight_x_can_be_paid(
+                                    state, player, cost, value,
+                                )
+                        })
+                    {
+                        return Err(EngineError::InvalidAction(format!(
+                            "X={value} cannot pay the Blight cost"
+                        )));
+                    }
+                }
                 trial.ability.set_chosen_x_recursive(value);
                 trial.cost.concretize_x(value);
                 if trial.activation_ability_index.is_some()
@@ -16463,6 +16525,7 @@ fn apply_non_priority_pass_action(
                 source_id: _,
                 legal_targets,
                 pending_ability,
+                chosen_hosts,
             },
             GameAction::ChooseTarget { target },
         ) => {
@@ -16477,64 +16540,26 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             };
-            // Fail-closed liveness backstop: the choice was offered moments
-            // ago against incarnation-current battlefield objects, and
-            // nothing resolves during a prompt — but a stale answer must
-            // never bind a departed host.
-            let host = match &chosen {
-                TargetRef::Object(id) => {
-                    let live = state
-                        .objects
-                        .get(id)
-                        .is_some_and(|obj| obj.zone == Zone::Battlefield);
-                    if !live {
-                        return Err(EngineError::InvalidAction(
-                            "ChooseTokenHost: chosen host is no longer legal".to_string(),
-                        ));
-                    }
-                    super::game_object::AttachTarget::Object(*id)
-                }
-                TargetRef::Player(id) => super::game_object::AttachTarget::Player(*id),
-            };
-            // CR 400.7 (F2): the stamped incarnation pin must still be
-            // current. At the sandbox/debug boundary an offered object can
-            // leave and return during the prompt with the same stored
-            // ObjectId and a new incarnation — a new object that must not
-            // receive the Role. The pin lives in the pending ability's
-            // stamped batch (the single stamp authority); absence of a pin
-            // means a non-boon prompt, which skips this check.
-            if let TargetRef::Object(id) = &chosen {
-                let stale = pending_ability
-                    .context
-                    .boon_trigger_batch_objects
-                    .iter()
-                    .find(|pin| pin.object_id == *id)
-                    .is_some_and(|pin| !pin.is_current(state));
-                if stale {
-                    return Err(EngineError::InvalidAction(
-                        "ChooseTokenHost: chosen host is no longer the stamped object".to_string(),
-                    ));
-                }
+            let mut chosen_hosts = chosen_hosts.clone();
+            if chosen_hosts.is_empty() {
+                chosen_hosts.resize(
+                    super::effects::token::legacy_token_host_member(pending_ability),
+                    None,
+                );
             }
-            // CR 303.4c + CR 608.2d: re-verify projected attach legality at
-            // accept time — a protection grant could have landed between the
-            // offer snapshot and this answer (only prompt answers interleave,
-            // but the check is cheap and load-bearing against tag forgery).
-            if !super::effects::token::boon_host_passes_projected_legality(
+            // CR 608.2d: Revalidate against the current member's host pool,
+            // including the stamped incarnation for a boon.
+            if !super::effects::token::token_host_choice_is_legal(
                 state,
                 pending_ability,
+                chosen_hosts.len(),
                 &chosen,
             ) {
                 return Err(EngineError::InvalidAction(
-                    "ChooseTokenHost: chosen host cannot be enchanted".to_string(),
+                    "ChooseTokenHost: chosen host is no longer legal".to_string(),
                 ));
             }
-            // Digital-only Alchemy (no CR entry): resume the paused token
-            // creation with the choice bound. The pause pass mutated nothing
-            // (it returned before proposing), so re-entry applies exactly
-            // once; the override skips the pause branch, so a resumed
-            // resolution never prompts twice.
-            //
+            chosen_hosts.push(Some(chosen));
             // CR 616.1: clear the answered host prompt BEFORE re-entering the
             // token resolver, so anything non-Priority afterwards is a pause
             // the resumed creation opened itself (replacement ordering on
@@ -16546,11 +16571,11 @@ fn apply_non_priority_pass_action(
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };
-            super::effects::token::resolve_with_host_override(
+            super::effects::token::resolve_with_token_hosts(
                 state,
                 &pending,
                 &mut events,
-                Some(host),
+                chosen_hosts,
             )
             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -24915,6 +24940,7 @@ mod stage2_injector_tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             );
             a.repeat_for = Some(QuantityExpr::Ref {
@@ -27955,6 +27981,7 @@ mod cost_move_drain_priority_boundary_tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: Vec::new(),
+                blight: None,
                 unpaid_suffix: None,
             });
         let mut events = Vec::new();

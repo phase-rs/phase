@@ -788,6 +788,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::OpponentMayChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::TributeChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
+        | (
+            WaitingFor::UnlessBlightChoice { .. },
+            GameAction::PayUnlessCost { pay: false },
+        )
         | (WaitingFor::UnlessPaymentChooseCost { .. }, GameAction::ChooseUnlessCostBranch { .. })
         | (WaitingFor::CombatTaxPayment { .. }, GameAction::PayCombatTax { .. })
         | (
@@ -1040,9 +1044,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, choices, Some(*count))
         }
         // CR 701.68a: Blight always selects exactly one creature, regardless of N.
-        (WaitingFor::BlightChoice { creatures, .. }, GameAction::SelectCards { cards: chosen }) => {
-            selection_mismatch(chosen, creatures, Some(1))
-        }
+        (
+            WaitingFor::BlightChoice { creatures, player, counters, .. }
+            | WaitingFor::UnlessBlightChoice { creatures, player, counters, .. },
+            GameAction::SelectCards { cards: chosen },
+        ) => crate::game::effects::blight::validate_blight_selection(
+            state, *player, *counters, creatures, chosen,
+        ).is_err(),
         (
             WaitingFor::EffectZoneChoice {
                 player: _,
@@ -6637,6 +6645,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             ))
             .valid_card(TargetFilter::SelfRef);

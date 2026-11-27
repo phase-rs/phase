@@ -4120,6 +4120,7 @@ pub(crate) fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent:
             supertypes: supertypes.clone(),
             static_abilities: static_abilities.clone(),
             enter_with_counters: enter_with_counters.clone(),
+            additional_members: Vec::new(),
         }),
         _ => None,
     };
@@ -14516,7 +14517,7 @@ fn type_filter_names_demonstrative(filter: &TypeFilter, noun: DemonstrativeNoun)
 /// (`Composite`/`OneOf`), wrapping (`PerCounter`), and effect-nesting
 /// (`EffectCost`) variants. The no-X variants
 /// are enumerated as explicit no-ops: their amounts are either fixed integers
-/// (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/TapCreatures/…) or a
+/// (`Loyalty`, `Mill`, counts on Sacrifice/Exile/TapCreatures/…) or a
 /// static `ManaCost`/object filter that the where-X mana-value clause does not
 /// bind (X-in-mana-cost is concretized at announcement, not by this rewrite).
 fn apply_where_x_to_ability_cost(
@@ -14557,7 +14558,7 @@ fn apply_where_x_to_ability_cost(
         // rewriting itself to `Effect::unimplemented`, so no `unbound` plumbing
         // is needed here)
         // No X-bearing `QuantityExpr` amount to bind: fixed integer counts
-        // (`Loyalty`, `Mill`, `Blight`, counts on Sacrifice/Exile/…) or a static
+        // (`Loyalty`, `Mill`, counts on Sacrifice/Exile/…) or a static
         // `ManaCost`/object filter that this where-X mana-value clause does not
         // bind (X-in-mana-cost is concretized at announcement, not by this
         // rewrite).
@@ -14582,6 +14583,8 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
+        // The Blight cap is part of the cast proposal and is separate from a
+        // resolution-time where-X binding.
         | AbilityCost::Blight { .. }
         | AbilityCost::Behold { .. }
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
@@ -15790,6 +15793,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         creator.condition = Some(AbilityCondition::WhenYouDo);
@@ -17276,6 +17280,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         );
         let mut cleanup = AbilityDefinition::new(
@@ -19284,6 +19289,7 @@ mod where_x_tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
 
         super::apply_where_x_effect_expression(
@@ -19798,6 +19804,7 @@ mod token_anaphor_rewrite_tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         };
         let mut cur = Effect::unimplemented("create", "create two of those tokens");
         rewrite_those_tokens_from_antecedent(&mut cur, &antecedent);

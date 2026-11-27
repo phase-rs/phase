@@ -15,8 +15,8 @@ use crate::parser::oracle_ir::context::{ParseContext, TokenPtFollowup};
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Effect, FilterProp, NamedDefenderScope, ObjectScope,
-    PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, ThisWayCause,
-    TokenAttackDestination, TypeFilter,
+    PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetChoiceTiming, TargetFilter,
+    ThisWayCause, TokenAttackDestination, TokenCreationMember, TypeFilter,
 };
 use crate::types::ability_visit::{
     nested_definitions_name_granter, own_fields_name_granter, token_static_creator_grant,
@@ -219,6 +219,7 @@ fn token_description_to_effect(token: TokenDescription) -> Effect {
         supertypes: token.supertypes,
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -725,6 +726,44 @@ fn first_token_attachment_connector(lower: &str) -> Option<&'static str> {
         ))
         .parse(input)
     })
+}
+
+pub(super) fn parse_token_creation_member(
+    original: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<TokenCreationMember> {
+    let effect = try_parse_token(lower, original.trim(), ctx)?;
+    let timing = match &effect {
+        Effect::Token {
+            attach_to: Some(filter),
+            ..
+        } if !filter.is_context_ref() => {
+            let connector = first_token_attachment_connector(lower)?;
+            let (_, host) = TextPair::new(original, lower).split_around(connector)?;
+            // CR 115.10a: the host description announces a target only if it
+            // uses the word "target" ("target creature", "up to one target
+            // creature you control"). Only the instruction's own token surfaces
+            // a target slot, so a later member's announced target would be
+            // lost: leave the whole list unparsed instead.
+            let names_target = nom_primitives::scan_at_word_boundaries(host.lower, |input| {
+                value(
+                    (),
+                    terminated(
+                        tag::<_, _, OracleError<'_>>("target"),
+                        alt((tag("s "), tag(" "), eof)),
+                    ),
+                )
+                .parse(input)
+            });
+            if names_target.is_some() {
+                return None;
+            }
+            TargetChoiceTiming::Resolution
+        }
+        _ => TargetChoiceTiming::Stack,
+    };
+    TokenCreationMember::with_host_choice_timing(effect, timing)
 }
 
 fn parse_token_description_with_context(

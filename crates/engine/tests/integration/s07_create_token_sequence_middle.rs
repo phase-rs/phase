@@ -1,11 +1,8 @@
-//! S07 token-splitter class fix — runtime chain-walk coverage.
+//! Shared-verb token creation through the cast pipeline.
 //!
-//! CR 608.2c: "create A, a B, and a C token" is a do-ALL list in written order.
-//! The old binary split dropped the MIDDLE token; the N-way split chains all N
-//! via `sub_ability`. These tests drive the real cast pipeline
-//! (`GameRunner::cast(..).resolve()`) so the runtime `sub_ability` chain driver
-//! must resolve every node — reverting the parser fix drops the middle token and
-//! the token delta falls from 3 to 2, failing each assertion below.
+//! CR 608.2c: the noun phrases of a shared creation verb all belong to one
+//! instruction. The tests verify that the resolver delivers every member,
+//! including the middle token of a three-member list.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -65,7 +62,7 @@ fn bestial_menace_creates_all_three_creature_tokens() {
 fn fae_offering_creates_all_three_predefined_artifact_tokens() {
     // Fae Offering's create clause (predefined-artifact token class): Clue,
     // Food (the middle), Treasure. Driven as a sorcery so the identical parsed
-    // sub_ability chain resolves through the real stack.
+    // instruction resolves through the real stack.
     let names =
         resolve_and_collect_token_names("Create a Clue token, a Food token, and a Treasure token.");
     assert_eq!(

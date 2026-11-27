@@ -171,6 +171,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::SpecializeColor { .. }
         | WaitingFor::PayCost { .. }
         | WaitingFor::BlightChoice { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::ChooseManaColor { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }

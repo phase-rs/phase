@@ -24,6 +24,12 @@ Each entry MUST include:
 
 ## Active shims
 
+Fixed Blight counts retain their canonical numeric representation in card data
+and checkpoints. An announced Blight X uses a tagged count with an explicit
+maximum expression. A checkpoint containing a numeric Blight count resumes
+with that fixed amount. Fresh Oracle parsing supplies bounded X to newly
+created card definitions.
+
 ### `LEGACY_CONSPIRE_PAYMENT_ORIGIN_2026Q4`
 
 - **Covers** saved Conspire offers and tap selections recorded under the generic `Other` payment origin. Restore recognizes the exact Conspire cost and gives it a separate payment record before the cast resumes.

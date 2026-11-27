@@ -27162,6 +27162,7 @@ fn modal_x_target_legality_chooses_x_before_targets() {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         ));
         Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(

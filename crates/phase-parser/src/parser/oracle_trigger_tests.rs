@@ -566,6 +566,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
                 StaticDefinition::continuous().condition(granted_condition.clone())
             ],
             enter_with_counters: vec![(CounterType::Plus1Plus1, placeholder.clone())],
+            additional_members: Vec::new(),
         },
     );
     match execute.effect.as_ref() {
@@ -2928,14 +2929,10 @@ fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
 
 #[test]
 fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
-    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
-    // attacked-only intervening-if. Gates on the source creature having attacked
-    // OR blocked this turn, composed from the existing, already-evaluated
-    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
-    // `TriggerCondition` variant.
+    // SHAPE — CR 700.7: The filter describes the source's combat history.
     let expected = Some(TriggerCondition::SourceMatchesFilter {
         filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+            TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
         ),
     });
 
@@ -2943,11 +2940,13 @@ fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
     // owner's library every end step, even on a turn it neither attacked nor
     // blocked.
     let hellion = parse_trigger_line(
-        "At the beginning of each end step, if Inferno Hellion attacked or blocked this turn, \
+        "At the beginning of each end step, if this creature attacked or blocked this turn, \
          its owner shuffles it into their library.",
         "Inferno Hellion",
     );
     assert_eq!(hellion.condition, expected);
+    assert_eq!(hellion.mode, TriggerMode::Phase);
+    assert_eq!(hellion.phase, Some(Phase::End));
     // The intervening-if clause is stripped, so the effect still parses.
     assert!(hellion.execute.is_some());
 }
@@ -7330,6 +7329,67 @@ fn trigger_attacks_you_or_planeswalker_you_control() {
         Some(AttackTargetFilter::PlayerOrPlaneswalker)
     );
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+}
+
+#[test]
+fn tenuous_truce_binds_each_reciprocal_attack_leg() {
+    let parsed = parse_oracle_text(
+        "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice this Aura.",
+        "Tenuous Truce",
+        &[],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    assert_eq!(parsed.triggers.len(), 2, "{:?}", parsed.triggers);
+    for (def, (source, target)) in parsed.triggers.iter().zip([
+        (TargetFilter::Controller, TargetFilter::AttachedTo),
+        (
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::EnchantedPlayer)),
+            TargetFilter::Controller,
+        ),
+    ]) {
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_source.as_ref(), Some(&source));
+        assert_eq!(def.valid_target.as_ref(), Some(&target));
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert!(!def.batched);
+        assert!(matches!(
+            def.execute
+                .as_ref()
+                .expect("sacrifice effect")
+                .effect
+                .as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn reciprocal_attack_dispatch_preserves_other_disjunctive_heads() {
+    for (name, oracle, card_type, expected_mode) in [
+        (
+            "Flavor Disaster",
+            "When Flavor Disaster enters the battlefield or when it's turned face up, target creature gets +X/+X until end of turn, where X is Flavor Disaster's power.",
+            "Creature",
+            TriggerMode::ChangesZone,
+        ),
+        (
+            "Sky Deck",
+            "Whenever you planeswalk here, at the beginning of your upkeep, or whenever chaos ensues, put a glass counter on up to one target nonland permanent.",
+            "Plane",
+            TriggerMode::Planeswalked { role: PlaneswalkRole::To },
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{name}: {:?}", parsed.triggers);
+        assert_eq!(parsed.triggers[0].mode, expected_mode, "{name}");
+    }
 }
 
 /// Issue #4744 — Curse of Predation: "Whenever a creature attacks enchanted
@@ -48958,4 +49018,164 @@ fn delayed_player_damage_head_preserves_recipient_and_remainder() {
         "whenever one or more creatures you control deal combat damage to one or more players"
     )
     .is_none());
+}
+#[test]
+fn opponent_attack_destination_keeps_the_union_in_one_trigger() {
+    use crate::parser::oracle::parse_oracle_text;
+
+    for (subject, tail, batched, kinds) in [
+        (
+            "one or more creatures attack",
+            " or a planeswalker they control",
+            true,
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            "a creature attacks",
+            " or a planeswalker an opponent controls",
+            false,
+            AttackTargetFilter::PlayerOrPlaneswalker,
+        ),
+        (
+            "one or more creatures attack",
+            "",
+            true,
+            AttackTargetFilter::Player,
+        ),
+    ] {
+        let body = if batched {
+            "those creatures gain menace until end of turn."
+        } else {
+            "that creature gets +2/+0 until end of turn."
+        };
+        let oracle = format!("Whenever {subject} one of your opponents{tail}, {body}");
+        let parsed = parse_oracle_text(&oracle, "Witness", &[], &["Creature".into()], &[]);
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected one trigger for {oracle}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::Attacks, "{oracle}");
+        assert_eq!(trigger.attack_target_filter, Some(kinds), "{oracle}");
+        assert_eq!(trigger.batched, batched, "{oracle}");
+        assert_eq!(
+            trigger.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+            "{oracle}",
+        );
+        match trigger.execute.as_deref().map(|ability| &*ability.effect) {
+            Some(Effect::GenericEffect {
+                target: None,
+                static_abilities,
+                ..
+            }) if batched => {
+                assert_eq!(static_abilities.len(), 1, "{oracle}");
+                assert_eq!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::ParentTarget),
+                    "{oracle}",
+                );
+            }
+            Some(Effect::Pump {
+                target: TargetFilter::TriggeringSource,
+                ..
+            }) if !batched => {}
+            other => panic!("unexpected application for {oracle}: {other:?}"),
+        }
+    }
+}
+
+// SHAPE: a declaration in an earlier clause and a rider in the body both use
+// the ordinary chain parser.
+#[test]
+fn source_owner_shuffle_preserves_target_declarations_and_riders() {
+    let riftsweeper = parse_trigger_line(
+        "When this creature enters, choose target face-up exiled card. Its owner shuffles it into their library.",
+        "Riftsweeper",
+    );
+    let declaration = riftsweeper.execute.as_deref().expect("ETB body");
+    assert!(matches!(
+        declaration.effect.as_ref(),
+        Effect::TargetOnly { target } if target.extract_zones() == [Zone::Exile]
+    ));
+    assert_eq!(
+        declaration.target_choice_timing,
+        crate::types::ability::TargetChoiceTiming::Stack
+    );
+    let movement = declaration.sub_ability.as_deref().expect("selected move");
+    assert!(matches!(
+        movement.effect.as_ref(),
+        Effect::ChangeZoneAll {
+            target: TargetFilter::ParentTarget,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+    let shuffle = movement
+        .sub_ability
+        .as_deref()
+        .expect("tracked-owner shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    );
+    assert!(shuffle.player_scope.is_some());
+    assert_no_unimplemented(declaration);
+
+    // Synthetic continuation on Lembas's printed trigger. The extra
+    // sentence must reach chain parsing even with a proven source antecedent.
+    let with_rider = parse_trigger_line(
+        "When this artifact is put into a graveyard from the battlefield, its owner shuffles it into their library. Draw a card.",
+        "Lembas",
+    );
+    let body = with_rider
+        .execute
+        .as_deref()
+        .expect("extended departure body");
+    assert_no_unimplemented(body);
+    assert!(
+        std::iter::successors(Some(body), |node| node.sub_ability.as_deref())
+            .any(|node| matches!(node.effect.as_ref(), Effect::Draw { .. }))
+    );
+}
+
+// SHAPE: a printed self-cycle head pins the pronoun, independent of the
+// narrowly scoped source proof for this shuffle. No printed self-cycle
+// trigger has the synthetic shuffle body below. Yidaro, Wandering Monster
+// has the nearest printed instruction, shuffling itself from its graveyard.
+#[test]
+fn source_owner_shuffle_requires_the_proven_trigger_antecedent() {
+    let yidaro = parse_trigger_line(
+        "When you cycle this card, shuffle it into your library from your graveyard. If you've cycled a card named Yidaro, Wandering Monster four or more times this game, put it onto the battlefield from your graveyard instead. (Do this before you draw.)",
+        "Yidaro, Wandering Monster",
+    );
+    assert_eq!(yidaro.mode, TriggerMode::Cycled);
+    assert!(yidaro.execute.is_some());
+    let pin = trigger_condition_anaphors("When you cycle this card", &mut ParseContext::default());
+    assert_eq!(pin.object_pronoun_ref, Some(TargetFilter::SelfRef));
+
+    for text in [
+        "When you cycle this card, its owner shuffles it into their library.",
+        "At the beginning of each end step, its owner shuffles it into their library.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic");
+        let body = trigger.execute.as_deref().expect("generic body");
+        assert!(matches!(
+            body.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        ));
+        let shuffle = body.sub_ability.as_deref().expect("generic shuffle");
+        assert!(matches!(shuffle.effect.as_ref(), Effect::Shuffle { .. }));
+        assert!(!matches!(
+            shuffle.effect.as_ref(),
+            Effect::Shuffle {
+                target: TargetFilter::Owner
+            }
+        ));
+    }
 }

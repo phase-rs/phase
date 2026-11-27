@@ -333,7 +333,7 @@ where
 /// descend the one carrier list: shared (every `Effect`) at this module's root,
 /// exclusive (every definition node) in [`nodes_mut`].
 macro_rules! define_walk {
-    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident) => {
+    ([$($mut_:tt)?]; [$($bound:tt)+]; $on_effect:ident; $on_node:ident; $arc_iter:ident; $member_statics:ident) => {
 /// Effect-axis wrapper over [`scope_prunes_nested_ability`]. Every recursion
 /// into a nested `AbilityDefinition` that is *not* already behind a boundary
 /// gate goes through here.
@@ -938,11 +938,16 @@ where
         // permanent that isn't represented by a card." The token is a distinct
         // permanent and its granted abilities are the token's, not this one's.
         Effect::Token {
-            static_abilities, ..
+            static_abilities, additional_members, ..
         } => {
             if scope.resolution == ResolutionScope::IncludeRegisteredLater {
                 for static_def in static_abilities {
                     visit_static_scoped(static_def, scope, visit)?;
+                }
+                for member in additional_members {
+                    for static_def in member.$member_statics() {
+                        visit_static_scoped(static_def, scope, visit)?;
+                    }
                 }
             }
         }
@@ -1240,13 +1245,13 @@ macro_rules! exclusive_iter {
     };
 }
 
-define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter);
+define_walk!([]; [FnMut(&Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; shared_iter; static_abilities);
 
 /// The exclusive walk of effects reachable from an assembled definition.
 pub mod effects_mut {
     use super::*;
 
-    define_walk!([mut]; [FnMut(&mut Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; exclusive_iter);
+    define_walk!([mut]; [FnMut(&mut Effect) -> ControlFlow<()>]; visit_each_effect; skip_nodes; exclusive_iter; static_abilities_mut);
 }
 
 /// A definition node surfaced by the exclusive walk.
@@ -1261,7 +1266,7 @@ pub enum DefinitionNodeMut<'a> {
 pub mod nodes_mut {
     use super::*;
 
-    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter);
+    define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter; static_abilities_mut);
 }
 
 macro_rules! visit_each_node_ref {
@@ -1282,7 +1287,7 @@ pub enum DefinitionNode<'a> {
 pub mod nodes {
     use super::*;
 
-    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter);
+    define_walk!([]; [FnMut(DefinitionNode<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node_ref; shared_iter; static_abilities);
 }
 
 /// CR 201.5a: the positions in one definition node where a granter symbol is bound.
@@ -1292,7 +1297,7 @@ pub mod nodes {
 macro_rules! define_granter_walk {
     ([$($mut_:tt)?]; $Node:ident; $nodes:ident) => {
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ActivationRestriction, CardTypeSetSource,
+    AbilityCondition, AbilityCost, ActivationRestriction, BlightCount, CardTypeSetSource,
     ContinuousModification, Duration, Effect, FilterProp, ObjectScope, ParsedCondition,
     PerpetualModification, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     StaticCondition, TargetFilter, TriggerCondition,
@@ -1475,6 +1480,9 @@ fn ability_cost(cost: &$($mut_)? AbilityCost, v: &mut impl FnMut(Symbol<'_>)) {
         | AbilityCost::ReturnToHand { filter: Some(f), .. }
         | AbilityCost::Reveal { filter: Some(f), .. }
         | AbilityCost::TapCreatures { filter: f, .. } => filter(f, v),
+        AbilityCost::Blight {
+            count: BlightCount::AnnouncedX { maximum },
+        } => quantity(maximum, v),
         AbilityCost::EffectCost { effect: e } => effect(e, v),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
             for c in costs {

@@ -9,6 +9,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
+use super::super::oracle_cost::parse_fixed_blight;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::enters_under::{
@@ -4020,6 +4021,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // trailing space; keep it in the bare-and splitter instead of letting the
     // Draw parser swallow it as an ignored tail.
     .or(value((), tag("proliferate")))
+    // CR 608.2c + CR 701.68a: Sinister Gnarlbark's draw and Blight are
+    // distinct instructions. Confirm the number ends at a word boundary.
+    .or(value(
+        (),
+        terminated(
+            parse_fixed_blight,
+            peek(alt((
+                value((), multispace1),
+                value((), one_of(".,;")),
+                value((), eof),
+            ))),
+        ),
+    ))
     // CR 701.47a + CR 608.2c: "you lose 1 life and amass Zombies 1"
     // (Dreadhorde Invasion — issue #5341) is two independent instructions.
     // Without this arm the LoseLife half greedily swallows the whole chunk and
@@ -13979,6 +13993,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -14014,6 +14029,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(
@@ -14047,6 +14063,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         };
         assert_eq!(
             parse_followup_continuation_ast(

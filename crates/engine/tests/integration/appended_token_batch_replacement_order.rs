@@ -284,6 +284,56 @@ fn finish_at_end_step(runner: &mut GameRunner) {
     runner.advance_until_stack_empty();
 }
 
+#[test]
+fn token_order_can_matter_only_after_a_third_replacement() {
+    for (first, second, soldiers) in [
+        ("Parallel Lives", None, 1),
+        ("Halving Season", Some("Halving Season"), 0),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let doubler = scenario
+            .add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES)
+            .id();
+        let first_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let second_halver = scenario
+            .add_enchantment_from_oracle(P1, "Halving Season", HALVING_SEASON)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", false, RAISE_THE_ALARM)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+
+        // CR 616.1e + CR 616.1f: each pair commutes from two Soldiers, but the
+        // full sequences can yield either 2 → 4 → 2 → 1 or 2 → 1 → 0.
+        let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected an initial order choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        let mut sources: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.source_id)
+            .collect();
+        sources.sort_unstable();
+        assert_eq!(sources, [doubler, first_halver, second_halver]);
+        answer(&mut runner, order(3, first));
+        let remaining: Vec<_> = second.into_iter().map(|source| order(2, source)).collect();
+        settle(&mut runner, &remaining, Until::StackEmpty);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(tokens(&runner, "Soldier").len(), soldiers);
+        assert_eq!(ledger(&runner).len(), soldiers);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Legion Warboss: an ordering prompt over the compound event
 // ---------------------------------------------------------------------------
@@ -1235,8 +1285,8 @@ fn copy_on_entry_after_chatterfang_copies_every_token() {
 }
 
 /// CR 616.1g + CR 616.1: two creation-replacement prompts (Chatterfang, then
-/// Parallel Lives; P1's Halving Season last) settle the event as two Soldiers
-/// plus two Squirrels before Mystic Reflection, a replacement of the contained
+/// Parallel Lives; P1's Halving Season last) settle the event as one Saproling
+/// plus one Squirrel before Mystic Reflection, a replacement of the contained
 /// entry, can be chosen; it then makes every one of them a copy of Colossal
 /// Dreadmaw. Neither prompt offers it.
 #[test]
@@ -1250,7 +1300,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
         .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
         .id();
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Sprout",
+            true,
+            "Create a 1/1 green Saproling creature token.",
+        )
         .id();
     let mut runner = scenario.build();
     runner.cast(mystic).target_object(dreadmaw).resolve();
@@ -1266,12 +1321,12 @@ fn contained_copy_reaches_every_batch_after_outer_prompts() {
 
     assert_eq!(
         tokens_named(&runner, "Colossal Dreadmaw").len(),
-        4,
-        "2 + 2, doubled, then halved: all four enter as Dreadmaw copies"
+        2,
+        "1 + 1, doubled, then halved: both enter as Dreadmaw copies"
     );
     assert!(tokens(&runner, "Squirrel").is_empty());
-    assert!(tokens(&runner, "Soldier").is_empty());
-    assert_eq!(ledger(&runner).len(), 4);
+    assert!(tokens(&runner, "Saproling").is_empty());
+    assert_eq!(ledger(&runner).len(), 2);
 }
 
 /// Grumgully added before or after Chatterfang; Raise the Alarm.
@@ -1734,4 +1789,149 @@ fn released_compound_token_park_restores_applied_sets_through_jinnie_decline() {
     assert_eq!(tokens(&runner, "Squirrel").len(), 2);
     assert!(tokens(&runner, "Cat").is_empty());
     assert!(tokens(&runner, "Dog").is_empty());
+}
+
+fn assert_commuting_soldier_entry(grumgully: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Authority of the Consuls",
+        "Creatures your opponents control enter tapped.\nWhenever a creature an opponent controls enters, you gain 1 life.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Blind Obedience",
+        "Extort (Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain that much life.)\nArtifacts and creatures your opponents control enter tapped.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Kismet",
+        "Artifacts, creatures, and lands your opponents control enter tapped.",
+    );
+    scenario.add_creature_from_oracle(
+        P1,
+        "Thalia, Heretic Cathar",
+        3,
+        2,
+        "First strike\nCreatures and nonbasic lands your opponents control enter tapped.",
+    );
+    if grumgully {
+        scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    } else {
+        scenario.add_artifact_from_oracle(P1, "Orb of Dreams", "Permanents enter tapped.");
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    settle(&mut runner, &[], Until::StackEmpty);
+
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert_tapped_soldiers(&runner, 2, u32::from(grumgully));
+}
+
+fn assert_tapped_soldiers(runner: &GameRunner, count: usize, counters: u32) {
+    let soldiers = tokens(runner, "Soldier");
+    assert_eq!(soldiers.len(), count);
+    for soldier in soldiers {
+        assert_eq!(soldier.controller, P0);
+        assert!(soldier.tapped);
+        assert_eq!(plus_counters(runner, soldier.id), counters);
+    }
+}
+
+#[test]
+fn commuting_soldier_entry_with_five_tap_effects() {
+    assert_commuting_soldier_entry(false);
+}
+
+#[test]
+fn commuting_soldier_entry_with_four_tap_effects_and_counters() {
+    assert_commuting_soldier_entry(true);
+}
+
+fn assert_soldier_entry_orders_over_budget(
+    tap_effects: usize,
+    double_tokens: bool,
+    taps_before_grumgully: usize,
+) {
+    const TAP_SOURCES: [&str; 16] = [
+        "Test Tap Enchantment 1",
+        "Test Tap Enchantment 2",
+        "Test Tap Enchantment 3",
+        "Test Tap Enchantment 4",
+        "Test Tap Enchantment 5",
+        "Test Tap Enchantment 6",
+        "Test Tap Enchantment 7",
+        "Test Tap Enchantment 8",
+        "Test Tap Enchantment 9",
+        "Test Tap Enchantment 10",
+        "Test Tap Enchantment 11",
+        "Test Tap Enchantment 12",
+        "Test Tap Enchantment 13",
+        "Test Tap Enchantment 14",
+        "Test Tap Enchantment 15",
+        "Test Tap Enchantment 16",
+    ];
+    let tap_sources = &TAP_SOURCES[..tap_effects];
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    if double_tokens {
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", PARALLEL_LIVES);
+    }
+    // Synthetic permanents provide distinct mandatory replacements with identical writes.
+    for &source in tap_sources {
+        scenario.add_enchantment_from_oracle(
+            P1,
+            source,
+            "Creatures your opponents control enter tapped.",
+        );
+    }
+    scenario.add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Raise the Alarm", true, RAISE_THE_ALARM)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    // Parallel Lives spends one of the 16 live passes before entry ordering.
+    let entry_passes = 16 - usize::from(double_tokens);
+    let (before, after) = tap_sources.split_at(taps_before_grumgully);
+    let prompts: Vec<_> = before
+        .iter()
+        .copied()
+        .chain(std::iter::once("Grumgully, the Generous"))
+        .chain(after.iter().copied())
+        .take(entry_passes)
+        .enumerate()
+        .map(|(index, source)| order(tap_effects + 1 - index, source))
+        .collect();
+    settle(&mut runner, &prompts, Until::StackEmpty);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_tapped_soldiers(&runner, if double_tokens { 4 } else { 2 }, 1);
+}
+
+#[test]
+fn soldier_entry_over_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(16, false, 0);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_first() {
+    assert_soldier_entry_orders_over_budget(15, true, 0);
+}
+
+#[test]
+fn soldier_entry_over_remaining_pass_budget_offers_grumgully_after_three_taps() {
+    assert_soldier_entry_orders_over_budget(16, false, 3);
 }

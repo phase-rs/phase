@@ -291,6 +291,7 @@ pub fn keyword_text(keyword: &Keyword) -> String {
         }
 
         Keyword::Ward(WardCost::PayLife(life)) => format!("{name}—Pay {life} life"),
+        Keyword::Ward(WardCost::Blight(count)) => format!("{name}—Blight {count}"),
         Keyword::Ward(WardCost::Waterbend(cost)) => {
             format!("{name}—Waterbend {}", mana_cost_text(cost))
         }

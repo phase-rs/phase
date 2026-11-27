@@ -21765,6 +21765,24 @@ fn continue_with_prepared(
     prepared: PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2e + CR 701.68a: even the minimum Blight X needs a controlled
+    // creature. Refuse the proposal before publishing a stack entry.
+    if state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|object| object.additional_cost.as_ref())
+        .is_some_and(|cost| {
+            matches!(
+                cost,
+                AdditionalCost::Required(cost)
+                    if !casting_costs::bounded_blight_x_can_be_paid(state, player, cost, 0)
+            )
+        })
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "No creature to blight".to_string(),
+        ));
+    }
     // Permanent spells with no spell ability skip modal/targeting/effect resolution
     // and proceed directly to cost payment — unless they are Auras (which target
     // via the Enchant keyword) or mutating creature spells (CR 702.140a: a vanilla
@@ -22130,7 +22148,19 @@ fn continue_with_prepared(
         .ability_def
         .as_ref()
         .and_then(|a| a.distribute.clone());
-    if ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref()) {
+    let bounded_blight = state
+        .objects
+        .get(&prepared.object_id)
+        .is_some_and(|object| {
+            let Some(AdditionalCost::Required(cost)) = &object.additional_cost else {
+                return false;
+            };
+            casting_costs::bounded_blight_cost_max(state, player, prepared.object_id, cost)
+                .is_some()
+        });
+    if bounded_blight
+        || ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref())
+    {
         if let Some(required_cost) =
             casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
         {

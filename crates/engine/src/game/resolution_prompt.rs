@@ -252,25 +252,15 @@ pub(crate) fn effect_offers_choice(e: &Effect) -> bool {
             counter_type: _,
             count,
         }
-        | Effect::Token {
-            name: _,
-            power: _,
-            toughness: _,
-            types: _,
-            colors: _,
-            keywords: _,
-            tapped: _,
-            count,
-            owner: _,
-            attach_to: _,
-            enters_attacking: _,
-            attack_destination: _,
-            enters_blocking: _,
-            supertypes: _,
-            static_abilities: _,
-            enter_with_counters: _,
-        } => {
+        => quantity_offers_up_to_choice(count),
+        Effect::Token { count, additional_members, .. } => {
             quantity_offers_up_to_choice(count)
+                || additional_members.iter().any(|member| {
+                    matches!(
+                        member.effect(),
+                        Effect::Token { count, .. } if quantity_offers_up_to_choice(count)
+                    )
+                })
         }
         // HEAD's own arm shape, kept verbatim (single arm + inner `if`, no match
         // guard). CR 608.2d: an "up to N" draw is a resolution-time COUNT choice.
@@ -1243,6 +1233,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 

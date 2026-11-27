@@ -372,6 +372,7 @@ export function CardChoiceModal() {
       // Handled by TargetingOverlay + battlefield clicks (ChooseTarget slot-by-slot).
       return null;
     case "BlightChoice":
+    case "UnlessBlightChoice":
     case "CrewVehicle":
     case "StationTarget":
     case "SaddleMount":

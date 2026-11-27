@@ -205,6 +205,7 @@ fn token_effect(name: &str, types: Vec<String>, attach_to: Option<TargetFilter>)
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
