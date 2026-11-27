@@ -20362,6 +20362,53 @@ fn effect_chain_companion_of_the_wilds_cant_block_on_rat_not_food() {
     }
 }
 
+/// CR 608.2d + CR 115.10a: a later member's described host ("attached to a
+/// creature you control", The Companion of the Wilds) is chosen at resolution.
+/// A later member whose host uses the word "target", even quantified ("up to
+/// one target creature you control"), would need a stack target slot that only
+/// the instruction's own token has, so the list stays unparsed.
+#[test]
+fn token_list_member_host_timing_follows_the_word_target() {
+    let def = parse_effect_chain(
+        "Create a Food token, a 1/1 black Rat creature token with \"This creature can't block,\" and a Royal role token attached to a creature you control.",
+        AbilityKind::Spell,
+    );
+    let Effect::Token {
+        additional_members, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected one token instruction, got {:?}", def.effect);
+    };
+    let role = additional_members.last().expect("the Royal Role member");
+    assert!(
+        role.resolution_host_filter().is_some(),
+        "the described host is chosen at resolution: {role:?}"
+    );
+    assert_eq!(
+        additional_members
+            .iter()
+            .filter(|member| member.resolution_host_filter().is_some())
+            .count(),
+        1
+    );
+
+    for host in [
+        "target creature you control",
+        "another target creature you control",
+        "up to one target creature you control",
+    ] {
+        let def = parse_effect_chain(
+            &format!("Create a Food token and a Royal role token attached to {host}."),
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{host}: a later member's announced target fails closed, got {:?}",
+            def.effect
+        );
+    }
+}
+
 /// [REVIEW A2] The only test that exercises the new step-2 `peek` guard. The
 /// gate-PASSING "…, and a 1/1 Bird…" coordinator lets the splitter run, but the
 /// intra-item "with menace, vigilance," keyword comma must NOT split off a bare

@@ -815,6 +815,11 @@ fn companion_chooses_from_creatures_present_when_the_trigger_resolves() {
     }
 }
 
+/// No printed list has two hosted members (the nearest is The Companion of the
+/// Wilds, with one), so this synthetic list is the only way to reach a second
+/// member's host prompt after the first is answered. The two Roles describe
+/// different hosts, so a prompt that reused the first member's filter would
+/// offer the wrong creatures.
 #[test]
 fn token_list_retains_earlier_member_host_when_later_member_prompts() {
     use engine::game::game_object::AttachTarget;
@@ -826,21 +831,24 @@ fn token_list_retains_earlier_member_host_when_later_member_prompts() {
             P0,
             "Two Role Lists",
             false,
-            "Create a Food token, a Royal Role token attached to a creature you control, and a Wicked Role token attached to a creature you control.",
+            "Create a Food token, a Royal Role token attached to a creature you control, and a Wicked Role token attached to a creature an opponent controls.",
         )
         .id();
-    let first = scenario.add_creature(P0, "First Host", 2, 2).id();
-    let second = scenario.add_creature(P0, "Second Host", 2, 2).id();
+    let own = [
+        scenario.add_creature(P0, "First Host", 2, 2).id(),
+        scenario.add_creature(P0, "Second Host", 2, 2).id(),
+    ];
+    let theirs = [
+        scenario.add_creature(P1, "First Rival", 2, 2).id(),
+        scenario.add_creature(P1, "Second Rival", 2, 2).id(),
+    ];
     let mut runner = scenario.build();
     runner.cast(spell).resolve();
-    for host in [second, first] {
+    for (pool, host) in [(own, own[1]), (theirs, theirs[0])] {
         let WaitingFor::ChooseTokenHost { legal_targets, .. } = &runner.state().waiting_for else {
             panic!("expected an independent host choice for each Role");
         };
-        assert_eq!(
-            legal_targets,
-            &[TargetRef::Object(first), TargetRef::Object(second)]
-        );
+        assert_eq!(legal_targets, &pool.map(TargetRef::Object));
         assert!(tokens(&runner, P0).is_empty());
         let bytes = serde_json::to_vec(runner.state()).expect("serialize parked state");
         runner =
@@ -858,7 +866,7 @@ fn token_list_retains_earlier_member_host_when_later_member_prompts() {
     ));
     let tokens = tokens(&runner, P0);
     assert_eq!(tokens.len(), 3);
-    for (name, host) in [("Royal Role", second), ("Wicked Role", first)] {
+    for (name, host) in [("Royal Role", own[1]), ("Wicked Role", theirs[0])] {
         let token = tokens
             .iter()
             .find(|token| token.name == name)

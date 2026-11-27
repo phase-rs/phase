@@ -692,17 +692,22 @@ pub(super) fn parse_token_creation_member(
         } if !filter.is_context_ref() => {
             let connector = first_token_attachment_connector(lower)?;
             let (_, host) = TextPair::new(original, lower).split_around(connector)?;
-            // CR 115.10a: the host description only announces a target if it
-            // says "target". Only the instruction's own token surfaces a target
-            // slot, so a later member's announced target would be lost: leave
-            // the whole list unparsed instead.
-            if preceded(
-                opt(tag("another ")),
-                tag::<_, _, OracleError<'_>>("target "),
-            )
-            .parse(host.lower.trim_start())
-            .is_ok()
-            {
+            // CR 115.10a: the host description announces a target only if it
+            // uses the word "target" ("target creature", "up to one target
+            // creature you control"). Only the instruction's own token surfaces
+            // a target slot, so a later member's announced target would be
+            // lost: leave the whole list unparsed instead.
+            let names_target = nom_primitives::scan_at_word_boundaries(host.lower, |input| {
+                value(
+                    (),
+                    terminated(
+                        tag::<_, _, OracleError<'_>>("target"),
+                        alt((tag("s "), tag(" "), eof)),
+                    ),
+                )
+                .parse(input)
+            });
+            if names_target.is_some() {
                 return None;
             }
             TargetChoiceTiming::Resolution
