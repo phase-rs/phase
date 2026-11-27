@@ -132,6 +132,12 @@ pub fn merge_object_onto(
         // modify; it ends with the spell (it is stack-scoped).
         merging.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
     }
+    // CR 730.2b + CR 400.7 + CR 614.1c: the merged spell never enters the
+    // battlefield, so a pending "enters with an additional counter" rider made
+    // for it is spent; the component later split off is a new object.
+    state
+        .pending_etb_counters
+        .retain(|(pending_id, _, _)| *pending_id != merging_id);
 
     // CR 730.2 multi-instance stacking: extend the existing stack when
     // `target_id` is already merged; otherwise start from the survivor itself.
