@@ -426,7 +426,7 @@ fn exterminate_reserved_pili_pala_can_tap_and_untap_for_mana() {
             .add_creature_from_oracle(P0, "Pili-Pala", 1, 1, PILI_PALA)
             .as_artifact_creature()
             .id();
-        let victim = scenario.add_creature(P1, "Victim", 2, 2).id();
+        let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
         let spell = scenario
             .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
             .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
@@ -472,6 +472,7 @@ fn exterminate_reserved_pili_pala_can_tap_and_untap_for_mana() {
         act(&mut runner, activate(architect, 1));
         assert!(tap_choices(&runner, 1).contains(&pili));
         let mut events = act(&mut runner, select(&[pili]));
+        runner = round_trip(&runner);
         assert!(runner.state().objects[&pili].tapped);
         assert_eq!(runner.state().players[0].mana_pool.total(), 5);
         let restricted = |runner: &GameRunner| {
@@ -899,14 +900,14 @@ fn exterminate_restore_rejects_a_missing_previously_selected_dalek() {
         .is_err());
 }
 
-fn bolt_scenario(mana_cost: &str) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
+fn bolt_scenario(oracle: &str, mana_cost: &str) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Reiterating Bolt", false, REITERATING_BOLT)
+        .add_spell_to_hand_from_oracle(P0, "Reiterating Bolt", false, oracle)
         .with_mana_cost(parse_mtgjson_mana_cost(mana_cost))
         .id();
-    let creature = scenario.add_creature(P1, "Resilient creature", 1, 10).id();
+    let creature = scenario.add_creature(P1, "Ancient Brontodon", 9, 9).id();
     let walker = scenario
         .add_planeswalker_from_oracle(P1, "Jace", "Jace", 6, "")
         .id();
@@ -915,7 +916,7 @@ fn bolt_scenario(mana_cost: &str) -> (GameScenario, ObjectId, ObjectId, ObjectId
 }
 
 fn bolt_board(energy: u32) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
-    let (scenario, spell, creature, walker) = bolt_scenario("{1}{R}");
+    let (scenario, spell, creature, walker) = bolt_scenario(REITERATING_BOLT, "{1}{R}");
     let mut runner = scenario.build();
     runner.state_mut().players[0].energy = energy;
     (runner, spell, creature, walker)
@@ -1047,8 +1048,68 @@ fn reiterating_bolt_composes_replicate_with_mandatory_energy() {
 // CR 601.2h + CR 107.4f + CR 616.1: paying the Phyrexian shard pauses
 // the commit while the Replicate energy obligation is still outstanding.
 #[test]
+fn reiterating_bolt_settles_replicate_on_uninterrupted_phyrexian_payment() {
+    // Dismember is the printed analogue for the synthetic black Phyrexian shard.
+    let (scenario, spell, creature, _) = bolt_scenario(REITERATING_BOLT, "{1}{R}{B/P}");
+    let mut runner = scenario.build();
+    start_bolt_phyrexian_payment(&mut runner, spell, creature);
+    let events = act(
+        &mut runner,
+        GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        },
+    );
+    assert_eq!(runner.state().players[0].life, 18);
+    assert_bolt_replicate_settled(&mut runner, spell, creature, &events);
+}
+
+#[test]
+fn reiterating_bolt_settles_replicate_at_deferred_sacrifice_commit() {
+    // Village Rites supplies the printed additional-cost clause for this
+    // synthetic combination with Reiterating Bolt's printed Replicate.
+    let oracle = format!(
+        "As an additional cost to cast this spell, sacrifice a creature.\n{REITERATING_BOLT}"
+    );
+    let (mut scenario, spell, creature, _) = bolt_scenario(&oracle, "{1}{R}");
+    let memnite = scenario
+        .add_creature(P0, "Memnite", 1, 1)
+        .as_artifact_creature()
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().players[0].energy = 5;
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    target_prompt(&runner);
+    act(&mut runner, target(creature));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            ..
+        }
+    ));
+    act(&mut runner, select(&[memnite]));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert!(runner.state().battlefield.contains(&memnite));
+    assert_eq!(runner.state().players[0].energy, 5);
+    let events = act(&mut runner, GameAction::PassPriority);
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, GameEvent::PermanentSacrificed { object_id, player_id: P0 } if *object_id == memnite)));
+    assert_bolt_replicate_settled(&mut runner, spell, creature, &events);
+}
+
+#[test]
 fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
-    let (mut scenario, spell, creature, _) = bolt_scenario("{1}{R}{B/P}");
+    // Dismember is the printed analogue for the synthetic black Phyrexian shard.
+    let (mut scenario, spell, creature, _) = bolt_scenario(REITERATING_BOLT, "{1}{R}{B/P}");
+    // Bloodletter of Aclazotz is the printed analogue for doubling life loss.
+    // Forsaken Wastes adds a separate one-life loss. The synthetic +1 modifier
+    // folds that extra loss into the same event so the two replacements can compete.
     scenario
         .add_creature(P0, "Life-loss replacements", 0, 1)
         .with_replacement_definition(
@@ -1062,17 +1123,7 @@ fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
                 .description("Plus one".to_string()),
         );
     let mut runner = scenario.build();
-    runner.state_mut().players[0].energy = 5;
-    cast(&mut runner, spell, CastPaymentMode::Manual);
-    offer(&runner, AdditionalCostOrigin::Replicate, 0);
-    decide(&mut runner, true);
-    target_prompt(&runner);
-    act(&mut runner, target(creature));
-    act(&mut runner, GameAction::PassPriority);
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::PhyrexianPayment { .. }
-    ));
+    start_bolt_phyrexian_payment(&mut runner, spell, creature);
     let mut events = act(
         &mut runner,
         GameAction::SubmitPhyrexianChoices {
@@ -1093,13 +1144,36 @@ fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
     assert_eq!(pending.unpaid_replicate_energy, 3);
     assert_eq!(runner.state().players[0].energy, 5);
     events.extend(act(&mut runner, GameAction::ChooseReplacement { index: 0 }));
+    assert_bolt_replicate_settled(&mut runner, spell, creature, &events);
+}
+
+fn start_bolt_phyrexian_payment(runner: &mut GameRunner, spell: ObjectId, creature: ObjectId) {
+    runner.state_mut().players[0].energy = 5;
+    cast(runner, spell, CastPaymentMode::Manual);
+    offer(runner, AdditionalCostOrigin::Replicate, 0);
+    decide(runner, true);
+    target_prompt(runner);
+    act(runner, target(creature));
+    act(runner, GameAction::PassPriority);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PhyrexianPayment { .. }
+    ));
+}
+
+fn assert_bolt_replicate_settled(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    creature: ObjectId,
+    events: &[GameEvent],
+) {
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
     assert_eq!(runner.state().players[0].energy, 2);
     assert_eq!(runner.state().players[0].energy_paid_or_lost_this_turn, 3);
-    assert_eq!(records(&runner, spell), [(0, 1)]);
+    assert_eq!(records(runner, spell), [(0, 1)]);
     assert_eq!(runner.state().stack.len(), 2);
     assert_eq!(
         events
@@ -1114,6 +1188,14 @@ fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
             .count(),
         1
     );
+    pass_to_prompt(runner);
+    let copy = copy_prompt(runner, creature);
+    assert_ne!(copy, spell);
+    act(runner, GameAction::KeepAllCopyTargets);
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_spell_target(runner, copy, creature);
+    finish(runner);
+    assert_eq!(runner.state().objects[&creature].damage_marked, 6);
 }
 
 #[test]

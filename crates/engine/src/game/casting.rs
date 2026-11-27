@@ -29765,6 +29765,20 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
     cost: &AbilityCost,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    tap_creature_cost_candidates(state, player, source, granting_object, cost, filter)
+        .into_iter()
+        .filter(|id| !state.objects[id].tapped)
+        .collect()
+}
+
+pub(super) fn tap_creature_cost_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    cost: &AbilityCost,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
     // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
     // activated ability).
     let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
@@ -29780,7 +29794,6 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
             }
             state.objects.get(&id).is_some_and(|obj| {
                 obj.controller == player
-                    && !obj.tapped
                     && super::filter::matches_target_filter(state, id, filter, &ctx)
             })
         })

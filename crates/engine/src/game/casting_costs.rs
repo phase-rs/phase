@@ -2597,6 +2597,7 @@ fn handle_decide_repeatable_additional_cost(
     if queued_origin == Some(AdditionalCostOrigin::Replicate)
         && !replicate_declaration_is_offerable(state, player, &pending, &cost)?
     {
+        // CR 118.3 + CR 702.56a: Refuse an unaffordable Replicate election before recording payment.
         return Err(EngineError::ActionNotAllowed(
             "This replicate cost cannot be paid".into(),
         ));
@@ -3052,7 +3053,8 @@ pub(crate) fn validate_restored_replicate_payment(state: &GameState) -> Result<(
             return Err("Replicate energy differs from its declared payments".into());
         }
     }
-    validate_deferred_spell_taps(state, player, pending).map_err(|err| err.to_string())?;
+    validate_deferred_spell_tap_reservations(state, player, pending)
+        .map_err(|err| err.to_string())?;
     if let WaitingFor::OptionalCostChoice {
         player: offered_player,
         origin: AdditionalCostOrigin::Replicate,
@@ -5726,7 +5728,14 @@ fn commit_deferred_spell_taps_and_energy(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     validate_deferred_spell_energy(state, player, pending)?;
-    validate_deferred_spell_taps(state, player, pending)?;
+    validate_deferred_spell_tap_reservations(state, player, pending)?;
+    // CR 118.3 + CR 601.2g-h: mana abilities can change tap status before payment.
+    if pending
+        .deferred_tap_ids()
+        .any(|id| state.objects[&id].tapped || super::restrictions::object_cant_tap(state, id))
+    {
+        return Err(invalid_deferred_spell_tap());
+    }
     let selected = std::mem::take(&mut pending.deferred_tapped_permanents);
     debug_assert!(
         selected
@@ -5748,7 +5757,13 @@ fn commit_deferred_spell_taps_and_energy(
     Ok(())
 }
 
-fn validate_deferred_spell_taps(
+fn invalid_deferred_spell_tap() -> EngineError {
+    EngineError::ActionNotAllowed(
+        "The creatures selected to pay this spell's tap cost can no longer pay it".to_string(),
+    )
+}
+
+fn validate_deferred_spell_tap_reservations(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
@@ -5759,7 +5774,7 @@ fn validate_deferred_spell_taps(
         // only be tapped once; aggregate costs must still meet their threshold (CR 208.1).
         let still_payable = super::casting::find_tap_creatures_cost(&tap.cost).is_some_and(
             |(requirement, filter)| {
-                let eligible = super::casting::find_eligible_tap_creatures_for_cost(
+                let candidates = super::casting::tap_creature_cost_candidates(
                     state,
                     player,
                     pending.object_id,
@@ -5783,22 +5798,14 @@ fn validate_deferred_spell_taps(
                     count,
                     count,
                     mode,
-                    &eligible,
+                    &candidates,
                     &tap.object_ids,
                 )
                 .is_ok()
             },
         );
-        if !still_payable
-            || tap
-                .object_ids
-                .iter()
-                .any(|id| !seen.insert(*id) || super::restrictions::object_cant_tap(state, *id))
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "The creatures selected to pay this spell's tap cost can no longer pay it"
-                    .to_string(),
-            ));
+        if !still_payable || tap.object_ids.iter().any(|id| !seen.insert(*id)) {
+            return Err(invalid_deferred_spell_tap());
         }
     }
     Ok(())
@@ -5924,7 +5931,6 @@ fn pay_spell_mana_before_deferred_sacrifice(
     }
 
     validate_deferred_spell_energy(state, player, pending)?;
-    validate_deferred_spell_taps(state, player, pending)?;
     auto_activate_spell_mana_abilities_before_deferred_sacrifice(
         state, player, pending, resume, events,
     )?;
@@ -21606,7 +21612,15 @@ fn finalize_mana_payment_with_resume(
             return Ok(state.waiting_for.clone());
         }
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
-        commit_deferred_spell_taps_and_energy(state, player, &mut pending, events)?;
+        let pending_distribution = pending
+            .distribute
+            .clone()
+            .filter(|_| pending.ability.distribution.is_none());
+        // CR 601.2h: The deferred-sacrifice branch settles the other costs
+        // before the sacrifice can pause. Distribution has its own continuation.
+        if pending.deferred_sacrificed_permanents.is_empty() || pending_distribution.is_some() {
+            commit_deferred_spell_taps_and_energy(state, player, &mut pending, events)?;
+        }
         if pending.deferred_sacrificed_permanents.is_empty()
             && pending.deferred_hand_discard_cost.is_some()
         {
@@ -21650,11 +21664,7 @@ fn finalize_mana_payment_with_resume(
         // of the resolved ability. Automatic finalization still owns the mana
         // root, but must not open a second distribution prompt or discard the
         // announced allocation.
-        if let Some(unit) = pending
-            .distribute
-            .clone()
-            .filter(|_| pending.ability.distribution.is_none())
-        {
+        if let Some(unit) = pending_distribution {
             // CR 601.2d: X-spell distribution — pay mana first to determine X, then
             // trigger DistributeAmong with total = X.
             let pool_before = pool_before_for_distribution.unwrap_or_else(|| {
@@ -22070,7 +22080,15 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             return Ok(state.waiting_for.clone());
         }
         validate_deferred_spell_sacrifices_at_commit(state, player, &pending)?;
-        commit_deferred_spell_taps_and_energy(state, player, &mut pending, events)?;
+        let pending_distribution = pending
+            .distribute
+            .clone()
+            .filter(|_| pending.ability.distribution.is_none());
+        // CR 601.2h: The deferred-sacrifice branch settles the other costs
+        // before the sacrifice can pause. Distribution has its own continuation.
+        if pending.deferred_sacrificed_permanents.is_empty() || pending_distribution.is_some() {
+            commit_deferred_spell_taps_and_energy(state, player, &mut pending, events)?;
+        }
         if pending.deferred_sacrificed_permanents.is_empty()
             && pending.deferred_hand_discard_cost.is_some()
         {
@@ -22113,11 +22131,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // CR 601.2d: See the ordinary payment branch above. Submitted
         // Phyrexian choices do not make an already-announced allocation pending
         // again.
-        if let Some(unit) = pending
-            .distribute
-            .clone()
-            .filter(|_| pending.ability.distribution.is_none())
-        {
+        if let Some(unit) = pending_distribution {
             // CR 601.2d: X + distribution + Phyrexian is extremely rare (no known current cards).
             // Fall through to the auto-decision distribution path for safety — the Phyrexian
             // choices were already consumed via pay_mana_cost_with_choices above (the X-spell
