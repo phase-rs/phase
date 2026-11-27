@@ -3,12 +3,25 @@ import { clear, get, set } from "idb-keyval";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseWebSocketUrl } from "../../config/multiplayerServer";
+import { isUserOwnedStorageKey } from "../../constants/storage";
 import {
+  installFifoWebLocks,
+  installRefusingWebLocks,
+  readIdbGenerationForTests,
+  uninstallWebLocks,
+} from "../../test/helpers/webLocks";
+import { VIEW_TIMEOUT_MS } from "../crossTabTransaction";
+import { withSavedDeckLibrary } from "../savedDeckTransaction";
+import {
+  ActiveDraftPointerUnavailableError,
   canonicalNativeDraftEndpoint,
+  clearActiveDraftGuest,
   clearActiveDraftGuestIfCurrent,
+  clearActiveNativeDraftIfCurrent,
   clearDraftDeckSubmission,
   clearDraftGuestRecovery,
   clearNativeDraftCapability,
+  clearUnusableNativeDraft,
   getDraftStore,
   inspectActiveDraftGuest,
   inspectActiveNativeDraft,
@@ -24,12 +37,15 @@ import {
   saveDraftDeckSubmission,
   saveDraftGuestSession,
   saveNativeDraftCapability,
+  withActiveDraftPointer,
 } from "../draftPersistence";
 import type {
+  ActiveDraftPointerTxn,
   ActiveNativeDraftPointer,
   DraftGuestCapability,
   DraftGuestCapabilityOwner,
   NativeDraftCapabilityRecord,
+  NativeDraftPointerCapture,
 } from "../draftPersistence";
 
 /**
@@ -776,7 +792,7 @@ describe("guest recovery records", () => {
       {
         const { pointer, capture } = await storeAndCapture();
         const refreshed = nativePointer({ timestamp: pointer.timestamp + 1_000 });
-        const result = republishActiveNativeDraft(capture, refreshed);
+        const result = await republishActiveNativeDraft(capture, refreshed);
         expect(result.status).toBe("published");
         expect(JSON.parse(localStorage.getItem(POINTER_KEY)!)).toEqual(refreshed);
         await result.settled;
@@ -793,7 +809,7 @@ describe("guest recovery records", () => {
         const recordD = await storedNative("cap-D");
         const otherText = JSON.stringify(nativePointer({ capabilityId: "cap-D" }));
         localStorage.setItem(POINTER_KEY, otherText);
-        const result = republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+        const result = await republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
         expect(result.status).toBe("superseded");
         expect(localStorage.getItem(POINTER_KEY)).toBe(otherText);
         await result.settled;
@@ -809,7 +825,7 @@ describe("guest recovery records", () => {
         const { pointer, capture } = await storeAndCapture();
         const newerText = JSON.stringify(nativePointer({ timestamp: pointer.timestamp + 500 }));
         localStorage.setItem(POINTER_KEY, newerText);
-        const result = republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
+        const result = await republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 }));
         expect(result.status).toBe("superseded");
         await result.settled;
         expect(localStorage.getItem(POINTER_KEY)).toBe(newerText);
@@ -822,8 +838,8 @@ describe("guest recovery records", () => {
         localStorage.clear();
         await clear(getDraftStore());
         const { capture } = await storeAndCapture();
-        expect(() => republishActiveNativeDraft(capture, nativePointer({ capabilityId: "cap-D" }))).toThrow();
-        expect(() => republishActiveNativeDraft(capture, nativePointer({ endpoint: "ws://h:9374" }))).toThrow();
+        await expect(republishActiveNativeDraft(capture, nativePointer({ capabilityId: "cap-D" }))).rejects.toThrow();
+        await expect(republishActiveNativeDraft(capture, nativePointer({ endpoint: "ws://h:9374" }))).rejects.toThrow();
         expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
       }
     });
@@ -859,6 +875,515 @@ describe("guest recovery records", () => {
       localStorage.removeItem(POINTER_KEY);
       expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
       expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+    });
+
+    describe("the cross-tab recovery-pointer transaction", () => {
+      const LOCK = "phase-active-draft-pointer";
+      const GENERATION_KEY = "phase-active-draft-pointer-generation";
+      const capB: Omit<NativeDraftCapabilityRecord, "timestamp"> = {
+        ...capC,
+        capabilityId: "cap-B",
+        draftCode: "NAT002",
+        playerToken: "tok-B",
+        seatIndex: 1,
+      };
+
+      type PersistenceModule = typeof import("../draftPersistence");
+
+      /**
+       * Another same-origin tab: its own module graph of the persistence
+       * authority, so its own runner and capability, sharing only what tabs
+       * share (localStorage, IndexedDB and the lock manager).
+       */
+      async function otherTab(): Promise<PersistenceModule> {
+        vi.resetModules();
+        const tab = await vi.importActual<PersistenceModule>("../draftPersistence");
+        // Reach: a distinct graph, not this one.
+        expect(tab.publishActiveNativeDraft).not.toBe(publishActiveNativeDraft);
+        expect(tab.getDraftStore).not.toBe(getDraftStore);
+        return tab;
+      }
+
+      /** Runs `onRead` at the `nth` read of the pointer key from now, which still returns what it read. */
+      function atPointerRead(nth: number, onRead: () => void): { fired: () => number } {
+        const getItem = localStorage.getItem.bind(localStorage);
+        let reads = 0;
+        let fired = 0;
+        vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+          const seen = getItem(key);
+          if (key === POINTER_KEY && fired === 0 && ++reads === nth) {
+            fired += 1;
+            onRead();
+          }
+          return seen;
+        });
+        return { fired: () => fired };
+      }
+
+      /** Counts removals of the pointer key from now, in `events` order. */
+      function recordPointerRemovals(events: string[]): () => number {
+        const removeItem = localStorage.removeItem.bind(localStorage);
+        let removals = 0;
+        vi.spyOn(localStorage, "removeItem").mockImplementation((key: string) => {
+          if (key === POINTER_KEY) {
+            removals += 1;
+            events.push("remove");
+          }
+          removeItem(key);
+        });
+        return () => removals;
+      }
+
+      /** Records how `promise` settles, so a test can read "still pending" without awaiting it. */
+      function track(promise: Promise<unknown>): () => "pending" | "resolved" | "rejected" {
+        let state: "pending" | "resolved" | "rejected" = "pending";
+        promise.then(
+          () => {
+            state = "resolved";
+          },
+          () => {
+            state = "rejected";
+          },
+        );
+        return () => state;
+      }
+
+      /** cap-C's record and published pointer, and the pointer's capture. */
+      async function storeNativeA(): Promise<{ pointer: ActiveNativeDraftPointer; capture: NativeDraftPointerCapture }> {
+        const pointer = await saveNativeDraftCapability(capC);
+        await publishActiveNativeDraft(pointer);
+        const active = inspectActiveNativeDraft();
+        if (active.type !== "present") throw new Error("expected a native pointer");
+        return { pointer, capture: active.capture };
+      }
+
+      /** The capture of the guest pointer `saveCapability(capA)` stored. */
+      async function storeGuestA() {
+        await saveCapability(capA);
+        const active = inspectActiveDraftGuest();
+        if (active.type !== "present") throw new Error("expected a guest pointer");
+        return active.capture;
+      }
+
+      const guestPublicationA = { roomCode: "ABCDE", displayName: "Al", hostPeerId: HOST1, capabilityId: "cap-A" };
+
+      /**
+       * One clear and the read it compares on: the last read of the pointer
+       * key before its removal, counted from the end of its staging.
+       */
+      type ClearLeg = { comparisonRead: number; stage: () => Promise<() => Promise<unknown>> };
+      const clearLegs: Record<string, ClearLeg> = {
+        clearActiveNativeDraftIfCurrent: {
+          comparisonRead: 1,
+          stage: async () => {
+            const { capture } = await storeNativeA();
+            return () => clearActiveNativeDraftIfCurrent(capture);
+          },
+        },
+        "clearUnusableNativeDraft (an expired native pointer)": {
+          comparisonRead: 1,
+          stage: async () => {
+            await saveNativeDraftCapability(capC);
+            localStorage.setItem(POINTER_KEY, JSON.stringify(nativePointer({ timestamp: Date.now() - FIVE_HOURS_MS })));
+            const active = inspectActiveNativeDraft();
+            if (active.type !== "invalid") throw new Error("expected an expired native pointer");
+            return () => clearUnusableNativeDraft(active.capture);
+          },
+        },
+        clearNativeDraftCapability: {
+          comparisonRead: 2,
+          stage: async () => {
+            await storeNativeA();
+            return () => clearNativeDraftCapability({
+              capabilityId: "cap-C", endpoint: ENDPOINT, draftCode: "NAT001", playerToken: "tok-C",
+            });
+          },
+        },
+        clearActiveDraftGuestIfCurrent: {
+          comparisonRead: 1,
+          stage: async () => {
+            const capture = await storeGuestA();
+            return () => clearActiveDraftGuestIfCurrent(capture);
+          },
+        },
+        clearDraftGuestRecovery: {
+          comparisonRead: 2,
+          stage: async () => {
+            await storeGuestA();
+            return () => clearDraftGuestRecovery(capA);
+          },
+        },
+      };
+
+      it.each([...Object.keys(clearLegs), "clearActiveDraftGuest (an unparseable text)"])(
+        "an exact clear leaves a pointer another context publishes during it: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const tab = await otherTab();
+            const pointerB = await tab.saveNativeDraftCapability(capB);
+            const recordB = await storedNative("cap-B");
+            const events: string[] = [];
+            let publishedB: Promise<void> | null = null;
+            const publishB = () => {
+              events.push("published");
+              publishedB = tab.publishActiveNativeDraft(pointerB);
+            };
+
+            if (leg in clearLegs) {
+              const { comparisonRead, stage } = clearLegs[leg]!;
+              const clear = await stage();
+              const trigger = atPointerRead(comparisonRead, publishB);
+              const removals = recordPointerRemovals(events);
+              await clear();
+              await publishedB;
+              // Reach: the clear compared at that read, then reached its removal.
+              expect(trigger.fired()).toBe(1);
+              expect(removals()).toBe(1);
+              expect(events).toEqual(["published", "remove"]);
+            } else {
+              localStorage.setItem(POINTER_KEY, "{not json");
+              const trigger = atPointerRead(1, publishB);
+              // The resume's inspection, then another tab's publication before its clear.
+              expect(inspectActiveDraftGuest()).toEqual({ type: "invalid", capture: null });
+              await publishedB;
+              const removals = recordPointerRemovals(events);
+              await clearActiveDraftGuest();
+              expect(trigger.fired()).toBe(1);
+              expect(removals()).toBe(0);
+            }
+
+            expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+            await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+
+            if (!(leg in clearLegs)) {
+              // Reach: with no other writer, the same call removes an unparseable text.
+              localStorage.setItem(POINTER_KEY, "{not json");
+              await clearActiveDraftGuest();
+              expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+            }
+          } finally {
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      /**
+       * One pointer step over this tab's stale view (A's), and what it leaves
+       * once that view shows B's native pointer, or at once without lag.
+       */
+      type LagLeg = {
+        stage: () => Promise<() => Promise<unknown>>;
+        afterLag: (result: unknown) => Promise<void>;
+        inStep: (result: unknown) => Promise<void>;
+      };
+      const removedLeg = (stage: LagLeg["stage"], result?: unknown): LagLeg => ({
+        stage,
+        afterLag: async (outcome) => {
+          if (result !== undefined) expect(outcome).toBe(false);
+        },
+        inStep: async (outcome) => {
+          if (result !== undefined) expect(outcome).toBe(result);
+          expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+        },
+      });
+      const lagLegs: Record<string, LagLeg> = {
+        republishActiveNativeDraft: (() => {
+          let refreshed: ActiveNativeDraftPointer;
+          return {
+            stage: async () => {
+              const { pointer, capture } = await storeNativeA();
+              refreshed = nativePointer({ timestamp: pointer.timestamp + 1_000 });
+              return () => republishActiveNativeDraft(capture, refreshed);
+            },
+            afterLag: async (outcome) => {
+              expect(outcome).toMatchObject({ status: "superseded" });
+            },
+            inStep: async (outcome) => {
+              expect(outcome).toMatchObject({ status: "published" });
+              expect(JSON.parse(localStorage.getItem(POINTER_KEY)!)).toEqual(refreshed);
+            },
+          };
+        })(),
+        clearActiveNativeDraftIfCurrent: removedLeg(async () => {
+          const { capture } = await storeNativeA();
+          return () => clearActiveNativeDraftIfCurrent(capture);
+        }, true),
+        clearUnusableNativeDraft: removedLeg(async () => {
+          await saveNativeDraftCapability(capC);
+          localStorage.setItem(POINTER_KEY, JSON.stringify(nativePointer({ timestamp: Date.now() - FIVE_HOURS_MS })));
+          const active = inspectActiveNativeDraft();
+          if (active.type !== "invalid") throw new Error("expected an expired native pointer");
+          return () => clearUnusableNativeDraft(active.capture);
+        }),
+        clearNativeDraftCapability: removedLeg(async () => {
+          await storeNativeA();
+          return () => clearNativeDraftCapability({
+            capabilityId: "cap-C", endpoint: ENDPOINT, draftCode: "NAT001", playerToken: "tok-C",
+          });
+        }),
+        clearActiveDraftGuestIfCurrent: removedLeg(async () => {
+          const capture = await storeGuestA();
+          return () => clearActiveDraftGuestIfCurrent(capture);
+        }),
+        clearDraftGuestRecovery: removedLeg(async () => {
+          await storeGuestA();
+          return () => clearDraftGuestRecovery(capA);
+        }),
+        clearActiveDraftGuest: removedLeg(async () => {
+          localStorage.setItem(POINTER_KEY, "{not json");
+          return () => clearActiveDraftGuest();
+        }),
+        "a capability's republishGuest": {
+          stage: async () => {
+            const standsOn = await storeGuestA();
+            return () => withActiveDraftPointer((pointer) => pointer.republishGuest(standsOn, guestPublicationA));
+          },
+          afterLag: async (outcome) => {
+            expect(outcome).toEqual({ status: "committed", value: null });
+          },
+          inStep: async (outcome) => {
+            expect(outcome).toMatchObject({ status: "committed", value: { capabilityId: "cap-A", hostPeerId: HOST1 } });
+            expect(storedPointer()).toMatchObject({ capabilityId: "cap-A", hostPeerId: HOST1 });
+          },
+        },
+        "a capability's publishGuest": {
+          stage: async () => {
+            await storeGuestA();
+            return () => withActiveDraftPointer((pointer) => pointer.publishGuest(guestPublicationA));
+          },
+          afterLag: async (outcome) => {
+            const committed = outcome as { status: string; value: Promise<void> };
+            expect(committed.status).toBe("committed");
+            // It wrote over the pointer its view showed, B's, whose record then has no route back.
+            await committed.value;
+            expect(storedPointer()).toMatchObject({ capabilityId: "cap-A", hostPeerId: HOST1 });
+            expect(storedPointer()).not.toHaveProperty("transport");
+            await expect(storedNative("cap-B")).resolves.toBeUndefined();
+          },
+          inStep: async (outcome) => {
+            const committed = outcome as { status: string; value: Promise<void> };
+            expect(committed.status).toBe("committed");
+            await committed.value;
+            expect(storedPointer()).toMatchObject({ capabilityId: "cap-A", hostPeerId: HOST1 });
+          },
+        },
+      };
+
+      it.each(Object.keys(lagLegs).flatMap((leg) => [[leg, "lagging"], [leg, "in step"]] as const))(
+        "a pointer step waits for a lagging view and then acts on what it shows: %s, %s",
+        async (leg, view) => {
+          installFifoWebLocks();
+          try {
+            const { stage, afterLag, inStep } = lagLegs[leg]!;
+            const step = await stage();
+            const staged = localStorage.getItem(POINTER_KEY);
+            const recordB = { ...capB, timestamp: Date.now() };
+            await set(nativeKey("cap-B"), recordB, getDraftStore());
+            const textB = JSON.stringify(nativePointer({ capabilityId: "cap-B", draftCode: "NAT002", seatIndex: 1 }));
+            const events: string[] = [];
+            const removals = recordPointerRemovals(events);
+
+            if (view === "in step") {
+              // Control: with this tab's view current, the step acts at once on what it shows.
+              await inStep(await step());
+              return;
+            }
+
+            // Another tab committed the next generation, and this tab's storage does not show it yet.
+            const committed = Number(localStorage.getItem(GENERATION_KEY) ?? 0) + 1;
+            await set(GENERATION_KEY, committed, getDraftStore());
+            await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(committed);
+            const running = Promise.resolve(step());
+            const state = track(running);
+            await new Promise((resolve) => setTimeout(resolve, 150));
+            expect(state()).toBe("pending");
+            expect((await navigator.locks.query()).held).toEqual([{ name: LOCK, mode: "exclusive" }]);
+            expect(removals()).toBe(0);
+            expect(localStorage.getItem(POINTER_KEY)).toBe(staged);
+
+            // The other tab's pointer and generation arrive.
+            localStorage.setItem(POINTER_KEY, textB);
+            const getItem = localStorage.getItem.bind(localStorage);
+            let pointerReads = 0;
+            vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+              if (key === POINTER_KEY) pointerReads += 1;
+              return getItem(key);
+            });
+            localStorage.setItem(GENERATION_KEY, String(committed));
+            window.dispatchEvent(new StorageEvent("storage", { key: GENERATION_KEY }));
+            const outcome = await running;
+            // Reach: the step read the pointer once its view showed B's.
+            expect(pointerReads).toBeGreaterThan(0);
+            vi.mocked(localStorage.getItem).mockRestore();
+
+            await afterLag(outcome);
+            if (leg !== "a capability's publishGuest") {
+              expect(localStorage.getItem(POINTER_KEY)).toBe(textB);
+              expect(removals()).toBe(0);
+              await expect(storedNative("cap-B")).resolves.toEqual(recordB);
+            }
+          } finally {
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it("a pointer step that cannot confirm its view leaves the pointer and the next one proceeds", async () => {
+        installFifoWebLocks();
+        try {
+          const { pointer, capture } = await storeNativeA();
+          await set(GENERATION_KEY, 3, getDraftStore());
+          localStorage.setItem(GENERATION_KEY, "2");
+          // Reach: the committed generation is ahead of this tab's view.
+          await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(3);
+          vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+          const first = Promise.resolve(clearActiveNativeDraftIfCurrent(capture));
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          await expect(first).resolves.toBe(false);
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+          expect(localStorage.getItem(GENERATION_KEY)).toBe("3");
+
+          await set(GENERATION_KEY, 4, getDraftStore());
+          await expect(get(GENERATION_KEY, getDraftStore())).resolves.toBe(4);
+          const second = Promise.resolve().then(() => republishActiveNativeDraft(capture, nativePointer({ timestamp: pointer.timestamp + 1_000 })));
+          second.catch(() => {}); // the assertion below attaches after the advance
+          await vi.advanceTimersByTimeAsync(VIEW_TIMEOUT_MS);
+          await expect(second).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
+          await expect(second).rejects.toMatchObject({ reason: "view-stale" });
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+          expect(localStorage.getItem(GENERATION_KEY)).toBe("4");
+
+          vi.useRealTimers();
+          await expect(Promise.resolve(clearActiveNativeDraftIfCurrent(capture))).resolves.toBe(true);
+          expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+        } finally {
+          vi.useRealTimers();
+          uninstallWebLocks();
+        }
+      });
+
+      it("a refused pointer transaction rejects a publication and keeps the pointer for a clear", async () => {
+        const { capture } = await storeNativeA();
+        installRefusingWebLocks(new DOMException("denied", "SecurityError"));
+        try {
+          const request = vi.spyOn(navigator.locks, "request");
+          const published = publishActiveNativeDraft(nativePointer({ capabilityId: "cap-D" }));
+          await expect(published).rejects.toBeInstanceOf(ActiveDraftPointerUnavailableError);
+          await expect(published).rejects.toMatchObject({ reason: "lock-refused" });
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+          await expect(Promise.resolve(clearActiveNativeDraftIfCurrent(capture))).resolves.toBe(false);
+          expect(localStorage.getItem(POINTER_KEY)).toBe(capture.raw);
+          // Reach: each step asked for the lock and was refused.
+          expect(request).toHaveBeenCalledTimes(2);
+        } finally {
+          uninstallWebLocks();
+        }
+      });
+
+      it("with no lock manager a pointer step runs before its promise settles", async () => {
+        expect(globalThis.navigator.locks ?? null).toBeNull();
+        const pointer = nativePointer();
+        const step = withActiveDraftPointer((txn) => txn.publishNative(pointer));
+        expect(storedPointer()).toEqual(pointer);
+        await expect(step).resolves.toMatchObject({ status: "committed" });
+      });
+
+      it("a pointer write's record removal settles after its transaction ends", async () => {
+        installFifoWebLocks();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        try {
+          await storeNativeA();
+          // Reach: the pointer it replaces names a stored record.
+          await expect(storedNative("cap-C")).resolves.toMatchObject({ capabilityId: "cap-C" });
+          const step = await withActiveDraftPointer((txn) => {
+            // A read-write transaction on the draft store, kept alive until the gate opens,
+            // so the removal's own transaction waits behind it.
+            let open = true;
+            void gate.then(() => {
+              open = false;
+            });
+            void getDraftStore()("readwrite", (objects) => new Promise<void>((resolve) => {
+              const keepAlive = () => {
+                if (!open) {
+                  resolve();
+                  return;
+                }
+                objects.get("keep-alive").onsuccess = keepAlive;
+              };
+              keepAlive();
+            }));
+            return txn.publishNative(nativePointer({ capabilityId: "cap-D" }));
+          });
+          expect(step.status).toBe("committed");
+          if (step.status !== "committed") return;
+          const removal = track(step.value);
+          expect((await navigator.locks.query()).held).toEqual([]);
+          expect(removal()).toBe("pending");
+          release();
+          await step.value;
+          await expect(storedNative("cap-C")).resolves.toBeUndefined();
+        } finally {
+          release();
+          uninstallWebLocks();
+        }
+      });
+
+      it.each(["with no lock manager", "under the lock"] as const)(
+        "a pointer capability refuses use after its step: %s",
+        async (mode) => {
+          if (mode === "under the lock") installFifoWebLocks();
+          try {
+            let captured: ActiveDraftPointerTxn | null = null;
+            const first = nativePointer();
+            await withActiveDraftPointer((txn) => {
+              captured = txn;
+              return txn.publishNative(first);
+            });
+            // Reach: the method wrote inside its step.
+            expect(storedPointer()).toEqual(first);
+            expect(() => captured!.publishNative(nativePointer({ capabilityId: "cap-D" }))).toThrow();
+            expect(storedPointer()).toEqual(first);
+          } finally {
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      it("a held saved-deck library lock does not delay a pointer step", async () => {
+        installFifoWebLocks();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        try {
+          const { capture } = await storeNativeA();
+          let entered = false;
+          const holding = withSavedDeckLibrary(() => {
+            entered = true;
+            return gate;
+          });
+          await vi.waitFor(() => expect(entered).toBe(true));
+          expect((await navigator.locks.query()).held).toEqual([{ name: "phase-saved-deck-library", mode: "exclusive" }]);
+          const libraryGeneration = await readIdbGenerationForTests();
+          const pointerGeneration = localStorage.getItem(GENERATION_KEY);
+
+          await expect(Promise.resolve(clearActiveNativeDraftIfCurrent(capture))).resolves.toBe(true);
+          expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+          // Its own counter moved; the library's did not.
+          expect(localStorage.getItem(GENERATION_KEY)).not.toBe(pointerGeneration);
+          await expect(readIdbGenerationForTests()).resolves.toBe(libraryGeneration);
+          expect(isUserOwnedStorageKey(GENERATION_KEY)).toBe(false);
+          release();
+          await holding;
+        } finally {
+          release();
+          uninstallWebLocks();
+        }
+      });
     });
   });
 });

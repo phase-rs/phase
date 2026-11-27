@@ -23,6 +23,12 @@ import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "
 import { parseRoomCode } from "../network/connection";
 import { parseWebSocketUrl } from "../config/multiplayerServer";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+import {
+  runCrossTabTransaction,
+  type CrossTabResource,
+  type CrossTabTxnFailure,
+  type CrossTabTxnResult,
+} from "./crossTabTransaction";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
 export type { PoolInput } from "../adapter/draft-adapter";
@@ -469,9 +475,18 @@ function activeDraftGuestPointer(meta: ActiveDraftGuestPublication): ActiveDraft
  * Writes over whatever is stored. Settles once a native seat's record this
  * pointer replaces is dealt with.
  */
-export function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
+function publishGuestBody(meta: ActiveDraftGuestPublication): Promise<void> {
   const written = activeDraftGuestPointer(meta);
   return written === null ? Promise.resolve() : replaceActiveDraftPointer(JSON.stringify(written));
+}
+
+/**
+ * A guest seat's publication, written at the call outside the recovery-pointer
+ * transaction, so another tab's pointer step is not ordered against it.
+ * Otherwise as `ActiveDraftPointerTxn.publishGuest`.
+ */
+export function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
+  return publishGuestBody(meta);
 }
 
 /**
@@ -480,7 +495,7 @@ export function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise
  * capture of what it wrote; null when it wrote nothing. The text it replaces
  * is a guest pointer, which names no native record. Throws as the write does.
  */
-export function republishActiveDraftGuest(
+function republishGuestBody(
   standsOn: ActiveDraftGuestMetaCapture,
   meta: ActiveDraftGuestPublication,
 ): ActiveDraftGuestMetaCapture | null {
@@ -491,6 +506,18 @@ export function republishActiveDraftGuest(
     return current !== null && sameActiveDraftGuestCapture(current, standsOn);
   });
   return settled === null ? null : activeDraftGuestCapture(written);
+}
+
+/**
+ * A guest seat's republication, compared and written at the call outside the
+ * recovery-pointer transaction, so another tab's pointer step is not ordered
+ * against it. Otherwise as `ActiveDraftPointerTxn.republishGuest`.
+ */
+export function republishActiveDraftGuest(
+  standsOn: ActiveDraftGuestMetaCapture,
+  meta: ActiveDraftGuestPublication,
+): ActiveDraftGuestMetaCapture | null {
+  return republishGuestBody(standsOn, meta);
 }
 
 /** Whether two guest captures are the same stored pointer, capability included. */
@@ -552,21 +579,51 @@ export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
 }
 
 /** Clears guest metadata only when it still matches a previously inspected locator. */
-export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void {
+function clearGuestIfCurrentBody(capture: ActiveDraftGuestMetaCapture): void {
   try {
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
     if (!raw) return;
     const currentCapture = activeDraftGuestCapture(JSON.parse(raw));
     if (currentCapture !== null && sameActiveDraftGuestCapture(currentCapture, capture)) {
-      clearActiveDraftGuest();
+      localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
     }
   } catch {
     // A malformed replacement is not evidence that this caller owns it.
   }
 }
 
-export function clearActiveDraftGuest(): void {
-  localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+/**
+ * Clears guest metadata only when it still matches a previously inspected
+ * locator, compared and removed inside the recovery-pointer transaction. A
+ * transaction that cannot run leaves the pointer.
+ */
+export async function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): Promise<void> {
+  await withActiveDraftPointer((pointer) => pointer.clearGuestIfCurrent(capture));
+}
+
+/**
+ * Removes a stored pointer that reads as no guest pointer at all (no capture
+ * can name it), and nothing else: a pointer any reader can use stays.
+ */
+function clearUnreadableGuestBody(): void {
+  const active = inspectActiveDraftGuest();
+  if (active.type !== "invalid" || active.capture !== null) return;
+  try {
+    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) === null) return;
+    localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    // Unavailable storage is not evidence that the stored text is unreadable.
+  }
+}
+
+/**
+ * Clears a stored guest pointer that cannot be read as one, inspected and
+ * removed inside the recovery-pointer transaction, so a pointer another writer
+ * stored after the caller's own inspection stays. A transaction that cannot
+ * run leaves the pointer.
+ */
+export async function clearActiveDraftGuest(): Promise<void> {
+  await withActiveDraftPointer((pointer) => pointer.clearUnreadableGuest());
 }
 
 /** Do not erase a newer pod's host locator when an older pod is ended. */
@@ -973,20 +1030,114 @@ export async function clearDraftGuestRecovery(capability: DraftGuestCapability):
     (value) => ownsDraftGuestRecord(value, capability)
       && (value.capabilityId ?? null) === capability.capabilityId,
   );
-  const active = inspectActiveDraftGuest();
-  if (active.type !== "present") return;
-  const { capture } = active;
-  if (
-    capture.hostPeerId !== capability.hostPeerId
-    || capture.roomCode !== parseRoomCode(capability.roomCode)
-    || capture.displayName !== capability.displayName.trim()
-  ) return;
-  const namesThisCapability = capture.capabilityId !== null
-    ? capture.capabilityId === capability.capabilityId
-    // An unnamed pointer leads to whatever record sits at its key, so it is
-    // this capability's only when this clear has just removed its unnamed record.
-    : capability.capabilityId === null && removal === "removed";
-  if (namesThisCapability) clearActiveDraftGuestIfCurrent(capture);
+  // The pointer is read and removed inside one recovery-pointer transaction.
+  await withActiveDraftPointer((pointer) => {
+    const active = inspectActiveDraftGuest();
+    if (active.type !== "present") return;
+    const { capture } = active;
+    if (
+      capture.hostPeerId !== capability.hostPeerId
+      || capture.roomCode !== parseRoomCode(capability.roomCode)
+      || capture.displayName !== capability.displayName.trim()
+    ) return;
+    const namesThisCapability = capture.capabilityId !== null
+      ? capture.capabilityId === capability.capabilityId
+      // An unnamed pointer leads to whatever record sits at its key, so it is
+      // this capability's only when this clear has just removed its unnamed record.
+      : capability.capabilityId === null && removal === "removed";
+    if (namesThisCapability) pointer.clearGuestIfCurrent(capture);
+  });
+}
+
+// ── Recovery-Pointer Transaction ──────────────────────────────────────
+
+/**
+ * The recovery pointer's generation counter, a non-secret integer kept under
+ * this key in `localStorage` and in the draft store, beside the records the
+ * pointer leads to, so clearing that store resets both.
+ */
+const ACTIVE_DRAFT_POINTER_GENERATION_KEY = "phase-active-draft-pointer-generation";
+
+const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource = {
+  lockName: "phase-active-draft-pointer",
+  localGenerationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
+  generationStore: getDraftStore,
+  generationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
+};
+
+/**
+ * The recovery pointer's operations, valid only inside the one body they were
+ * handed to: each throws, and acts on nothing, once that body has returned.
+ * Each compares and writes exactly as its exported counterpart describes.
+ */
+export interface ActiveDraftPointerTxn {
+  publishNative(pointer: ActiveNativeDraftPointer): Promise<void>;
+  republishNative(capture: NativeDraftPointerCapture, pointer: ActiveNativeDraftPointer): NativeDraftRepublication;
+  publishGuest(meta: ActiveDraftGuestPublication): Promise<void>;
+  republishGuest(
+    standsOn: ActiveDraftGuestMetaCapture,
+    meta: ActiveDraftGuestPublication,
+  ): ActiveDraftGuestMetaCapture | null;
+  clearGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void;
+  clearNativeIfCurrent(capture: NativeDraftPointerCapture): boolean;
+  clearUnreadableGuest(): void;
+}
+
+export type ActiveDraftPointerTxnResult<T> = CrossTabTxnResult<T, CrossTabTxnFailure>;
+
+/** A recovery-pointer publication was refused before its step ran. */
+export class ActiveDraftPointerUnavailableError extends Error {
+  readonly reason: CrossTabTxnFailure;
+  constructor(reason: CrossTabTxnFailure) {
+    super(`Recovery pointer unavailable: ${reason}`);
+    this.name = "ActiveDraftPointerUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Runs `body` inside the cross-tab recovery-pointer transaction: under its
+ * exclusive lock, once this tab's storage shows every earlier step any tab
+ * committed, so another tab's step lands wholly before `body` or wholly after
+ * it. `body` is synchronous, and it reaches the pointer only through the
+ * capability it is handed; it never calls an exported pointer function, whose
+ * own lock request would wait on this one. A promise `body` returns is not
+ * awaited under the lock. A transaction that cannot be confirmed in its bound
+ * skips `body`, and a throw from `body` rejects. With no lock manager `body`
+ * runs unguarded at the call, and nothing orders it against another tab.
+ */
+export async function withActiveDraftPointer<T>(
+  body: (pointer: ActiveDraftPointerTxn) => T,
+): Promise<ActiveDraftPointerTxnResult<T>> {
+  const result = await runCrossTabTransaction(ACTIVE_DRAFT_POINTER_RESOURCE, () => {
+    let open = true;
+    const scoped = <A extends unknown[], R>(operation: (...args: A) => R) => (...args: A): R => {
+      if (!open) throw new Error("Recovery-pointer transaction already ended");
+      return operation(...args);
+    };
+    const pointer: ActiveDraftPointerTxn = {
+      publishNative: scoped(publishNativeBody),
+      republishNative: scoped(republishNativeBody),
+      publishGuest: scoped(publishGuestBody),
+      republishGuest: scoped(republishGuestBody),
+      clearGuestIfCurrent: scoped(clearGuestIfCurrentBody),
+      clearNativeIfCurrent: scoped(clearNativeIfCurrentBody),
+      clearUnreadableGuest: scoped(clearUnreadableGuestBody),
+    };
+    try {
+      // Boxed, so a removal the body started settles outside the lock.
+      return { value: body(pointer) };
+    } finally {
+      open = false;
+    }
+  }, "run-unguarded");
+  return result.status === "committed" ? { status: "committed", value: result.value.value } : result;
+}
+
+/** The value of a step that ran; a step that could not run rejects. */
+function committedPointerStep<T>(result: ActiveDraftPointerTxnResult<T>): T {
+  if (result.status === "skipped") throw new ActiveDraftPointerUnavailableError(result.reason);
+  return result.value;
 }
 
 // ── Native Draft Capability ───────────────────────────────────────────
@@ -1153,9 +1304,21 @@ function nativePointerText(pointer: ActiveNativeDraftPointer): string {
  * Writes a native pointer over whatever is stored; one that does not validate
  * is not written. Settles once a native record the pointer replaces is dealt with.
  */
-export function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
+function publishNativeBody(pointer: ActiveNativeDraftPointer): Promise<void> {
   if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
   return replaceActiveDraftPointer(nativePointerText(pointer));
+}
+
+/**
+ * Writes a native pointer over whatever is stored, inside the recovery-pointer
+ * transaction; one that does not validate is not written. Settles once a
+ * native record the pointer replaces is dealt with, after the transaction
+ * ends. Rejects with `ActiveDraftPointerUnavailableError`, writing nothing,
+ * when the transaction cannot run, and as the write does.
+ */
+export async function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
+  const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishNative(pointer)));
+  await removal;
 }
 
 /**
@@ -1238,7 +1401,7 @@ export type NativeDraftRepublication =
  * pointer names it. Throws on a pointer that does not validate or names
  * another capability than the capture, and as the read or the write does.
  */
-export function republishActiveNativeDraft(
+function republishNativeBody(
   capture: NativeDraftPointerCapture,
   pointer: ActiveNativeDraftPointer,
 ): NativeDraftRepublication {
@@ -1252,10 +1415,23 @@ export function republishActiveNativeDraft(
 }
 
 /**
+ * A native republication compared and written inside the recovery-pointer
+ * transaction; otherwise as `ActiveDraftPointerTxn.republishNative`. Rejects
+ * with `ActiveDraftPointerUnavailableError`, writing nothing, when the
+ * transaction cannot run, and on what the republication throws.
+ */
+export async function republishActiveNativeDraft(
+  capture: NativeDraftPointerCapture,
+  pointer: ActiveNativeDraftPointer,
+): Promise<NativeDraftRepublication> {
+  return committedPointerStep(await withActiveDraftPointer((txn) => txn.republishNative(capture, pointer)));
+}
+
+/**
  * Removes the native pointer only when its stored text is still the captured
  * text, and says whether it did.
  */
-export function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): boolean {
+function clearNativeIfCurrentBody(capture: NativeDraftPointerCapture): boolean {
   try {
     if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) !== capture.raw) return false;
     localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
@@ -1267,13 +1443,23 @@ export function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCaptu
 }
 
 /**
+ * Removes the native pointer only when its stored text is still the captured
+ * text, compared and removed inside the recovery-pointer transaction, and
+ * says whether it did. A transaction that cannot run removes nothing.
+ */
+export async function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): Promise<boolean> {
+  const cleared = await withActiveDraftPointer((pointer) => pointer.clearNativeIfCurrent(capture));
+  return cleared.status === "committed" && cleared.value;
+}
+
+/**
  * Clears a native pointer a resume cannot use (expired, malformed, or leading
  * to an absent, invalid or mismatched record) when its stored text is still
  * the captured text, and then the private record it names, which no pointer
  * leads to any more.
  */
 export async function clearUnusableNativeDraft(capture: NativeDraftPointerCapture): Promise<void> {
-  if (!clearActiveNativeDraftIfCurrent(capture)) return;
+  if (!(await clearActiveNativeDraftIfCurrent(capture))) return;
   const capabilityId = nativePointerCapabilityId(capture.raw);
   if (capabilityId !== null) await removeUnnamedNativeDraftCapability(capabilityId);
 }
@@ -1294,16 +1480,19 @@ export async function clearNativeDraftCapability(hold: NativeDraftCapabilityHold
       && value.endpoint === hold.endpoint
       && value.draftCode === hold.draftCode,
   );
-  const active = inspectActiveNativeDraft();
-  if (active.type !== "present") return;
-  const { pointer, capture } = active;
-  if (
-    pointer.capabilityId === hold.capabilityId
-    && pointer.endpoint === hold.endpoint
-    && pointer.draftCode === hold.draftCode
-  ) {
-    clearActiveNativeDraftIfCurrent(capture);
-  }
+  // The pointer is read and removed inside one recovery-pointer transaction.
+  await withActiveDraftPointer((txn) => {
+    const active = inspectActiveNativeDraft();
+    if (active.type !== "present") return;
+    const { pointer, capture } = active;
+    if (
+      pointer.capabilityId === hold.capabilityId
+      && pointer.endpoint === hold.endpoint
+      && pointer.draftCode === hold.draftCode
+    ) {
+      txn.clearNativeIfCurrent(capture);
+    }
+  });
 }
 
 /**

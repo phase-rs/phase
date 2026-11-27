@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataConnection";
 import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
 import type { DraftGuestCapability } from "../../services/draftPersistence";
+import { installFifoWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 /*
  * Who publishes a guest's public recovery pointer, on the real lifecycle
@@ -590,6 +591,57 @@ describe("guest recovery pointer publication", () => {
     } finally {
       unsubscribe();
       spy.mockRestore();
+    }
+  });
+
+  it("a guest resume of an unreadable pointer keeps a pointer another context writes after reading it", async () => {
+    localStorage.setItem(POINTER_KEY, "{not json");
+    installFifoWebLocks();
+    const getItem = localStorage.getItem.bind(localStorage);
+    let spy: { mockRestore: () => void } | null = null;
+    try {
+      // Another same-origin tab: its own graph of the persistence authority,
+      // sharing only localStorage, IndexedDB and the lock manager.
+      vi.resetModules();
+      const tab = await vi.importActual<typeof import("../../services/draftPersistence")>(
+        "../../services/draftPersistence",
+      );
+      const pointerB = await tab.saveNativeDraftCapability({
+        capabilityId: "cap-B",
+        endpoint: NATIVE_ENDPOINT,
+        draftCode: "NAT002",
+        playerToken: "tok-B",
+        seatIndex: 1,
+        participant: "guest",
+      });
+      // It publishes at the resume's inspection read.
+      let publishedB: Promise<void> | null = null;
+      let fired = 0;
+      spy = vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+        const seen = getItem(key);
+        if (key === POINTER_KEY && fired === 0) {
+          fired += 1;
+          publishedB = tab.publishActiveNativeDraft(pointerB);
+        }
+        return seen;
+      });
+      const outcome = await useMultiplayerDraftStore.getState().resumeDraft();
+      await publishedB;
+      spy.mockRestore();
+      spy = null;
+
+      expect(outcome).toBe("invalid");
+      expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+      // Reach: the trigger fired at the resume's read of the unreadable text.
+      expect(fired).toBe(1);
+
+      // With no other writer, a second resume of an unreadable text removes it.
+      localStorage.setItem(POINTER_KEY, "{not json");
+      await expect(useMultiplayerDraftStore.getState().resumeDraft()).resolves.toBe("invalid");
+      expect(localStorage.getItem(POINTER_KEY)).toBeNull();
+    } finally {
+      spy?.mockRestore();
+      uninstallWebLocks();
     }
   });
 });

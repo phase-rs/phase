@@ -8,8 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * `NativeDouble` below. The P2P guest is the real `DraftPodGuestAdapter` over
  * a doubled `P2PDraftGuest` and room join, and a host is a doubled
  * `DraftPodHostAdapter`. Storage is real on fake-indexeddb; five native
- * storage functions are wrapped only to log their order and to hold or fail
- * one call.
+ * storage functions, and the native writes of the recovery-pointer
+ * transaction's capability, are wrapped only to log their order and to hold
+ * or fail one call.
  */
 
 type NativeCredential = { draftCode: string; playerToken: string; seatIndex: number };
@@ -166,6 +167,8 @@ const storage = vi.hoisted(() => ({
   lastSavedId: null as string | null,
 }));
 
+import type { ActiveDraftPointerTxn } from "../../services/draftPersistence";
+
 vi.mock("../../services/draftPersistence", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../services/draftPersistence")>();
   /**
@@ -193,8 +196,33 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
     }));
     return true;
   };
+  /** The pointer writes of `pointer`, logged and held as the exported writers below are. */
+  const instrumented = (pointer: ActiveDraftPointerTxn): ActiveDraftPointerTxn => ({
+    ...pointer,
+    publishNative: (...args) => {
+      storage.log.push(`pointerWrite:${args[0].capabilityId}`);
+      if (!holdNextRemoval()) return pointer.publishNative(...args);
+      storage.heldRemoval = pointer.publishNative(...args);
+      return storage.heldRemoval;
+    },
+    republishNative: (...args) => {
+      const held = holdNextRemoval();
+      let result: ReturnType<ActiveDraftPointerTxn["republishNative"]>;
+      try {
+        result = pointer.republishNative(...args);
+      } catch (error) {
+        storage.log.push("republish:threw");
+        throw error;
+      }
+      storage.log.push(`republish:${result.status}:${args[1].capabilityId}`);
+      if (held) storage.heldRemoval = result.settled;
+      return result;
+    },
+  });
   return {
     ...actual,
+    withActiveDraftPointer: <T,>(body: (pointer: ActiveDraftPointerTxn) => T) =>
+      actual.withActiveDraftPointer((pointer) => body(instrumented(pointer))),
     saveNativeDraftCapability: async (...args: Parameters<typeof actual.saveNativeDraftCapability>) => {
       storage.log.push("privateSave:enter");
       storage.lastSavedId = args[0].capabilityId;
@@ -215,11 +243,11 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
       storage.heldRemoval = actual.publishActiveNativeDraft(...args);
       return storage.heldRemoval;
     },
-    republishActiveNativeDraft: (...args: Parameters<typeof actual.republishActiveNativeDraft>) => {
+    republishActiveNativeDraft: async (...args: Parameters<typeof actual.republishActiveNativeDraft>) => {
       const held = holdNextRemoval();
-      let result: ReturnType<typeof actual.republishActiveNativeDraft>;
+      let result: Awaited<ReturnType<typeof actual.republishActiveNativeDraft>>;
       try {
-        result = actual.republishActiveNativeDraft(...args);
+        result = await actual.republishActiveNativeDraft(...args);
       } catch (error) {
         storage.log.push("republish:threw");
         throw error;
@@ -336,6 +364,8 @@ import {
 } from "../../services/draftPersistence";
 import type { CreateDraftSettings } from "../../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
+import { setCrossTabTxnLockWaitForTests } from "../../services/crossTabTransaction";
+import { installFifoWebLocks, installRefusingWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 const POINTER_KEY = "phase-active-draft-guest";
 const ENDPOINT = "wss://native.example/ws";
@@ -463,7 +493,7 @@ async function storeNativePair(): Promise<{ capabilityId: string; pointerText: s
     seatIndex: 3,
     participant: "guest",
   });
-  publishActiveNativeDraft(pointer);
+  await publishActiveNativeDraft(pointer);
   storage.log.length = 0;
   return { capabilityId: pointer.capabilityId, pointerText: localStorage.getItem(POINTER_KEY)! };
 }
@@ -1770,4 +1800,247 @@ describe("the draft owner generation", () => {
     expect(store().role).toBeNull();
     expect(currentDraftOwnerGeneration()).toBe(seated);
   });
+});
+
+describe("a native owner under the cross-tab recovery-pointer transaction", () => {
+  beforeEach(resetHarness);
+  afterEach(endHarness);
+
+  const POINTER_LOCK = "phase-active-draft-pointer";
+  type PersistenceModule = typeof import("../../services/draftPersistence");
+
+  /**
+   * Another same-origin tab: its own module graph of the persistence
+   * authority, sharing only localStorage, IndexedDB and the lock manager.
+   */
+  async function otherTab(): Promise<PersistenceModule> {
+    vi.resetModules();
+    const tab = await vi.importActual<PersistenceModule>("../../services/draftPersistence");
+    // Reach: a distinct graph, not this one.
+    expect(tab.publishActiveNativeDraft).not.toBe(publishActiveNativeDraft);
+    expect(tab.getDraftStore).not.toBe(getDraftStore);
+    return tab;
+  }
+
+  /** A predecessor of the given role, and how many times it has been disposed. */
+  async function seatPredecessor(
+    role: "beside a P2P guest" | "beside a native seat that lost its connection",
+  ): Promise<() => number> {
+    if (role === "beside a P2P guest") {
+      await joinP2PGuest();
+      await storeNativePair();
+      return () => guests.instances[0]!.dispose.mock.calls.length;
+    }
+    await joinNative();
+    native.instances[0]!.emit({ type: "disconnected" });
+    // Reach: the held seat is not live.
+    expect(store().phase).toBe("error");
+    return () => native.instances[0]!.disposeCount;
+  }
+
+  /** Holds the pointer lock as another tab's step would, until released. */
+  function holdPointerLock(): { held: Promise<void>; release: () => void } {
+    const gate = held();
+    const holding = navigator.locks.request(POINTER_LOCK, { mode: "exclusive" }, () => gate.promise);
+    return { held: holding, release: () => gate.resolve() };
+  }
+
+  async function pendingPointerRequests(): Promise<number> {
+    const { pending } = await navigator.locks.query();
+    return (pending ?? []).filter((request) => request.name === POINTER_LOCK).length;
+  }
+
+  it.each(["beside a P2P guest", "beside a native seat that lost its connection"] as const)(
+    "a native resume's comparison and write are one step against another context's publication: %s",
+    async (leg) => {
+      installFifoWebLocks();
+      const getItem = localStorage.getItem.bind(localStorage);
+      let spy: { mockRestore: () => void } | null = null;
+      try {
+        const predecessorDisposals = await seatPredecessor(leg);
+        const ownId = storedPointer()?.capabilityId as string;
+        const tab = await otherTab();
+        const pointerB = await tab.saveNativeDraftCapability({
+          capabilityId: "cap-B",
+          endpoint: ENDPOINT,
+          draftCode: "NAT002",
+          playerToken: "tok-B",
+          seatIndex: 1,
+          participant: "guest",
+        });
+        const recordB = await storedRecord("cap-B");
+        storage.log.length = 0;
+
+        // Another tab publishes at the resume's first read of the pointer
+        // after its private record commits: its comparison read.
+        let publishedB: Promise<void> | null = null;
+        let fired = 0;
+        spy = vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+          const seen = getItem(key);
+          if (key === POINTER_KEY && fired === 0 && storage.log.includes("privateSave:committed")) {
+            fired += 1;
+            publishedB = tab.publishActiveNativeDraft(pointerB);
+          }
+          return seen;
+        });
+        const outcome = await store().resumeNativeDraft();
+        await publishedB;
+        spy.mockRestore();
+        spy = null;
+
+        expect(outcome).toEqual({ status: "resumed" });
+        expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
+        await expect(storedRecord("cap-B")).resolves.toEqual(recordB);
+        // Reach: the trigger fired once, the resume compared and published its
+        // own pointer, and its handoff retired the predecessor and installed it.
+        expect(fired).toBe(1);
+        expect(storage.log).toContain(`republish:published:${ownId}`);
+        expect(store()).toMatchObject({ role: "guest", transport: "native" });
+        expect(predecessorDisposals()).toBe(1);
+      } finally {
+        spy?.mockRestore();
+        uninstallWebLocks();
+      }
+    },
+  );
+
+  it.each([
+    ["refused", "beside a P2P guest"],
+    ["refused", "beside a native seat that lost its connection"],
+    ["timed out", "beside a P2P guest"],
+  ] as const)(
+    "a native resume whose pointer transaction is %s ends as failed and retires nothing: %s",
+    async (refusal, leg) => {
+      const predecessorDisposals = await seatPredecessor(leg);
+      const pointerText = localStorage.getItem(POINTER_KEY);
+      const before = snapshot();
+      native.state.log.length = 0;
+      storage.log.length = 0;
+      let holder: { held: Promise<void>; release: () => void } | null = null;
+      if (refusal === "refused") {
+        installRefusingWebLocks(new DOMException("denied", "SecurityError"));
+      } else {
+        installFifoWebLocks();
+        setCrossTabTxnLockWaitForTests(50);
+        holder = holdPointerLock();
+      }
+      try {
+        const outcome = await store().resumeNativeDraft();
+        expect(outcome).toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
+        const resumeAdapter = native.instances.at(-1)!;
+        // Reach: the reconnect resolved and the refreshed record committed.
+        expect(native.state.log).toContain(`reconnect:resolved:${resumeAdapter.index}`);
+        expect(storage.log).toContain("privateSave:committed");
+        expect(storage.log.filter((entry) => entry.startsWith("republish:"))).toEqual([]);
+        expect(predecessorDisposals()).toBe(0);
+        expect(resumeAdapter.disposeCount).toBe(1);
+        expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
+        expect(snapshot()).toStrictEqual(before);
+
+        holder?.release();
+        await holder?.held;
+        // The predecessor is still the installed owner: a leave reaches it.
+        await store().leave(true);
+        expect(predecessorDisposals()).toBe(1);
+      } finally {
+        holder?.release();
+        uninstallWebLocks();
+      }
+    },
+  );
+
+  it.each(["create", "join"] as const)(
+    "a native %s whose pointer transaction is refused reports the save error",
+    async (kind) => {
+      installRefusingWebLocks(new DOMException("denied", "SecurityError"));
+      let outcome: unknown;
+      try {
+        outcome = kind === "create"
+          ? await store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings })
+          : await store().joinNativeDraft({ endpoint: ENDPOINT, draftCode: "NAT001", displayName: "Bo" });
+      } finally {
+        uninstallWebLocks();
+      }
+      expect(outcome).toEqual({ status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR });
+      // Reach: the record committed before the publication's transaction.
+      const capabilityId = storage.lastSavedId!;
+      expect(storage.log).toContain("privateSave:committed");
+      expect(storage.log.filter((entry) => entry.startsWith("pointerWrite:"))).toEqual([]);
+      expect(store()).toMatchObject({ role: null, transport: null, error: DRAFT_RECOVERY_SAVE_ERROR });
+      expect(native.instances).toHaveLength(1);
+      expect(native.instances[0]!.disposeCount).toBe(1);
+      await expect(storedRecord(capabilityId)).resolves.toBeUndefined();
+      expect(storedPointer()).toBeNull();
+    },
+  );
+
+  it("a native create superseded while it waits for the pointer lock publishes nothing", async () => {
+    installFifoWebLocks();
+    const holder = holdPointerLock();
+    try {
+      const first = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+      await vi.waitFor(async () => expect(await pendingPointerRequests()).toBe(1));
+      const firstId = storage.lastSavedId!;
+      expect(storage.log).toContain("privateSave:committed");
+
+      const second = store().createNativeDraft({ endpoint: ENDPOINT, settings: createSettings });
+      await vi.waitFor(async () => expect(await pendingPointerRequests()).toBe(2));
+      const secondId = storage.lastSavedId!;
+      expect(secondId).not.toBe(firstId);
+      // Reach: the second create retired the first's owner while it waited.
+      expect(native.instances[0]!.disposeCount).toBe(1);
+
+      holder.release();
+      await holder.held;
+      await expect(first).resolves.toEqual({ status: "superseded" });
+      await expect(second).resolves.toEqual({ status: "opened" });
+      expect(storage.log.filter((entry) => entry.startsWith("pointerWrite:"))).toEqual([`pointerWrite:${secondId}`]);
+      expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: secondId });
+      await expect(storedRecord(firstId)).resolves.toBeUndefined();
+      await expect(storedRecord(secondId)).resolves.toMatchObject({ capabilityId: secondId });
+    } finally {
+      holder.release();
+      uninstallWebLocks();
+    }
+  });
+
+  it.each(["a leave", "going offline"] as const)(
+    "a native resume overtaken while it waits for the pointer lock writes nothing: %s",
+    async (overtaken) => {
+      await joinP2PGuest();
+      await storeNativePair();
+      const pointerText = localStorage.getItem(POINTER_KEY);
+      installFifoWebLocks();
+      const holder = holdPointerLock();
+      try {
+        const resuming = store().resumeNativeDraft();
+        await vi.waitFor(async () => expect(await pendingPointerRequests()).toBe(1));
+        // Reach: it waits for the lock after its refreshed record committed.
+        expect(storage.log).toContain("privateSave:committed");
+        const resumeAdapter = native.instances.at(-1)!;
+
+        const leaving = overtaken === "a leave" ? store().leave(true) : null;
+        if (overtaken === "going offline") useConnectivityStore.setState({ forcedOffline: true });
+        holder.release();
+        await holder.held;
+        await expect(resuming).resolves.toEqual({ status: overtaken === "a leave" ? "superseded" : "offline" });
+        await leaving;
+
+        expect(localStorage.getItem(POINTER_KEY)).toBe(pointerText);
+        expect(storage.log.filter((entry) => entry.startsWith("republish:"))).toEqual([]);
+        expect(resumeAdapter.disposeCount).toBe(1);
+        if (overtaken === "going offline") {
+          // The predecessor is still the installed owner: a leave reaches it.
+          expect(store()).toMatchObject({ role: "guest", transport: "p2p" });
+          expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(0);
+          useConnectivityStore.setState({ forcedOffline: false });
+          await store().leave(true);
+          expect(guests.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+        }
+      } finally {
+        holder.release();
+        uninstallWebLocks();
+      }
+    },
+  );
 });

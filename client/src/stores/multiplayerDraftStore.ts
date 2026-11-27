@@ -96,15 +96,14 @@ import {
   loadDraftGuestSession,
   loadDraftSettlementOutbox,
   loadNativeDraftCapability,
-  publishActiveNativeDraft,
   republishActiveDraftGuest,
-  republishActiveNativeDraft,
   sameActiveDraftGuestCapture,
   saveActiveDraftGuest,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
   saveNativeDraftCapability,
+  withActiveDraftPointer,
   type ActiveDraftGuestMetaCapture,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
@@ -2143,6 +2142,24 @@ function installDraftOwner(
   return owner;
 }
 
+/**
+ * What a native resume's step inside the recovery-pointer transaction did:
+ * acted on nothing because the attempt ended or went offline while it
+ * waited, failed to write, was refused by another writer's pointer, or
+ * published and handed off to `owner`.
+ */
+type NativeResumeStep =
+  | { readonly kind: "superseded" }
+  | { readonly kind: "offline" }
+  | { readonly kind: "writeFailed" }
+  | { readonly kind: "refused"; readonly settled: Promise<void> }
+  | {
+    readonly kind: "published";
+    readonly settled: Promise<void>;
+    readonly owner: InstalledDraftOwner;
+    readonly epoch: number;
+  };
+
 /** What a native create or join asks the server for. */
 type NativeDraftStart =
   | { readonly kind: "create"; readonly endpoint: string; readonly settings: CreateDraftSettings }
@@ -2252,12 +2269,23 @@ async function openNativeOwner(
       return { status: "superseded" };
     }
     if (owner.role === "native") owner.capability = hold;
-    // Publishing over a predecessor's native pointer removes the record it named.
-    let published: Promise<void>;
+    // Publishing over a predecessor's native pointer removes the record it
+    // named. The publication waits for the recovery-pointer transaction, so its
+    // first act is to recheck that this owner is still installed.
+    let published: Promise<void> | null;
     try {
-      published = publishActiveNativeDraft(pointer);
+      const transaction = await withActiveDraftPointer((txn) => isCurrentOwner() ? txn.publishNative(pointer) : null);
+      if (transaction.status === "skipped") throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+      published = transaction.value;
     } catch {
       throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+    }
+    if (published === null) {
+      // Ended while it waited for the transaction: its record is nobody's
+      // now, and no pointer leads to it.
+      await clearNativeDraftCapability(hold);
+      void disposeNativeAdapter(adapter);
+      return { status: "superseded" };
     }
     await published;
     // A successor may have started while that removal was pending.
@@ -2773,8 +2801,8 @@ export const useMultiplayerDraftStore = create<
       const active = inspectActiveDraftGuest();
       if (active.type === "absent") return "absent";
       if (active.type === "invalid") {
-        if (active.capture) clearActiveDraftGuestIfCurrent(active.capture);
-        else clearActiveDraftGuest();
+        if (active.capture) await clearActiveDraftGuestIfCurrent(active.capture);
+        else await clearActiveDraftGuest();
         return "invalid";
       }
       const { meta: locator, capture } = active;
@@ -2805,7 +2833,7 @@ export const useMultiplayerDraftStore = create<
           return "offline";
         }
         if (!session) {
-          clearActiveDraftGuestIfCurrent(capture);
+          await clearActiveDraftGuestIfCurrent(capture);
           return "invalid";
         }
 
@@ -2832,7 +2860,7 @@ export const useMultiplayerDraftStore = create<
           return "offline";
         }
         if (get().guestRecoveryFailure?.kind === "invalid") {
-          clearActiveDraftGuestIfCurrent(capture);
+          await clearActiveDraftGuestIfCurrent(capture);
           return "invalid";
         }
         return "failed";
@@ -2977,44 +3005,77 @@ export const useMultiplayerDraftStore = create<
 
       // The pointer goes first, and only over the pointer this resume read: a
       // pointer another writer stored meanwhile, and its record, stay, and so
-      // does the installed owner. The handoff follows in the same synchronous
-      // step: retire the installed owner and start its teardown, install this
-      // one, deliver what it buffered. Neither contains an await; after them,
-      // the resume awaits only the removal the publication returned.
-      let published: NativeDraftRepublication;
-      try {
-        published = republishActiveNativeDraft(capture, refreshed);
-      } catch {
+      // does the installed owner. The comparison, the write and the handoff
+      // run in one synchronous body under the cross-tab recovery-pointer
+      // transaction: retire the installed owner and start its teardown,
+      // install this one, deliver what it buffered. The body contains no
+      // await, so another tab's publication lands wholly before the
+      // comparison or wholly after the handoff; after it, the resume awaits
+      // only the removal the publication returned.
+      const transaction = await withActiveDraftPointer((txn): NativeResumeStep => {
+        // The lock wait can be long: an attempt ended or taken offline
+        // meanwhile acts on nothing.
+        if (!isCurrentResume()) return { kind: "superseded" };
+        if (getEffectiveOffline()) return { kind: "offline" };
+        let published: NativeDraftRepublication;
+        try {
+          published = txn.republishNative(capture, refreshed);
+        } catch {
+          return { kind: "writeFailed" };
+        }
+        if (published.status === "superseded") return { kind: "refused", settled: published.settled };
+        stopAbandonListeners();
+        stopBuffering();
+        settleProvisional(provisional);
+        const epoch = advanceDraftAdapterEpoch("replaced");
+        const previous = detachInstalledDraftOwner();
+        const previousTeardown = disposeDetachedOwner(previous, true);
+        retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+        void previousTeardown;
+        const owner = installDraftOwner(set, {
+          role: "native",
+          adapter,
+          participant: record.participant,
+          capability: {
+            capabilityId: record.capabilityId,
+            endpoint: record.endpoint,
+            draftCode: record.draftCode,
+            playerToken: record.playerToken,
+          },
+        }, signal);
+        set({ seatIndex: record.seatIndex });
+        for (const event of buffered) handleNativeEvent(event, set);
+        return { kind: "published", settled: published.settled, owner, epoch };
+      });
+      if (transaction.status === "skipped") {
+        // Nothing was compared, written or retired.
         abandon();
+        if (!isCurrentResume()) return { status: "superseded" };
+        if (getEffectiveOffline()) return { status: "offline" };
         return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
       }
-      if (published.status === "superseded") {
-        abandon();
-        await published.settled;
-        return { status: "superseded" };
+      const step = transaction.value;
+      switch (step.kind) {
+        case "superseded":
+          abandon();
+          return { status: "superseded" };
+        case "offline":
+          abandon();
+          return { status: "offline" };
+        case "writeFailed":
+          abandon();
+          return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
+        case "refused":
+          abandon();
+          await step.settled;
+          return { status: "superseded" };
+        case "published":
+          break;
+        default:
+          return assertNever(step);
       }
-      stopAbandonListeners();
-      stopBuffering();
-      settleProvisional(provisional);
-      const epoch = advanceDraftAdapterEpoch("replaced");
-      const previous = detachInstalledDraftOwner();
-      const previousTeardown = disposeDetachedOwner(previous, true);
-      retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
-      void previousTeardown;
-      const owner = installDraftOwner(set, {
-        role: "native",
-        adapter,
-        participant: record.participant,
-        capability: {
-          capabilityId: record.capabilityId,
-          endpoint: record.endpoint,
-          draftCode: record.draftCode,
-          playerToken: record.playerToken,
-        },
-      }, signal);
-      set({ seatIndex: record.seatIndex });
-      for (const event of buffered) handleNativeEvent(event, set);
-      await published.settled;
+      const { owner, epoch } = step;
+      await step.settled;
       // A successor, a leave or a reset owns the session published now.
       if (
         installedDraftOwner !== owner
