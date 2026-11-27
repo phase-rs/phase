@@ -11661,6 +11661,46 @@ mod tests {
         state
     }
 
+    #[test]
+    fn unresolved_parent_owner_does_not_fallback_to_source_controller() {
+        // CR 508.1c: an unresolved protected-player owner must not make an
+        // otherwise legal attack fail against the restriction source's player.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::DeclareAttackers;
+        let attacker = create_creature(&mut state, PlayerId(1), "Attacker", 2, 2);
+        let source = create_creature(&mut state, PlayerId(0), "Restriction Source", 1, 1);
+        state
+            .restrictions
+            .push(crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players: crate::types::ability::RestrictionPlayerScope::AllPlayers,
+                expiry: crate::types::ability::RestrictionExpiry::EndOfTurn,
+                activity: crate::types::ability::ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: Some(
+                        crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                            possession: crate::types::ability::PossessionAxis::Owner,
+                        },
+                    ),
+                },
+            });
+        let gates = CombatStaticGates::compute(&state);
+        assert!(attack_passes_temporary_prohibition(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+        ));
+        assert!(attacker_can_attack_target(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            &gates,
+            &[PlayerId(1)],
+        ));
+    }
+
     /// Test adapter: derive both defender-scoped cap sets from `state` exactly
     /// as `AttackDeclarationConstraints::build` does, then run the single shared
     /// validator. Production callers all hold a prebuilt model and pass its
