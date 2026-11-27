@@ -408,6 +408,7 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Pay to protect {{object}}",
       "blightCounters_one": "Put a -1/-1 counter on a creature you control",
       "blightCounters_other": "Put {{count}} -1/-1 counters on a creature you control",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",

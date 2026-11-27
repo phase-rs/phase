@@ -408,6 +408,7 @@
       "single": "{{action}}パーマネント1つ",
       "exactCount_one": "{{action}}パーマネント{{count}}つ",
       "exactCount_other": "{{action}}パーマネント{{count}}つ",
+      "protectedObject": "{{object}}を守るために支払う",
       "blightCounters_one": "あなたがコントロールするクリーチャー1体の上に-1/-1カウンターを1個置く",
       "blightCounters_other": "あなたがコントロールするクリーチャー1体の上に-1/-1カウンターを{{count}}個置く",
       "rangeCount_one": "{{action}}パーマネント{{min}}〜{{count}}個",

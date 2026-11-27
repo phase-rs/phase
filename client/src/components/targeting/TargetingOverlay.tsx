@@ -338,6 +338,9 @@ export function TargetingOverlay() {
                         ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
                         : t("targeting.chooseTarget")
                       );
+  const affectedObject = boardChoice?.affectedObject != null
+    ? objects?.[boardChoice.affectedObject]
+    : undefined;
 
   // The engine description is free-form text of unbounded length. Collapsed it
   // is the tail of a single caption line, so the line's ellipsis is what bounds
@@ -629,6 +632,14 @@ export function TargetingOverlay() {
             <div className="text-center text-lg font-semibold text-cyan-400 leading-snug line-clamp-2">
               <RichLabel text={overlayPrompt} />
             </div>
+            {boardChoice?.effectDescription && (
+              <p className="text-center text-xs text-gray-400">{boardChoice.effectDescription}</p>
+            )}
+            {affectedObject && (
+              <p className="text-center text-xs text-gray-300">
+                {t("boardChoice.prompt.protectedObject", { object: affectedObject.name })}
+              </p>
+            )}
             {promptMeta.length > 0 && (
               <div className="flex w-full items-center justify-center gap-x-2 text-xs">
                 <div ref={descriptionLineRef} className="min-w-0 truncate">

@@ -2805,6 +2805,7 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Payez pour protéger {{object}}",
       "blightCounters_one": "Mettez un marqueur -1/-1 sur une créature que vous contrôlez",
       "blightCounters_other": "Mettez {{count}} marqueurs -1/-1 sur une créature que vous contrôlez",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",

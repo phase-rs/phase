@@ -437,6 +437,8 @@ export interface BoardChoiceView {
   response: BoardChoiceResponse;
   sourceId?: ObjectId;
   blightCounters?: number;
+  affectedObject?: ObjectId | null;
+  effectDescription?: string | null;
   skipAction?: GameAction;
   skipLabel?: "keepTapped" | "decline";
   cancelAction?: GameAction;
@@ -747,6 +749,8 @@ export function getBoardChoiceView(
         objectIds: waitingFor.data.creatures,
         intent: "blight",
         blightCounters: waitingFor.data.counters,
+        affectedObject: waitingFor.data.affected_object,
+        effectDescription: waitingFor.data.effect_description,
         selection: confirmedCountSelection(1, 1),
         response: { type: "SelectCards" },
         skipAction: { type: "PayUnlessCost", data: { pay: false } },

@@ -3336,7 +3336,42 @@ pub(crate) fn fixed_unless_blight_count(cost: &AbilityCost) -> Option<u32> {
         AbilityCost::Blight {
             count: BlightCount::Fixed(count),
         } => Some(*count),
-        _ => None,
+        AbilityCost::Blight {
+            count: BlightCount::AnnouncedX { .. },
+        }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
     }
 }
 
@@ -3411,6 +3446,8 @@ pub(super) fn handle_unless_blight_choice(
             Ok(action_result(events, state.waiting_for.clone()))
         }
         CounterAdditionOutcome::Settled | CounterAdditionOutcome::Prevented => {
+            // A settled placement pays this cost. This path treats a
+            // prevented placement as unpaid and resumes the unless effect.
             finish_unless_blight(
                 state,
                 matches!(outcome, CounterAdditionOutcome::Settled),

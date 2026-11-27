@@ -6,12 +6,12 @@ use engine::game::layers::evaluate_layers;
 use engine::game::printed_cards::{printed_ref_from_face, rehydrate_game_from_card_db};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityCost, AdditionalCost, BlightCount};
-use engine::types::actions::GameAction;
+use engine::types::actions::{CastChoice, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, PersistedGameState, PersistedRestoreError, PersistedRestoreFinalization,
-    ReplacementChoiceKind, StackEntryKind, WaitingFor,
+    CastOfferKind, CastPaymentMode, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, ReplacementChoiceKind, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{parse_mtgjson_mana_cost, ManaColor, ManaType, ManaUnit};
@@ -330,6 +330,82 @@ fn soul_immolation_locks_derived_cap_separately_from_recipient() {
             assert_eq!(runner.state().objects[&second].damage_marked, 5);
         }
     }
+}
+
+#[test]
+fn maelstrom_wanderer_cascades_into_soul_immolation_with_blight_x() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        mana(&[
+            ManaType::Green,
+            ManaType::Blue,
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]),
+    );
+    let dreadmaw = scenario
+        .add_creature(P0, "Colossal Dreadmaw", 6, 6)
+        .from_oracle_text(printed_text("Colossal Dreadmaw"))
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}{G}{G}"))
+        .id();
+    let wanderer = scenario
+        .add_creature_to_hand(P0, "Maelstrom Wanderer", 7, 5)
+        .as_legendary()
+        .from_oracle_text_with_keywords(&["Cascade", "Cascade"], printed_text("Maelstrom Wanderer"))
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}{G}{U}{R}"))
+        .id();
+    let soul = scenario
+        .add_spell_to_library_top(P0, "Soul Immolation", false)
+        .from_oracle_text(printed_text("Soul Immolation"))
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}{R}{R}"))
+        .id();
+
+    let mut runner = scenario.build();
+    announce(&mut runner, wanderer, CastPaymentMode::Auto).unwrap();
+    if let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for {
+        let order = (0..triggers.len()).collect();
+        runner.act(GameAction::OrderTriggers { order }).unwrap();
+    }
+    runner.act(GameAction::PassPriority).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastOffer {
+            player: P0,
+            kind: CastOfferKind::Cascade {
+                hit_card,
+                source_mv: 8,
+                ..
+            }
+        } if hit_card == soul
+    ));
+    runner
+        .act(GameAction::CascadeChoice {
+            choice: CastChoice::Cast,
+        })
+        .unwrap();
+    assert_x(&runner, 6);
+    runner.act(GameAction::ChooseX { value: 4 }).unwrap();
+    assert_blight(&runner, 4, &[dreadmaw]);
+    runner.act(select(dreadmaw)).unwrap();
+
+    // CR 702.85a + CR 202.3e: the additional-cost X leaves the spell's
+    // mana value at five while the selected creature receives four counters.
+    let entry = runner.state().stack.back().unwrap();
+    assert_eq!(entry.source_id, soul);
+    assert!(matches!(
+        &entry.kind,
+        StackEntryKind::Spell { ability: Some(ability), .. } if ability.chosen_x == Some(4)
+    ));
+    assert_eq!(runner.state().objects[&soul].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&soul].spell_mana_value(), 5);
+    assert_eq!(minus_counters(&runner, dreadmaw), 4);
 }
 
 #[test]
@@ -753,7 +829,19 @@ fn auntie_ward_spell_and_ability_settle_exactly_one_stack_object() {
             } = ward(ability, false, true, false);
             let recipient = recipient.unwrap();
             if selection.is_some() {
+                let protected = runner
+                    .state()
+                    .stack
+                    .iter()
+                    .find(|entry| entry.id == targeting_entry)
+                    .unwrap()
+                    .source_id;
                 ward_pick(&mut runner, recipient);
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::UnlessBlightChoice { affected_object: Some(object), .. }
+                        if object == protected
+                ));
                 assert!(apply(runner.state_mut(), P2, select(recipient)).is_err());
                 assert!(runner.act(select(auntie)).is_err());
                 assert!(matches!(

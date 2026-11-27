@@ -314,6 +314,8 @@ describe("getBoardChoiceView", () => {
         pending_effect: {},
         cost: { type: "Blight", count: 2 },
         remaining: [],
+        affected_object: 20,
+        effect_description: "Ward",
       },
     });
     expect(choice).toEqual({
@@ -321,6 +323,8 @@ describe("getBoardChoiceView", () => {
       objectIds: [10, 11],
       intent: "blight",
       blightCounters: 2,
+      affectedObject: 20,
+      effectDescription: "Ward",
       selection: { type: "exactCount", count: 1 },
       response: { type: "SelectCards" },
       skipAction: { type: "PayUnlessCost", data: { pay: false } },

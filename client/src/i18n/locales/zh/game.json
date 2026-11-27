@@ -432,6 +432,7 @@
     "prompt": {
       "exactCount_one": "{{action}}{{count}}个永久物",
       "exactCount_other": "{{action}}{{count}}个永久物",
+      "protectedObject": "支付以保护{{object}}",
       "blightCounters_one": "在一个由你操控的生物上放置一个-1/-1指示物",
       "blightCounters_other": "在一个由你操控的生物上放置{{count}}个-1/-1指示物",
       "rangeCount_one": "{{action}}{{min}}-{{count}}个永久物",

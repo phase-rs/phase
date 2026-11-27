@@ -14011,7 +14011,41 @@ pub(super) fn bounded_blight_cost_max(
             .iter()
             .filter_map(|cost| bounded_blight_cost_max(state, player, source, cost))
             .min(),
-        _ => None,
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => None,
     }
 }
 
@@ -14028,7 +14062,41 @@ pub(super) fn bounded_blight_x_can_be_paid(
         AbilityCost::Composite { costs } => costs
             .iter()
             .all(|cost| bounded_blight_x_can_be_paid(state, player, cost, x)),
-        _ => true,
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
+        | AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::SayPhrase { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => true,
     }
 }
 
@@ -15398,14 +15466,12 @@ fn finalize_cast_pre_payment_checks(
         ));
     }
 
-    // CR 702.85a: Evaluate cascade/resulting-MV constraints before payment.
-    // For the constraint we synthesize the resulting MV from the printed cost
-    // + chosen_x rather than reading `obj.cost_x_paid`, since that field is
-    // stamped only after payment.
-    let cascade_resulting_mv = state
-        .objects
-        .get(&object_id)
-        .map(|obj| obj.mana_cost.mana_value() + ability.chosen_x.unwrap_or(0));
+    // CR 702.85a + CR 202.3e: Evaluate the resulting mana value before payment
+    // using announced X for any {X} symbols in the spell's mana cost.
+    let cascade_resulting_mv = state.objects.get(&object_id).map(|obj| {
+        obj.mana_cost
+            .mana_value_with_x(Zone::Stack, ability.chosen_x)
+    });
     let mut cascade_cast_transformed = false;
     let mut resolution_success_waiting_for: Option<WaitingFor> = None;
     if let Some(resulting_mv) = cascade_resulting_mv {
@@ -16728,10 +16794,8 @@ enum CascadeCheck {
 /// On acceptance, bottom-shuffles the exiled misses here so both accept paths
 /// (plain free cast + X-cost cast) share a single cleanup point.
 ///
-/// `resulting_mv` is the resulting spell's mana value — printed
-/// `mana_cost.mana_value()` plus the chosen X. Caller synthesizes this because
-/// X is known at announcement time but `obj.cost_x_paid` is not stamped until
-/// after mana payment.
+/// The caller supplies `resulting_mv` using the announced X for {X} symbols
+/// in the mana cost. The object records `cost_x_paid` only after payment.
 fn evaluate_cascade_constraint_with_resulting_mv(
     state: &mut GameState,
     object_id: ObjectId,

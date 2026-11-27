@@ -34034,10 +34034,33 @@ pub(crate) fn unless_payment_prompt(
     // CR 118.12a + CR 608.2c: surface the object the gated effect acts on. A
     // member-driven loop rebinds each iteration's member into the first object
     // slot, so every per-card prompt names its own card.
-    let affected_object = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Object(id) => Some(*id),
-        _ => None,
-    });
+    let affected_object = ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .or_else(|| {
+            // CR 702.21a: Ward's counter refers to the targeting spell or
+            // ability through the trigger event.
+            if matches!(
+                ability.effect,
+                Effect::Counter {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                }
+            ) {
+                counter::countered_targets(state, ability)
+                    .into_iter()
+                    .find_map(|target| match target {
+                        TargetRef::Object(id) => Some(id),
+                        _ => None,
+                    })
+            } else {
+                None
+            }
+        });
     // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
     // sub-cost choice first; the chosen single cost re-enters
     // `WaitingFor::UnlessPayment` via

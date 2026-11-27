@@ -2805,6 +2805,7 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Paga per proteggere {{object}}",
       "blightCounters_one": "Metti un segnalino -1/-1 su una creatura che controlli",
       "blightCounters_other": "Metti {{count}} segnalini -1/-1 su una creatura che controlli",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
