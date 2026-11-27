@@ -9332,7 +9332,7 @@ fn evaluate_replacement_condition(
             super::layers::evaluate_condition(state, condition, controller, source_id)
         }
         ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
-        // CR 702.138c: a source's replacement may apply to another entrant.
+        // CR 702.138b–c: check whether the entering permanent escaped.
         ReplacementCondition::CastViaEscape => entry_was_cast_with_escape(state, event),
         // CR 702.188a: applies only when the source permanent's spell was cast
         // using the named alternative cost. Mirrors

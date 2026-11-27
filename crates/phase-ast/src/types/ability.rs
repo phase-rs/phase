@@ -42073,8 +42073,7 @@ pub enum ReplacementCondition {
     And {
         conditions: Vec<ReplacementCondition>,
     },
-    /// CR 614.1d + CR 616.1: an "unless" condition inverts a recognized
-    /// replacement applicability check.
+    /// Invert a recognized replacement applicability check before ordering (CR 616.1).
     Not {
         condition: Box<ReplacementCondition>,
     },
