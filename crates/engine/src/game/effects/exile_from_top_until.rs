@@ -7,7 +7,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::zones::Zone;
 
 /// CR 701.13a + CR 608.2c: Exile cards from the top of the acting player's
@@ -35,16 +35,15 @@ use crate::types::zones::Zone;
 /// * If the library is exhausted without satisfying the predicate, every card
 ///   in the library is exiled and the loop terminates naturally. For
 ///   `NextMatches`, the "cast that card" link is skipped (no hit to inject) —
-///   but any exile-cleanup link that references `ExiledBySource` (Jodah, the
-///   Unifier's "put the rest on the bottom") STILL runs, so the exiled pile is
-///   never stranded (CR 608.2c + CR 701.13a; Jodah ruling: with no hit, all
-///   exiled cards are put on the bottom in a random order). For
+///   but the cleanup still runs, using either this loop's tracked batch or
+///   the source-linked placement form. With no match, Jodah's ruling puts
+///   every card from the exiled library on the bottom in a random order
+///   (CR 608.2c + CR 701.13a). For
 ///   `CumulativeThreshold`, the sub_ability chain still runs because the
 ///   per-resolution exile links are independently meaningful.
 ///
-/// * CR 400.7 + CR 406.6: Each exiled card is recorded in `state.exile_links`
-///   with `ExileLinkKind::TrackedBySource` so downstream effects can reference
-///   "cards exiled this way" via `TargetFilter::ExiledBySource`.
+/// * CR 400.7j + CR 607.2a: local cleanup captures the new exile
+///   incarnations. Source-linked consumers use `state.exile_links`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -117,12 +116,15 @@ pub fn resolve(
         .unwrap_or_default();
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
+    let cleanup = ability.sub_ability.as_deref().and_then(first_exile_cleanup);
+    let local_cleanup = cleanup.is_some_and(|node| node.effect.is_random_bottom_from_exile());
 
     for (index, &obj_id) in library.iter().enumerate() {
+        let completed_pending_move = resumed_card == Some(obj_id) && index == 0;
         // CR 701.13a: Exile the card through the shared zone-change pipeline so
         // replacement effects, exile links, and zone bookkeeping stay identical
         // to `Effect::ChangeZone`.
-        let move_result = if resumed_card == Some(obj_id) && index == 0 {
+        let move_result = if completed_pending_move {
             super::change_zone::ZoneMoveResult::Done
         } else {
             super::change_zone::execute_zone_move(
@@ -147,13 +149,15 @@ pub fn resolve(
         match move_result {
             super::change_zone::ZoneMoveResult::Done => {}
             super::change_zone::ZoneMoveResult::NeedsChoice(player) => {
-                for pin in super::linked_exile_batch_from_events(
-                    state,
-                    ability.source_id,
-                    &events[events_before..],
-                ) {
-                    if !linked_batch.contains(&pin) {
-                        linked_batch.push(pin);
+                if !local_cleanup {
+                    for pin in super::linked_exile_batch_from_events(
+                        state,
+                        ability.source_id,
+                        &events[events_before..],
+                    ) {
+                        if !linked_batch.contains(&pin) {
+                            linked_batch.push(pin);
+                        }
                     }
                 }
                 state.pending_exile_from_top_until = Some(Box::new(
@@ -190,21 +194,18 @@ pub fn resolve(
             continue;
         };
 
-        // The replacement pipeline emitted this card's ZoneChanged event before
-        // this continuation resumed, so the current event slice cannot recover
-        // it. Preserve the exact current incarnation only when the completed
-        // move also created this resolver's source link.
-        if resumed_card == Some(obj_id)
-            && index == 0
-            // CR 607.2a + CR 113.7a: this resolution's own tracked exile, as the
-            // acting incarnation made it.
-            && crate::game::exile_links::tracked_exile_of_acting_incarnation(
-                state,
-                ability.source_id,
-                obj_id,
-            )
+        // CR 400.7j: local cleanup follows each card that actually reached
+        // exile. CR 607.2a: for linked consumers, recover a resumed move only
+        // if it created the source link, since its event predates this invocation.
+        if local_cleanup
+            || (completed_pending_move
+                && crate::game::exile_links::tracked_exile_of_acting_incarnation(
+                    state,
+                    ability.source_id,
+                    obj_id,
+                ))
         {
-            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(object);
+            let pin = ObjectIncarnationRef::from_object(object);
             if !linked_batch.contains(&pin) {
                 linked_batch.push(pin);
             }
@@ -235,11 +236,15 @@ pub fn resolve(
         source_id: ability.source_id,
         subject: None,
     });
-    for pin in
-        super::linked_exile_batch_from_events(state, ability.source_id, &events[events_before..])
-    {
-        if !linked_batch.contains(&pin) {
-            linked_batch.push(pin);
+    if !local_cleanup {
+        for pin in super::linked_exile_batch_from_events(
+            state,
+            ability.source_id,
+            &events[events_before..],
+        ) {
+            if !linked_batch.contains(&pin) {
+                linked_batch.push(pin);
+            }
         }
     }
 
@@ -249,9 +254,8 @@ pub fn resolve(
     // * NextMatches: inject the hit cards as the sub-ability's targets so
     //   "cast that card" / "you may put it onto the battlefield" address the
     //   right object. If no hit was found, the "cast that card" link is
-    //   skipped, but any downstream exile-cleanup link that references
-    //   `ExiledBySource` (Jodah's "put the rest on the bottom") still runs so
-    //   the exiled pile is not stranded (CR 608.2c + CR 701.13a).
+    //   skipped, but the downstream cleanup still runs
+    //   (CR 608.2c + CR 701.13a).
     //
     // * CumulativeThreshold: there is no single hit card. The sub_ability
     //   chain (if any) reads from `TargetFilter::ExiledBySource` to address
@@ -260,6 +264,14 @@ pub fn resolve(
     if let Some(ref sub) = ability.sub_ability {
         match until {
             UntilCondition::NextMatches { .. } => {
+                // CR 400.7j + CR 608.2c: bind a fresh population even when empty.
+                // The concrete id remains attached to the cleanup across cast choices.
+                let cleanup_set = local_cleanup.then(|| {
+                    super::publish_fresh_tracked_set(
+                        state,
+                        linked_batch.iter().map(|pin| pin.object_id).collect(),
+                    )
+                });
                 if !hits.is_empty() {
                     let mut sub_clone = sub.as_ref().clone();
                     // CR 608.2c + CR 610.3: Sub-ability target injection is conditional
@@ -290,62 +302,49 @@ pub fn resolve(
                     // loop exiled through the exact batch, not through a
                     // source-wide ledger or a trigger's earlier snapshot.
                     sub_clone.context.exile_until_batch = linked_batch.clone();
+                    if let Some(set) = cleanup_set {
+                        bind_random_bottom_cleanup(&mut sub_clone, set, &linked_batch);
+                    }
                     super::bind_resolution_exile_batch_paths(&mut sub_clone, &linked_batch);
                     super::resolve_ability_chain(state, &sub_clone, events, 1)?;
-                } else if let Some(cleanup) = first_exiled_by_source_link(sub.as_ref()) {
-                    // CR 608.2c + CR 701.13a: Library exhausted with no hit
-                    // (Jodah, the Unifier — no legendary nonland with lesser
-                    // mana value). The "cast that card" link has nothing to
-                    // address and is skipped, but the exile-cleanup link that
-                    // references `ExiledBySource` ("put the rest on the bottom
-                    // of your library in a random order") MUST still run — its
-                    // pool is every card this ability exiled. Without this the
-                    // whole exiled pile is stranded in exile and the acting
-                    // player is decked out by the engine (issue #5277).
-                    //
-                    // Jodah ruling: with no hit, all exiled cards return. The
-                    // cleanup's `DistinctFrom { ParentTarget }` leg fails open
-                    // when there are no object targets, so clearing `targets`
-                    // here lets every exiled card be swept to the bottom.
-                    let mut pool = linked_batch.clone();
-                    // CR 607.2a: a bare exiled-cards cleanup also takes the cards
-                    // the ability exiled before its loop (Possibility Storm's
-                    // "exiles it"), as `put_on_top` does after a match.
-                    if matches!(
-                        &cleanup.effect,
-                        Effect::PutAtLibraryPosition { target, .. }
-                            if target.without_exile_anaphor().is_none()
-                    ) {
-                        for id in super::put_on_top::cards_exiled_with_source_now(
-                            state,
-                            ability.source_id,
-                        ) {
-                            let pin = crate::types::identifiers::ObjectIncarnationRef::from_object(
-                                &state.objects[&id],
+                } else if let Some(cleanup) = cleanup {
+                    // CR 608.2c: exhaustion skips the hit-dependent cast but
+                    // still performs cleanup with its original placement order.
+                    let mut cleanup = cleanup.clone();
+                    cleanup.context = ability.context.clone();
+                    if let Some(set) = cleanup_set {
+                        bind_random_bottom_cleanup(&mut cleanup, set, &linked_batch);
+                    } else if let Effect::PutAtLibraryPosition { target, .. } = &cleanup.effect {
+                        // CR 607.2a: the original spell exiled before Possibility
+                        // Storm's loop is still part of its source-linked pool.
+                        if linked_batch.is_empty() && target.without_exile_anaphor().is_none() {
+                            linked_batch.extend(
+                                super::put_on_top::cards_exiled_with_source_now(
+                                    state,
+                                    ability.source_id,
+                                )
+                                .into_iter()
+                                .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id])),
                             );
-                            if !pool.contains(&pin) {
-                                pool.push(pin);
-                            }
                         }
-                    }
-                    // CR 607.2a: no current pool means there is no "rest" to move.
-                    if !pool.is_empty() {
-                        let mut cleanup_clone = cleanup.clone();
-                        cleanup_clone.set_unpinned_targets(
-                            pool.iter()
+                        if linked_batch.is_empty() {
+                            return Ok(());
+                        }
+                        cleanup.set_unpinned_targets(Vec::new());
+                        cleanup.context.exile_until_batch = linked_batch;
+                    } else {
+                        if linked_batch.is_empty() {
+                            return Ok(());
+                        }
+                        cleanup.set_unpinned_targets(
+                            linked_batch
+                                .iter()
                                 .map(|pin| TargetRef::Object(pin.object_id))
                                 .collect(),
                         );
-                        cleanup_clone.target_incarnations = pool;
-                        // CR 607.2a + CR 608.2c: explicit targets are this exact pool.
-                        if let Effect::PutAtLibraryPosition { target, .. } =
-                            &mut cleanup_clone.effect
-                        {
-                            *target = TargetFilter::Any;
-                        }
-                        cleanup_clone.context = ability.context.clone();
-                        super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
+                        cleanup.target_incarnations = linked_batch;
                     }
+                    super::resolve_ability_chain(state, &cleanup, events, 1)?;
                 }
             }
             UntilCondition::CumulativeThreshold { .. } => {
@@ -412,28 +411,45 @@ fn effect_target_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
         .is_some_and(crate::types::ability::TargetFilter::references_exiled_by_source)
 }
 
-/// CR 608.2c + CR 701.13a: Walk a `NextMatches` sub-chain for the FIRST link
-/// whose effect references `ExiledBySource` — the exile-cleanup ("put the rest
-/// on the bottom") that must still run when the library was exhausted with no
-/// hit. The cast link (Jodah's "cast that card" via `ParentTarget`) is skipped
-/// because it references no exiled-set channel; its cleanup lives one link
-/// deeper as its `sub_ability` (mainline chain) or `else_ability` (the declined
-/// path the parser also wires). Descends both edges so either wiring is found.
-fn first_exiled_by_source_link(sub: &ResolvedAbility) -> Option<&ResolvedAbility> {
-    if effect_target_references_exiled_by_source(sub) {
+/// CR 608.2c: find the cleanup even when there is no hit to pass to the cast.
+/// The explicit random placement form is recognized by its operation, and
+/// archived source-linked forms continue to use their existing discriminator.
+fn first_exile_cleanup(sub: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    if matches!(sub.effect, Effect::ExileFromTopUntil { .. }) {
+        return None;
+    }
+    if sub.effect.is_random_bottom_from_exile() || effect_target_references_exiled_by_source(sub) {
         return Some(sub);
     }
-    if let Some(next) = sub.sub_ability.as_deref() {
-        if let Some(found) = first_exiled_by_source_link(next) {
-            return Some(found);
+    sub.sub_ability
+        .as_deref()
+        .and_then(first_exile_cleanup)
+        .or_else(|| sub.else_ability.as_deref().and_then(first_exile_cleanup))
+}
+
+/// CR 400.7j: the population contains only incarnations this loop exiled.
+/// Binding both cast branches retains the same population through a pause.
+fn bind_random_bottom_cleanup(
+    ability: &mut ResolvedAbility,
+    set: TrackedSetId,
+    batch: &[ObjectIncarnationRef],
+) {
+    if matches!(ability.effect, Effect::ExileFromTopUntil { .. }) {
+        return;
+    }
+    if ability.effect.is_random_bottom_from_exile() {
+        if let Effect::ChangeZoneAll {
+            target: TargetFilter::TrackedSet { id },
+            ..
+        } = &mut ability.effect
+        {
+            *id = set;
+            ability.target_incarnations = batch.to_vec();
         }
     }
-    if let Some(alt) = sub.else_ability.as_deref() {
-        if let Some(found) = first_exiled_by_source_link(alt) {
-            return Some(found);
-        }
+    for (_, child) in ability.child_links_mut() {
+        bind_random_bottom_cleanup(child, set, batch);
     }
-    None
 }
 
 /// CR 202.3 / CR 208 / CR 209: Look up the requested measurable property of an
@@ -2570,7 +2586,18 @@ mod tests {
     /// the runtime no-hit branch and all N cards stay in `Zone::Exile`.
     #[test]
     fn jodah_no_hit_returns_all_exiled_cards_to_library() {
-        let mut state = GameState::new_two_player(42);
+        let orders: std::collections::BTreeSet<_> = [4, 19, 42, 93, 101, 109, 211, 495]
+            .into_iter()
+            .map(jodah_no_hit_library_order)
+            .collect();
+        assert!(
+            orders.len() > 1,
+            "Jodah must randomize the exhausted library"
+        );
+    }
+
+    fn jodah_no_hit_library_order(seed: u64) -> Vec<ObjectId> {
+        let mut state = GameState::new_two_player(seed);
         let source = create_object(
             &mut state,
             CardId(100),
@@ -2622,6 +2649,7 @@ mod tests {
             !state.exile.contains(&c1) && !state.exile.contains(&c4),
             "no exiled card may remain stranded in the exile zone"
         );
+        state.players[0].library.iter().copied().collect()
     }
 
     /// (b) Hit + accept: library = [miss, miss, legendary hit, unreached]. The
