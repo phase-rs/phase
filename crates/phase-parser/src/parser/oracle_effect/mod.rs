@@ -42974,6 +42974,14 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
         return parsed_clause(effect);
     }
 
+    if let Some(gap) = tag::<_, _, OracleError<'_>>("create ")
+        .parse(tp.lower)
+        .ok()
+        .and_then(|_| token::try_fence_token_naming(tp))
+    {
+        return parsed_clause(gap);
+    }
+
     // CR 611.2a + CR 608.2g (run boon-blockers-20261010): pre-`YouMay`
     // one-of-batch interceptor — see `try_parse_one_of_batch_cast_preface`.
     // Matches duration-stated `[you may ](play|cast) one of those

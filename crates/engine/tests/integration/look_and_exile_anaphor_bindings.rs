@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{CastingPermission, Duration, TargetRef};
+use engine::types::ability::{CastingPermission, Duration, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt, WaitingFor};
@@ -315,28 +315,35 @@ fn expressive_iteration_three_cards_go_to_hand_bottom_and_exile() {
         })
         .id();
     let deeper = land(&mut board, P0, "Unseen land");
-    let exile = spell(&mut board, P0, "Exile spell", false, 1);
-    let bottom = land(&mut board, P0, "Bottom land");
+    let remaining_spell = spell(&mut board, P0, "Remaining spell", false, 1);
+    let remaining_land = land(&mut board, P0, "Remaining land");
     let hand = land(&mut board, P0, "Hand land");
     let mut runner = board.build();
     runner.cast(iteration).commit();
     pass_until_prompt(&mut runner);
-    assert_dig(&runner, &[hand, bottom, exile]);
+    assert_dig(&runner, &[hand, remaining_land, remaining_spell]);
     select(&mut runner, vec![hand]);
-    if let WaitingFor::EffectZoneChoice {
+    let WaitingFor::EffectZoneChoice {
         player: P0,
         zone: Zone::Library,
+        effect_kind: EffectKind::PutAtLibraryPosition,
         cards,
         ..
     } = &runner.state().waiting_for
-    {
-        same_cards(
-            cards,
-            &[bottom, exile],
-            "the bottom choice excludes the card in hand",
+    else {
+        panic!(
+            "expected a library bottom choice, got {}",
+            runner.state().waiting_for.variant_name()
         );
-        select(&mut runner, vec![bottom]);
-    }
+    };
+    same_cards(
+        cards,
+        &[remaining_land, remaining_spell],
+        "the bottom choice excludes the card in hand",
+    );
+    let exile = cards[0];
+    let bottom = cards[1];
+    select(&mut runner, vec![bottom]);
     assert_priority(&runner, 0);
     assert_eq!(
         runner.state().objects[&hand].zone,

@@ -40,9 +40,29 @@ use super::super::oracle_util::{
 };
 use crate::parser::oracle_ir::ast::*;
 
+/// CR 111.4 + CR 704.5j: a token clause ending "... and name it" (A Girl and
+/// Her Dogs) lets the controller choose each token's name. Nothing implements
+/// that choice, and without it every legendary token would share one name and
+/// the legend rule would put all but one into the graveyard, so the whole
+/// clause stays an honest gap instead of creating a misnamed token.
+pub(super) fn try_fence_token_naming(tp: TextPair<'_>) -> Option<Effect> {
+    nom_primitives::scan_at_word_boundaries(tp.lower.trim(), |input| {
+        value(
+            (),
+            all_consuming(terminated(tag("and name it"), opt(tag(".")))),
+        )
+        .parse(input)
+    })
+    .map(|()| Effect::unimplemented("name_created_token", tp.original))
+}
+
 pub fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
+
+    if let Some(gap) = try_fence_token_naming(TextPair::new(&text, &lower)) {
+        return Some(gap);
+    }
 
     // "create a token that's a copy of {target}"
     if let Ok((_, (mut tapped, mut enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
@@ -572,7 +592,8 @@ fn parse_characteristic_only_token_mode(
 ) -> Option<TokenDescription> {
     let mode = mode.trim();
     let mode = mode.trim_end_matches('.').trim_end();
-    let (supertypes, characteristics) = strip_token_supertypes(mode);
+    let mut supertypes = Vec::new();
+    let characteristics = strip_token_supertypes(mode, &mut supertypes);
     let (after_pt, (power, toughness)) = nom_primitives::parse_pt_value
         .parse(characteristics.trim_start())
         .ok()?;
