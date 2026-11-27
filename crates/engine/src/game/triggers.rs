@@ -64,6 +64,7 @@ use super::filter::{
     matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
+use super::keywords::battlefield_keyword_instance_count;
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
     speed_trigger_available,
@@ -7944,7 +7945,7 @@ fn collect_pending_triggers_with_collection(
             let (
                 controller,
                 timestamp,
-                has_prowess,
+                prowess_instances,
                 has_exploit,
                 has_ravenous,
                 firebending_amount,
@@ -7982,8 +7983,11 @@ fn collect_pending_triggers_with_collection(
                 (
                     obj.controller,
                     obj.entered_battlefield_turn.unwrap_or(0),
-                    matches!(event, GameEvent::SpellCast { .. })
-                        && obj.has_keyword(&Keyword::Prowess),
+                    if matches!(event, GameEvent::SpellCast { .. }) {
+                        battlefield_keyword_instance_count(obj, KeywordKind::Prowess)
+                    } else {
+                        0
+                    },
                     matches!(event, GameEvent::ZoneChanged { .. })
                         && obj.has_keyword(&Keyword::Exploit),
                     obj.has_keyword(&Keyword::Ravenous),
@@ -8029,16 +8033,15 @@ fn collect_pending_triggers_with_collection(
                 pending.push(trigger_context);
             }
 
-            // CR 702.108a: Prowess triggers when controller casts a noncreature spell.
-            // Cards define Prowess as K:Prowess with no explicit trigger_definition,
-            // so we synthetically generate the trigger here.
+            // CR 702.108a + CR 702.108b: Each effective instance of Prowess
+            // supplies a separate trigger when its controller casts a noncreature spell.
             if let GameEvent::SpellCast {
                 controller: caster,
                 object_id: spell_obj_id,
                 ..
             } = event
             {
-                if has_prowess
+                if prowess_instances > 0
                     && synthetic_keyword_spell_cast_trigger_applies(
                         state,
                         obj_id,
@@ -8046,32 +8049,34 @@ fn collect_pending_triggers_with_collection(
                         *spell_obj_id,
                     )
                 {
-                    let prowess_effect = Effect::Pump {
-                        power: crate::types::ability::PtValue::Fixed(1),
-                        toughness: crate::types::ability::PtValue::Fixed(1),
-                        target: TargetFilter::SelfRef,
-                    };
-                    let prowess_ability =
-                        ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
-                    let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Prowess".to_string());
-                    pending.push(PendingTriggerContext::single(PendingTrigger {
-                        source_id: obj_id,
-                        controller,
-                        condition: prowess_trig_def.condition,
-                        ability: Box::new(prowess_ability),
-                        timestamp,
-                        target_constraints: Vec::new(),
-                        distribute: None,
-                        trigger_event: Some(event.clone()),
-                        modal: None,
-                        mode_abilities: vec![],
-                        description: prowess_trig_def.description,
-                        may_trigger_origin: None,
-                        subject_match_count: None,
-                        die_result: None,
-                        provenance: None,
-                    }));
+                    for _ in 0..prowess_instances {
+                        let prowess_effect = Effect::Pump {
+                            power: crate::types::ability::PtValue::Fixed(1),
+                            toughness: crate::types::ability::PtValue::Fixed(1),
+                            target: TargetFilter::SelfRef,
+                        };
+                        let prowess_ability =
+                            ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
+                        let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .description("Prowess".to_string());
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: prowess_trig_def.condition,
+                            ability: Box::new(prowess_ability),
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            distribute: None,
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: prowess_trig_def.description,
+                            may_trigger_origin: None,
+                            subject_match_count: None,
+                            die_result: None,
+                            provenance: None,
+                        }));
+                    }
                 }
             }
 
@@ -41606,6 +41611,7 @@ pub mod tests {
                                 supertypes: vec![],
                                 static_abilities: vec![],
                                 enter_with_counters: vec![],
+                                additional_members: Vec::new(),
                             },
                         )
                         .player_scope(

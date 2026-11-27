@@ -70,6 +70,7 @@ fn dies_create_goblin_trigger() -> TriggerDefinition {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
     );
 

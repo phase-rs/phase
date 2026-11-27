@@ -124,6 +124,7 @@ fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
         Vec::new(),
         source,
@@ -2536,6 +2537,7 @@ fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: 
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],
+        additional_members: Vec::new(),
     }
 }
 
