@@ -9797,6 +9797,13 @@ pub(super) fn push_activated_ability_to_stack(
     if let Some(waiting) =
         super::casting::finish_suspend(state, player, &resolved, activation_cost_snapshot, events)
     {
+        // CR 603.3: keep payment triggers until priority, including when adding
+        // the time counters pauses for a replacement choice.
+        super::announcement_triggers::commit_activation_announcement(
+            state,
+            activation_trigger_collection,
+            events,
+        );
         return Ok(waiting);
     }
 

@@ -1601,3 +1601,76 @@ fn suspend_can_pay_life_under_yasharn_with_krrik() {
     check_suspend_delivery(&r, card, 3);
     assert_counter_event(&finished.events, card, 3);
 }
+
+/// CR 119.4 + CR 603.3: Life lost to a manual Suspend payment triggers Vilis.
+#[test]
+fn manual_suspend_life_payment_triggers_vilis() {
+    use engine::types::game_state::{ShardChoice, StackEntryKind};
+
+    let db = crate::support::shared_card_db().expect("card fixture database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_real_card(P0, "K'rrik, Son of Yawgmoth", Zone::Battlefield, db);
+    let vilis = s.add_real_card(P0, "Vilis, Broker of Blood", Zone::Battlefield, db);
+    let wastes = s.add_real_card(P0, "Wastes", Zone::Battlefield, db);
+    let card = s.add_real_card(P0, "Suspended Sentence", Zone::Hand, db);
+    let plains = s.add_real_card(P0, "Plains", Zone::Library, db);
+    let island = s.add_real_card(P0, "Island", Zone::Library, db);
+    let mut r = s.build();
+    let life = r.state().players[0].life;
+    assert_eq!(payment_pool(&r).total(), 0);
+
+    let opened = r
+        .act(manual_suspend(&r, card))
+        .expect("Manual Suspend opens the mana window");
+    assert!(matches!(
+        opened.waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    assert_eq!(r.state().objects[&card].zone, Zone::Hand);
+
+    let mut events = opened.events;
+    let tapped = r.act(mana_ability(&r, wastes)).expect("tap Wastes for {C}");
+    events.extend(tapped.events);
+    assert!(r.state().objects[&wastes].tapped);
+    assert_eq!(payment_pool(&r).count_color(ManaType::Colorless), 1);
+
+    let choice = r
+        .act(GameAction::PassPriority)
+        .expect("confirm manual mana payment");
+    assert!(matches!(
+        choice.waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, spell_object, ref shards }
+            if spell_object == card && shards.len() == 1
+    ));
+    events.extend(choice.events);
+    assert_eq!(r.state().players[0].life, life);
+    assert!(r.state().stack.is_empty());
+
+    let finished = r
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayLife],
+        })
+        .expect("spend one mana and two life to Suspend");
+    events.extend(finished.events);
+    assert_eq!(r.state().players[0].life, life - 2);
+    assert_eq!(payment_pool(&r).total(), 0);
+    assert_eq!(r.state().objects[&card].zone, Zone::Exile);
+    assert_eq!(r.state().objects[&card].counters[&CounterType::Time], 3);
+    assert_counter_event(&events, card, 3);
+
+    let stack = &r.state().stack;
+    assert_eq!(stack.len(), 1, "Vilis's life-loss trigger is on the stack");
+    assert!(matches!(
+        stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if source_id == vilis
+    ));
+    for drawn in [plains, island] {
+        assert_eq!(r.state().objects[&drawn].zone, Zone::Library);
+    }
+    r.resolve_top();
+    check_suspend_delivery(&r, card, 3);
+    for drawn in [plains, island] {
+        assert_eq!(r.state().objects[&drawn].zone, Zone::Hand);
+    }
+}
