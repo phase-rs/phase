@@ -398,6 +398,76 @@ fn plural_hand_delivery_requires_adjacent_agreement_and_full_put_source() {
     }
 }
 
+#[test]
+fn plural_hand_delivery_declines_duration_on_reveal_or_put() {
+    // SHAPE: Oreskos Explorer is the nearest printed search. No printed
+    // equivalent carries a duration on its reveal or move. Model the typed
+    // output of leading-duration expansion while keeping its verbatim spans.
+    for modified in [None, Some(1), Some(2)] {
+        let ir = parse_effect_chain_ir_body(
+            ORESKOS_SEARCH,
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+            0,
+            None,
+            |chunks, ctx| {
+                let mut chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
+                if let Some(index) = modified {
+                    chunks[index].leading_duration = Some(Duration::UntilEndOfTurn);
+                }
+                chunks
+            },
+        );
+        let [search, reveal, put, _shuffle] = ir.clauses.as_slice() else {
+            panic!(
+                "expected search, reveal, put, and shuffle: {:?}",
+                ir.clauses
+            );
+        };
+        assert!(search.where_x_expression.is_some());
+        assert!(matches!(
+            search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination {
+                destination: Zone::Hand,
+                reveal: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            reveal.disposition.followup(),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        ));
+        for (index, clause, source) in [
+            (1, reveal, "Reveal those cards"),
+            (2, put, "put them into your hand"),
+        ] {
+            assert_eq!(clause.source.fragment(), Some(source));
+            let span = clause.source.span();
+            assert_eq!(&ORESKOS_SEARCH[span.start_byte..span.end_byte], source);
+            assert_eq!(
+                clause.parsed.duration,
+                (modified == Some(index)).then_some(Duration::UntilEndOfTurn)
+            );
+        }
+        assert!(is_plural_hand_delivery(
+            put.source.fragment().unwrap(),
+            &put.parsed.effect
+        ));
+        if modified.is_some() {
+            assert!(
+                matches!(put.disposition, ClauseDisposition::Emit { .. }),
+                "duration on chunk {modified:?} must prevent absorption: {:?}",
+                put.disposition
+            );
+        } else {
+            assert!(matches!(
+                put.disposition.followup(),
+                Some(ContinuationAst::SearchResultClauseHandled)
+            ));
+        }
+    }
+}
+
 /// SHAPE — CR 608.2c: the rejected guard keeps its complete source unit and
 /// its minted identity, while the actual search/reveal and later work survive.
 #[test]

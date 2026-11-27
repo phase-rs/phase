@@ -88,7 +88,7 @@ fn prismatic_undercurrents_delivers_selected_basics_once() {
         scenario
             .add_creature(P0, "Second blue permanent", 1, 1)
             .with_color(vec![ManaColor::Blue]);
-        scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.add_basic_land(P0, ManaColor::Red);
         let response = respond.then(|| {
             let red = scenario
                 .add_creature(P0, "Unique red permanent", 1, 1)
@@ -182,6 +182,7 @@ fn finish_plural_search(
         else {
             panic!("eligible cards must open the search prompt");
         };
+        // CR 608.2h: Determine the search cap as the triggered ability resolves.
         assert_eq!(
             (*player, *library_owner, *count, *up_to),
             (P0, Some(P0), cap, true)
@@ -246,6 +247,7 @@ fn assert_selected_delivery(
             _ => None,
         })
         .collect();
+    // CR 608.2c + CR 701.20a–b + CR 701.23a–b + CR 701.24a: Reveal the selected cards, deliver them to hand, then shuffle, including on an empty find.
     assert_eq!(
         deliveries.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
         selected

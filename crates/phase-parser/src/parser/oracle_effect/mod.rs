@@ -51418,7 +51418,10 @@ fn plural_hand_search_owner(
     local_where_x: &HashSet<ClauseId>,
     ctx: &ParseContext,
 ) -> Option<ClauseId> {
-    let (_, searches) = clauses.split_last()?;
+    let (reveal, searches) = clauses.split_last()?;
+    if reveal.parsed.duration.is_some() {
+        return None;
+    }
     let owners = adjacent_search_result_owners(clauses, ctx, Some(AnaphorNumber::Plural))?;
     let [owner] = owners.as_slice() else {
         return None;
@@ -51570,7 +51573,14 @@ fn parse_effect_chain_ir_with_damage_context(
     damage_context: Option<DamageTargetContext>,
 ) -> EffectChainIr {
     let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
-    let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen, damage_context);
+    let mut ir = parse_effect_chain_ir_body(
+        text,
+        kind,
+        ctx,
+        already_chosen,
+        damage_context,
+        sequence::expand_leading_duration_chunks,
+    );
     // Nested delayed, reflexive, and continuation bodies may inherit an outer
     // chain's tracked exile binding. Keep that context scoped to this call.
     ctx.chain_prior_publishers = enclosing_chain_prior_publishers;
@@ -51605,6 +51615,7 @@ fn parse_effect_chain_ir_body(
     ctx: &mut ParseContext,
     already_chosen_players: u8,
     enclosing_damage_context: Option<DamageTargetContext>,
+    expand_chunks: impl FnOnce(Vec<ClauseChunk>, &ParseContext) -> Vec<ClauseChunk>,
 ) -> EffectChainIr {
     let enclosing_chain_prior_publishers = ctx.chain_prior_publishers;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
@@ -51752,7 +51763,7 @@ fn parse_effect_chain_ir_body(
     //
     // Runs BEFORE `compute_sentence_where_x`, which is chunk-INDEX-keyed and must see the
     // final vector.
-    let chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
+    let chunks = expand_chunks(chunks, ctx);
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
     // one clause in a sentence binds X ("... and you gain X life, where X is <expr>"),
@@ -57556,6 +57567,7 @@ fn parse_effect_chain_ir_body(
                 && clause.distribute.is_none()
                 && clause.sub_ability.is_none()
                 && clause.duration.is_none()
+                && chunk.leading_duration.is_none()
                 && !is_distributed_chunk
                 && plural_hand_search_owner(builder.clauses(), &search_local_where_x, ctx)
                     .is_some();
