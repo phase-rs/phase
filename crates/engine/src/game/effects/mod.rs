@@ -31039,15 +31039,7 @@ fn resolve_chain_body(
     // CR 608.2c + CR 701.23a: a later "if you search your library this way" gate of this chain
     // reads the actions its own earlier instruction performed from the chain's context, not
     // from the ledger a nested top-level chain clears.
-    let performed_actions_owned = ability
-        .has_performed_action_this_way_gate()
-        .then(|| performed_actions_in(&events[events_before..]).collect::<Vec<_>>())
-        .filter(|actions| !actions.is_empty())
-        .map(|actions| {
-            rebound_ability(ability, |owned| {
-                owned.record_performed_actions_this_way_recursive(&actions);
-            })
-        });
+    let performed_actions_owned = with_performed_actions_stamped(ability, &events[events_before..]);
     let ability = performed_actions_owned.as_deref().unwrap_or(ability);
 
     // CR 608.2c: Normalize the actual outcome before the printed tail is
@@ -33296,6 +33288,24 @@ fn performed_actions_in(
             None
         }
     })
+}
+
+/// CR 608.2c + CR 701.23a: the chain re-bound with the performed actions in `new_events`
+/// stamped, or `None` when nothing needs stamping. The event check runs first: the gate walk is
+/// recursive over the whole chain and most nodes perform no player action.
+fn with_performed_actions_stamped(
+    ability: &ResolvedAbility,
+    new_events: &[GameEvent],
+) -> Option<Box<ResolvedAbility>> {
+    let mut actions = performed_actions_in(new_events);
+    let first = actions.next()?;
+    if !ability.has_performed_action_this_way_gate() {
+        return None;
+    }
+    let actions: Vec<_> = std::iter::once(first).chain(actions).collect();
+    Some(rebound_ability(ability, |owned| {
+        owned.record_performed_actions_this_way_recursive(&actions);
+    }))
 }
 
 /// CR 608.2c + CR 109.5: Accumulate the player actions in `new_events` for
@@ -73617,6 +73627,56 @@ mod tests {
 
         let ungated = build_resolved_from_def(&shuffle(), ObjectId(9001), PlayerId(0));
         assert!(!ungated.has_performed_action_this_way_gate());
+    }
+
+    /// Pins the fast-path split of `with_performed_actions_stamped` against later edits (e.g. a `?`
+    /// on the wrong branch); the extraction itself is behavior-preserving, so end-to-end coverage
+    /// remains `library_search_this_way.rs`.
+    #[test]
+    fn with_performed_actions_stamped_requires_both_an_action_and_a_gate() {
+        use crate::types::events::PlayerActionKind;
+        let shuffle = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+            )
+        };
+        let mut gated_def = shuffle();
+        gated_def.condition = Some(AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action: PlayerActionKind::SearchedLibrary,
+            },
+        });
+        let mut root_def = shuffle();
+        root_def.sub_ability = Some(Box::new(gated_def));
+        let gated = build_resolved_from_def(&root_def, ObjectId(9010), PlayerId(0));
+        let ungated = build_resolved_from_def(&shuffle(), ObjectId(9011), PlayerId(0));
+        let searched = GameEvent::PlayerPerformedAction {
+            player_id: PlayerId(0),
+            action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
+            scry_bottom_count: None,
+            scry_top_count: None,
+        };
+
+        // Gate and action: stamped on the gated descendant.
+        let stamped = with_performed_actions_stamped(&gated, std::slice::from_ref(&searched))
+            .expect("a gated chain with a performed action is re-bound");
+        let descendant = stamped
+            .sub_ability
+            .as_deref()
+            .expect("the gated Shuffle is the sub-ability");
+        assert_eq!(
+            descendant.context.performed_actions_this_way.as_slice(),
+            &[(PlayerId(0), PlayerActionKind::SearchedLibrary)]
+        );
+        // Gate, no action event.
+        assert!(with_performed_actions_stamped(&gated, &[]).is_none());
+        // Action, no gate.
+        assert!(with_performed_actions_stamped(&ungated, &[searched]).is_none());
     }
 
     /// CR 608.2c: two different players' searches in one chain body are both kept (union, not overwrite),

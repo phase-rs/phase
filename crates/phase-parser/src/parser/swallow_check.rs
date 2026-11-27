@@ -64,6 +64,7 @@ use crate::types::ability_visit::DefinitionNode;
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
 };
+use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::RetargetScope;
 use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{Keyword, WardCost};
@@ -5234,10 +5235,11 @@ fn detect_condition_if(
     // before scanning. These are built-in rules of their parent effect, not
     // separate conditions:
     //   "If you search your library this way, shuffle." — no CR makes this
-    //   implicit; where the rung lowers it, the guard is represented (a
-    //   `ScopedPlayerMatches` gate on the sentence's own `Shuffle`), so the
-    //   sentence is not a swallowed one. A chain it does not lower still
-    //   reaches this exemption.
+    //   implicit. The sentence is stripped here for every chain; where the rung
+    //   lowers it, its `ScopedPlayerMatches` Shuffle gate represents ONLY that
+    //   stripped sentence and is excluded from the condition-slot probes below
+    //   (`has_condition_slot_besides_search_gate`) so it cannot vouch for a
+    //   sibling guard left in the residual text.
     //   CR 305.9 :  "If you don't, [it/this/this land] enters tapped." — the
     //               mana-payment alternative is encoded as a replacement
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
@@ -5446,7 +5448,7 @@ fn detect_condition_if(
     // A condition slot being POPULATED is the fact here — which of the three condition
     // enums fills it is not something this detector needs to distinguish, so the slot
     // probes below are deliberately type-agnostic.
-    if evidence.has_slot("condition")
+    if has_condition_slot_besides_search_gate(evidence)
         || evidence.has_slot("constraint")
         || evidence.has_slot("target_condition")
         || evidence.has_slot("unless_filter")
@@ -5561,6 +5563,30 @@ fn detect_condition_if(
     ));
 }
 
+/// CR 608.2c + CR 701.23a: the `ScopedPlayerMatches` gate lowered from "if you search your
+/// library this way, shuffle." — the one sentence `strip_cr_implicit_if_phrases` removes. It
+/// represents only that stripped sentence. Search-specific on purpose: other "this way" gates
+/// are not stripped, so they must keep vouching for their own sentence.
+fn is_search_this_way_gate(condition: &AbilityCondition) -> bool {
+    matches!(
+        condition,
+        AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                action: PlayerActionKind::SearchedLibrary,
+                ..
+            },
+        }
+    )
+}
+
+/// Is the `condition` slot populated by anything besides the stripped search-shuffle gate?
+/// The single probe for every detector that treats a populated `condition` slot as proof its
+/// marker (`if`, `unless`, `as long as`) is represented: the search gate stands for a sentence
+/// already removed from the text, so it must not discharge a marker in the residual.
+fn has_condition_slot_besides_search_gate(evidence: &UnitEvidence) -> bool {
+    evidence.has_slot_other_than::<AbilityCondition>("condition", is_search_this_way_gate)
+}
+
 /// Remove sentences containing CR-implicit "if" phrases. These do not
 /// represent semantic conditional gates — they are built-in instructions
 /// of their parent effect that the engine handles automatically.
@@ -5574,9 +5600,8 @@ fn strip_cr_implicit_if_phrases(cleaned: &str) -> String {
         if s.is_empty() {
             continue;
         }
-        // The search-shuffle guard is represented where the rung lowers it (a
-        // `ScopedPlayerMatches` gate on the sentence's own `Shuffle`); a chain
-        // it does not lower is still exempted here.
+        // Stripped for every chain; the gate the rung lowers for it is discounted
+        // by `has_condition_slot_besides_search_gate`.
         // allow-noncombinator: swallow detector phrase scan on classified text
         if s.contains("if you search your library this way") {
             continue;
@@ -5908,7 +5933,7 @@ fn detect_condition_unless(
     if evidence.has_slot("unless_filter")
         || evidence.has_slot("unless_pay")
         || evidence.has_slot("unless_condition")
-        || evidence.has_slot("condition")
+        || has_condition_slot_besides_search_gate(evidence)
     {
         return;
     }
@@ -6034,7 +6059,7 @@ fn detect_condition_as_long_as(
     // `ForAsLongAs` (CR 611.2b, an explicit conditional duration) and `UntilHostLeavesPlay`
     // (CR 611.3a, "as long as you control this creature" — the duration's lifetime IS the
     // controllership condition; Aegis Angel, Hostage Taker).
-    if evidence.has_slot("condition") {
+    if has_condition_slot_besides_search_gate(evidence) {
         return;
     }
     if evidence.any_duration(|d| {
@@ -7592,11 +7617,11 @@ mod tests {
 
     /// CONSTRUCTED, and deliberately so: no corpus card exercises this path, because the
     /// exemption works. The outer text is Land Aid '04 (UNH; it fires `Condition_If` at base)
-    /// with its second sentence in the past tense, "If you searched your library this way,
-    /// shuffle.": the present-tense "If you search your library this way, shuffle." is now
-    /// lowered to a `Shuffle` gate (a represented condition makes the detector treat the
-    /// text's guards as represented), so only the past-tense form, which no rung lowers,
-    /// still reaches the exemption. The COMPOSITION is synthetic.
+    /// with the sentence "If you search your library this way, shuffle." inserted before its
+    /// sang-a-song guard. The rung lowers that sentence to a `ScopedPlayerMatches` Shuffle
+    /// gate; the gate represents only the stripped sentence, and
+    /// `has_condition_slot_besides_search_gate` keeps it from vouching for the surviving
+    /// sang-a-song guard, which must still be reported. The COMPOSITION is synthetic.
     ///
     /// The two corpus facts above are stated as predicates rather than counts, because a
     /// count here would rot silently against every corpus refresh while this comment sat
@@ -7606,8 +7631,49 @@ mod tests {
     /// producing a `Condition_If` `SwallowedClause` — the intersection is what must stay
     /// empty.
     const EXEMPTED_FIRST_IF: &str = "Search your library for a basic land card, put that card \
-onto the battlefield tapped, then shuffle. If you searched your library this way, shuffle. \
+onto the battlefield tapped, then shuffle. If you search your library this way, shuffle. \
 If you sang a song the whole time you were searching and shuffling, you may untap that land.";
+
+    /// The past-tense variant of [`EXEMPTED_FIRST_IF`], which no rung lowers: the exemption
+    /// alone (no gate) must still leave the sang-a-song guard reported.
+    const EXEMPTED_FIRST_IF_PAST_TENSE: &str = "Search your library for a basic land card, put \
+that card onto the battlefield tapped, then shuffle. If you searched your library this way, \
+shuffle. If you sang a song the whole time you were searching and shuffling, you may untap \
+that land.";
+
+    #[test]
+    fn condition_if_swallow_reports_the_guard_that_survives_the_past_tense_exemption() {
+        let parsed = parse_named(EXEMPTED_FIRST_IF_PAST_TENSE, "Land Aid '04", &["Sorcery"]);
+        let warning = only_swallow(&parsed, "Condition_If");
+
+        assert_eq!(
+            warning.gap(),
+            Some(&ClauseGap::Condition {
+                guard: "you sang a song the whole time you were searching and shuffling"
+                    .to_string()
+            }),
+            "full warning: {warning:?}"
+        );
+    }
+
+    /// The one probe behind the `if`, `unless` and `as long as` detectors' condition-slot
+    /// early returns: the stripped search gate alone does not populate the slot, anything
+    /// else does.
+    #[test]
+    fn condition_slot_probe_discounts_only_the_search_this_way_gate() {
+        let search_gate = r#"{"type":"ScopedPlayerMatches","filter":{"type":"PerformedActionThisWay","relation":{"type":"Controller"},"action":"SearchedLibrary"}}"#;
+        let other_this_way_gate = r#"{"type":"ScopedPlayerMatches","filter":{"type":"PerformedActionThisWay","relation":{"type":"Controller"},"action":"Scry"}}"#;
+        let probe = |json: String| {
+            super::has_condition_slot_besides_search_gate(&UnitEvidence::from_json_for_test(&json))
+        };
+
+        assert!(!probe(format!(
+            r#"{{"abilities":[{{"condition":{search_gate}}}]}}"#
+        )));
+        assert!(probe(format!(
+            r#"{{"abilities":[{{"condition":{search_gate}}},{{"condition":{other_this_way_gate}}}]}}"#
+        )));
+    }
 
     /// A text whose FIRST `if` is exempted reports the guard that survives.
     ///
@@ -7648,7 +7714,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // outputs. This reproduces that rather than relying on the extractor to
         // re-lowercase; it must not, and "no defensive re-lowercasing" is the recorded
         // idiom.
-        let lower = EXEMPTED_FIRST_IF.to_ascii_lowercase();
+        //
+        // PAST-TENSE text on purpose: `swallowed_clause_gap` skips guards the condition
+        // ladder accepts, and the ladder lowers the present-tense search guard, so on that
+        // text the pre-strip extraction already names the sang-a-song guard and the
+        // before/after discriminator below would be vacuous. The strip drops both tenses;
+        // only the un-lowered tense still names the search guard pre-strip. The
+        // present-tense F1 regression is the detector-level test
+        // `condition_if_swallow_reports_the_guard_that_survives_the_exemptions`.
+        let lower = EXEMPTED_FIRST_IF_PAST_TENSE.to_ascii_lowercase();
 
         // `super::`-qualified, NOT imported: this module has no `use super::*` — it opens
         // a selective `use super::{ … }` list — and the qualified call is the idiom it
