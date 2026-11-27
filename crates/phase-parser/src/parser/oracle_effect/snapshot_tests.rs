@@ -10,6 +10,393 @@ const SEARCH_CHEST: &str = "{4}, Sacrifice this artifact: Roll a d20.\n1 | Trapp
 const SEARCH_CHARM: &str = "Choose one —\n• Search your library for a creature or land card and reveal it. Put it onto the battlefield tapped if it's a land card. Otherwise, put it into your hand. Then shuffle.\n• Put a +1/+1 counter on target creature you control. It deals damage equal to its power to target creature you don't control.\n• Exile target artifact or enchantment.";
 const REFUSED_NAMED_SEARCH: &str = "Search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.";
 const REPRESENTED_FARMER_SEARCH: &str = "Search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.";
+const ORESKOS_SEARCH: &str = "Search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.";
+const PRISMATIC_SEARCH: &str = "Search your library for up to X basic land cards, where X is the number of colors among permanents you control. Reveal those cards, put them into your hand, then shuffle.";
+
+// Chapter IV of The Hunger Tide Rises reads “Sacrifice any number of creatures.
+// Search your library and/or graveyard for a creature card with mana value
+// less than or equal to the number of creatures sacrificed this way and put
+// it onto the battlefield. If you search your library this way, shuffle.”
+// The cap comes from the sacrifice, and a graveyard-only search must not
+// shuffle. The pinned base retains the cap and emits an unconditional shuffle.
+// This control belongs to the exact-base export comparison. So do the
+// following controls whose printed delivery is only partly represented there:
+//
+// Caravan Vigil says morbid “You may put that card onto the battlefield
+// instead of putting it into your hand if a creature died this turn.” The
+// default reveal/Hand/shuffle resolves, but the morbid override is a gap.
+// Nazahn says “If you reveal a card named Hammer of Nazahn this way, put it
+// onto the battlefield. Otherwise, put that card into your hand.” The base
+// has the search, reveal, and shuffle, with explicit gaps for both moves.
+// Ajani's Aid says “reveal it, and put it into your hand. If you search your
+// library this way, shuffle.” The base has an extra Hand move and a shuffle
+// with no library-search gate. Agency Outfitter, Arachnus Spinner, and Finale
+// of Devastation likewise print “If you search your library this way, shuffle”
+// after a multi-zone search; their base shuffles have no such gate. Arachnus
+// Spinner also prints one delivery attached to the selected creature, while
+// its base chain has a second Battlefield move after the attachment.
+// The base Agency Outfitter still searches the three printed zones for
+// Magnifying Glass and/or Thinking Cap and puts the finds onto the
+// battlefield, but caps the search at one match. The base Ajani's Aid
+// preserves the optional named search of Library and Graveyard. Finale
+// preserves its creature mana-value cap and the separate “If X is 10 or more”
+// bonus and haste instruction.
+// Verdant Crescendo prints a tapped Battlefield move for the first land
+// search, followed by the named Nissa search, reveal, Hand move, and shuffle.
+// The base printed-text parse uses a tapped Battlefield move after both searches.
+//
+// The same export comparison covers these supported controls.
+// - Archdruid's Charm says “Put it onto the battlefield tapped if it's a land
+//   card. Otherwise, put it into your hand. Then shuffle.” The base has a
+//   land check, distinct destinations, and a shuffle in either branch.
+// - Ruin in Their Wake says “You may put that card onto the battlefield tapped
+//   if you control a land named Wastes. Otherwise, put that card into your
+//   hand.” The base has the Wastes check, optional tapped move, Hand
+//   alternative, and a shuffle after either move.
+// - Living Wish says “You may reveal a creature or land card you own from
+//   outside the game and put it into your hand. Exile Living Wish.” The base
+//   outside-game search owns optional Hand delivery. Exile is independent.
+// - Assassin's Trophy and Cleansing Wildfire have “Its controller may search
+//   their library for a basic land card.” Both base searches and shuffles
+//   name that player. Trophy has ordinary Battlefield delivery, and
+//   Wildfire prints a tapped move and a separate “Draw a card.” Both remain
+//   in the Wildfire chain.
+// - Field of Ruin has “Each player searches their library for a basic land
+//   card, puts it onto the battlefield, then shuffles.” The base keeps the
+//   per-player search, Battlefield delivery, and shuffle scope.
+// - Winds of Abandon has “Those players put those cards onto the battlefield
+//   tapped, then shuffle.” The base keeps its scoped search, tapped move,
+//   and shuffle.
+// - Loyal Inventor has “Put that card into your hand if you control an
+//   Assassin. Otherwise, put that card on top of your library.” The base
+//   reveal and shuffle precede the two possible deliveries.
+
+#[test]
+fn locally_bound_plural_search_has_one_hand_delivery() {
+    for (name, oracle, body, ty) in [
+        ("Oreskos Explorer", format!("When this creature enters, {ORESKOS_SEARCH}"), ORESKOS_SEARCH, "Creature"),
+        ("Prismatic Undercurrents", format!("Vivid — When this enchantment enters, {PRISMATIC_SEARCH}\nYou may play an additional land on each of your turns."), PRISMATIC_SEARCH, "Enchantment"),
+    ] {
+        let parsed = parse_card(&oracle, name, &[], &[ty]);
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("{name} must have one ETB trigger");
+        };
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(trigger.origin, None);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        let root = trigger.execute.as_deref().expect("ETB body");
+        let Effect::SearchLibrary {
+            count: QuantityExpr::UpTo { max },
+            reveal: true,
+            target_player: None | Some(TargetFilter::Controller),
+            ..
+        } = root.effect.as_ref() else {
+            panic!("controller search with a public reveal: {:?}", root.effect);
+        };
+        match ty {
+            "Creature" => assert!(matches!(max.as_ref(), QuantityExpr::Ref { qty: QuantityRef::PlayerCount { .. } })),
+            _ => {
+                assert!(matches!(max.as_ref(), QuantityExpr::Ref { qty: QuantityRef::DistinctColorsAmong { .. } }));
+                assert!(parsed.statics.iter().any(|ability| matches!(ability.mode, crate::types::statics::StaticMode::MayPlayAdditionalLand)));
+            }
+        }
+        let delivery = root.sub_ability.as_deref().expect("delivery");
+        assert!(matches!(
+            delivery.effect.as_ref(),
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        let shuffle = delivery.sub_ability.as_deref().expect("shuffle");
+        assert_eq!(*shuffle.effect, Effect::Shuffle { target: TargetFilter::Controller });
+        assert!(shuffle.sub_ability.is_none());
+
+        let ir = parse_effect_chain_ir(body, AbilityKind::Spell, &mut ParseContext::default());
+        let [search, reveal, put, _shuffle] = ir.clauses.as_slice() else {
+            panic!("search, reveal, put, shuffle: {:?}", ir.clauses);
+        };
+        assert!(search.where_x_expression.is_some());
+        assert!(matches!(search.parsed.effect, Effect::SearchLibrary { count: QuantityExpr::UpTo { ref max }, .. }
+            if matches!(max.as_ref(), QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X")));
+        assert!(matches!(search.disposition.intrinsic(), Some(ContinuationAst::SearchDestination { destination: Zone::Hand, reveal: true, .. })));
+        assert_eq!(reveal.source.fragment(), Some("Reveal those cards"));
+        assert_eq!(put.source.fragment(), Some("put them into your hand"));
+        let span = put.source.span();
+        assert_eq!(&body[span.start_byte..span.end_byte], "put them into your hand");
+        assert!(matches!(put.disposition.followup(), Some(ContinuationAst::SearchResultClauseHandled)));
+    }
+}
+
+#[test]
+fn plural_hand_delivery_preserves_fixed_optional_and_alternate_searches() {
+    const X: &str =
+        " up to X Plains cards, where X is the number of players who control more lands than you";
+    const DELIVERY: &str = "Reveal those cards, put them into your hand, then shuffle.";
+    // Nissa's Triumph has a fixed maximum and an alternate owner. Tithe's
+    // optional search is conditional and secondary. Aang's Journey folds the
+    // kicker alternative but has fixed quantities. Isolate each axis here.
+    //
+    // The export comparison checks the full entries for the printed controls.
+    // - Aang's Journey says “If this spell was kicked, instead search ... for a
+    //   basic land card and a Shrine card.” Only the chosen search supplies
+    //   the shared reveal, Hand move, and shuffle. Both base branches carry
+    //   an extra delivery, ahead of the independent two-life instruction.
+    // - Conflux, Gem of Becoming, and Shard Convergence name separate cards
+    //   by color or basic land subtype. “Reveal those cards, put them into
+    //   your hand, then shuffle” covers the chosen occurrences from the
+    //   independent quotas. The base has MatchEachFilter and an extra move.
+    // - Nissa's Encouragement prints “Search your library and graveyard”
+    //   for three exact names. The base retains the named quotas and an extra
+    //   move but drops the graveyard.
+    // - Nissa's Triumph prints “If you control a Nissa planeswalker, instead
+    //   search your library for up to three land cards.” One fixed cap
+    //   governs the find, followed by reveal, delivery, and shuffle. The
+    //   base retains the two caps but lacks the ordinary branch reveal.
+    // - Tithe prints “If target opponent controls more lands than you, you
+    //   may search your library for an additional Plains card.” The second
+    //   find requires the comparison. The base emits both search heads,
+    //   drops the comparison, and emits an extra delivery.
+    for (head, optional, alternate, variable) in [
+        ("Search your library for up to two Plains cards".to_owned(), false, false, false),
+        (format!("You may search your library for{X}"), true, false, true),
+        (format!("Search your library for{X}. If this spell was kicked, instead search your library for{X}"), false, true, true),
+    ] {
+        let text = format!("{head}. {DELIVERY}");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let searches: Vec<_> = ir.clauses.iter().filter(|clause| matches!(clause.parsed.effect, Effect::SearchLibrary { .. })).collect();
+        assert_eq!(searches.len(), if alternate { 2 } else { 1 }, "{text}: {:?}", ir.clauses);
+        let primary = searches[0];
+        assert_eq!(primary.is_optional || primary.parsed.optional, optional);
+        assert!(matches!(primary.parsed.effect, Effect::SearchLibrary { count: QuantityExpr::UpTo { ref max }, .. }
+            if if variable { matches!(max.as_ref(), QuantityExpr::Ref { qty: QuantityRef::Variable { .. } }) }
+            else { matches!(max.as_ref(), QuantityExpr::Fixed { value: 2 }) }));
+        let put = ir.clauses.iter().find(|clause| clause.source.fragment() == Some("put them into your hand")).expect("typed Hand candidate at its source clause");
+        let span = put.source.span();
+        assert_eq!(&text[span.start_byte..span.end_byte], "put them into your hand");
+        assert!(matches!(put.parsed.effect, Effect::ChangeZone { destination: Zone::Hand, .. }));
+        if alternate {
+            assert!(matches!(searches[1].disposition, ClauseDisposition::FoldSearchIntoElse { .. }));
+            let put_position = ir.clauses.iter().position(|clause| clause.id == put.id).unwrap();
+            assert_eq!(
+                adjacent_search_result_owners(&ir.clauses[..put_position], &ParseContext::default(), Some(AnaphorNumber::Plural)),
+                Some(vec![searches[1].id, primary.id])
+            );
+        }
+        assert!(matches!(put.disposition, ClauseDisposition::Emit { .. }));
+    }
+}
+
+#[test]
+fn hand_restatement_keeps_the_singular_legacy_contract() {
+    let prior = [
+        serde_json::from_value(serde_json::json!({
+            "type": "ChangeZone", "origin": "Library", "destination": "Hand"
+        }))
+        .unwrap(),
+        Effect::SearchOutsideGame {
+            filter: TargetFilter::Any,
+            count: QuantityExpr::Fixed { value: 1 },
+            reveal: true,
+            destination: Zone::Hand,
+            source_pool: Default::default(),
+        },
+    ];
+    for effect in prior {
+        let mut ctx = ParseContext::default();
+        for input in [" put it into your hand ", "put that card into your hand"] {
+            assert!(matches!(
+                parse_followup_continuation_ast(input, &effect, &mut ctx),
+                Some(ContinuationAst::SearchResultClauseHandled)
+            ));
+        }
+        for input in [
+            "you put it into your hand",
+            "put it into your hand.",
+            "put them into your hand",
+        ] {
+            assert!(
+                parse_followup_continuation_ast(input, &effect, &mut ctx).is_none(),
+                "{input}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scoped_or_guarded_reveal_does_not_own_the_plural_hand_clause() {
+    const X: &str = "for up to X Plains cards, where X is the number of players who control more lands than you";
+    // Collective Voyage uses a scoped search with Battlefield delivery and a
+    // join-forces-derived X. Keep the scalar X and Hand grammar here to test
+    // the scope refusal. The second case adds a gate only to the reveal.
+    for (head, reveal, scoped) in [
+        (
+            "Each player searches their library",
+            "Reveal those cards",
+            true,
+        ),
+        ("Search your library", "You may reveal those cards", false),
+    ] {
+        let text = format!("{head} {X}. {reveal}, put them into your hand, then shuffle.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        let [search, reveal, put, _shuffle] = ir.clauses.as_slice() else {
+            panic!(
+                "expected the search, reveal, put, and shuffle clauses: {:?}",
+                ir.clauses
+            );
+        };
+        assert!(matches!(search.parsed.effect, Effect::SearchLibrary { .. }));
+        assert!(search.where_x_expression.is_some());
+        assert!(matches!(
+            search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination {
+                destination: Zone::Hand,
+                ..
+            })
+        ));
+        let source = put.source.fragment().expect("written put clause");
+        assert_eq!(source, "put them into your hand");
+        assert!(is_plural_hand_delivery(source, &put.parsed.effect));
+        assert!(
+            matches!(put.disposition, ClauseDisposition::Emit { .. }),
+            "{text}: put disposition was {:?}",
+            put.disposition
+        );
+        if scoped {
+            assert!(search.player_scope.is_some());
+            assert!(matches!(
+                reveal.disposition.followup(),
+                Some(ContinuationAst::SearchResultClauseHandled)
+            ));
+        } else {
+            assert!(reveal.is_optional || reveal.parsed.optional);
+            assert!(matches!(reveal.disposition, ClauseDisposition::Emit { .. }));
+        }
+    }
+}
+
+#[test]
+fn inherited_x_does_not_own_the_plural_hand_clause() {
+    // Nylea's Intervention gets X from its casting cost. This synthetic
+    // variant specifically exercises propagation from a sibling instruction
+    // while keeping search, reveal, and put adjacent.
+    let text = "Search your library for up to X Plains cards, then reveal those cards, put them into your hand, then gain X life, where X is the number of players who control more lands than you.";
+    let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+    let [search, reveal, put, _life] = ir.clauses.as_slice() else {
+        panic!(
+            "expected separate instructions in one sentence: {:?}",
+            ir.clauses
+        );
+    };
+    let Effect::SearchLibrary {
+        count: QuantityExpr::UpTo { max },
+        ..
+    } = &search.parsed.effect
+    else {
+        panic!("scalar search: {:?}", search.parsed.effect);
+    };
+    assert!(matches!(
+        max.as_ref(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { .. }
+        }
+    ));
+    assert_eq!(
+        search.source.fragment(),
+        Some("Search your library for up to X Plains cards")
+    );
+    assert!(matches!(
+        lower::apply_where_x_quantity_expression(max.as_ref().clone(), search.where_x_binding()),
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount { .. }
+        })
+    ));
+    assert!(matches!(
+        reveal.disposition.followup(),
+        Some(ContinuationAst::SearchResultClauseHandled)
+    ));
+    assert!(is_plural_hand_delivery(
+        put.source.fragment().unwrap(),
+        &put.parsed.effect
+    ));
+    assert!(matches!(put.disposition, ClauseDisposition::Emit { .. }));
+}
+
+#[test]
+fn plural_hand_delivery_requires_adjacent_agreement_and_full_put_source() {
+    const SEARCH: &str = "Search your library for up to X Plains cards, where X is the number of players who control more lands than you.";
+    // Exercise the demonstrative's tracked-set parse as well as the printed
+    // bare pronoun. Their absorbed delivery uses the same continuation.
+    let demonstrative =
+        format!("{SEARCH} Reveal them, put those cards into your hand, then shuffle.");
+    let ir = parse_effect_chain_ir(
+        &demonstrative,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    let [_, _, put, _] = ir.clauses.as_slice() else {
+        panic!("expected four written clauses: {:?}", ir.clauses);
+    };
+    assert_eq!(
+        put.source.fragment(),
+        Some("put those cards into your hand")
+    );
+    assert!(
+        is_plural_hand_delivery(put.source.fragment().unwrap(), &put.parsed.effect),
+        "typed demonstrative delivery: {:?}",
+        put.parsed.effect
+    );
+    assert!(matches!(
+        put.disposition.followup(),
+        Some(ContinuationAst::SearchResultClauseHandled)
+    ));
+    for (tail, complete_put) in [
+        ("Reveal it, put them into your hand, then shuffle.", true),
+        (
+            "Reveal those cards. Draw a card. Put them into your hand, then shuffle.",
+            true,
+        ),
+        (
+            "Reveal those cards, put them into your hand tapped, then shuffle.",
+            false,
+        ),
+        (
+            "Reveal those cards. You may put them into your hand. Then shuffle.",
+            false,
+        ),
+    ] {
+        let text = format!("{SEARCH} {tail}");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(matches!(
+            ir.clauses[0].parsed.effect,
+            Effect::SearchLibrary { .. }
+        ));
+        assert!(matches!(
+            ir.clauses[1].disposition.followup(),
+            Some(ContinuationAst::SearchResultClauseHandled)
+        ));
+        let put = &ir.clauses[ir.clauses.len() - 2];
+        assert!(matches!(
+            put.parsed.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        let fragment = put.source.fragment().expect("written Hand instruction");
+        let span = put.source.span();
+        assert_eq!(&text[span.start_byte..span.end_byte], fragment);
+        assert_eq!(
+            is_plural_hand_delivery(fragment, &put.parsed.effect),
+            complete_put
+        );
+        assert!(matches!(put.disposition, ClauseDisposition::Emit { .. }));
+    }
+}
 
 /// SHAPE — CR 608.2c: the rejected guard keeps its complete source unit and
 /// its minted identity, while the actual search/reveal and later work survive.
@@ -819,7 +1206,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
         .push();
     let owner = builder.clauses()[0].id;
     assert_eq!(
-        adjacent_search_result_owners(builder.clauses(), &ctx),
+        adjacent_search_result_owners(builder.clauses(), &ctx, None),
         Some(vec![owner])
     );
     builder
@@ -835,7 +1222,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
         )
         .push();
     assert_eq!(
-        adjacent_search_result_owners(builder.clauses(), &ctx),
+        adjacent_search_result_owners(builder.clauses(), &ctx, None),
         Some(vec![owner])
     );
     for mutate in [
@@ -862,7 +1249,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
     ] {
         let mut clauses = builder.clauses().to_vec();
         mutate(clauses.last_mut().unwrap());
-        assert!(adjacent_search_result_owners(&clauses, &ctx).is_none());
+        assert!(adjacent_search_result_owners(&clauses, &ctx, None).is_none());
     }
     builder
         .clause(
@@ -875,7 +1262,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
             emit(),
         )
         .push();
-    assert!(adjacent_search_result_owners(builder.clauses(), &ctx).is_none());
+    assert!(adjacent_search_result_owners(builder.clauses(), &ctx, None).is_none());
     let guard = "If you reveal a card named Hammer of Nazahn this way, put target artifact onto the battlefield";
     assert!(unsupported_search_result_guard(guard, &builder.clauses()[..1], &ctx).is_none());
     assert!(
@@ -890,7 +1277,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
 
     let mut guarded_producer = builder.clauses()[..1].to_vec();
     guarded_producer[0].condition = Some(AbilityCondition::effect_performed());
-    assert!(adjacent_search_result_owners(&guarded_producer, &ctx).is_none());
+    assert!(adjacent_search_result_owners(&guarded_producer, &ctx, None).is_none());
     let mut competing = ClauseIrBuilder::new("Search. Choose a card.");
     competing
         .clause("Search", search(), Some(ClauseBoundary::Sentence), emit())
@@ -907,7 +1294,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
         )
         .push();
     assert!(
-        adjacent_search_result_owners(competing.clauses(), &ctx).is_none(),
+        adjacent_search_result_owners(competing.clauses(), &ctx, None).is_none(),
         "a different producer cannot borrow the earlier search"
     );
 
@@ -947,7 +1334,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
         .map(|clause| clause.id)
         .collect::<Vec<_>>();
     assert_eq!(
-        adjacent_search_result_owners(folded.clauses(), &ctx),
+        adjacent_search_result_owners(folded.clauses(), &ctx, None),
         Some(ids)
     );
     if let ClauseDisposition::Emit {
@@ -958,7 +1345,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
         *destination = Zone::Battlefield;
     }
     assert!(
-        adjacent_search_result_owners(folded.clauses(), &ctx).is_none(),
+        adjacent_search_result_owners(folded.clauses(), &ctx, None).is_none(),
         "a competing destination cannot masquerade as the explicit Hand base"
     );
 }
@@ -1238,14 +1625,43 @@ fn unrevealed_search_type_gate_reads_selected_target() {
         search.effect.as_ref(),
         Effect::SearchLibrary { reveal: true, .. }
     ));
+    let destination = search.sub_ability.as_deref().expect("land gate");
     assert_eq!(
-        search.sub_ability.as_deref().expect("land gate").condition,
+        destination.condition,
         Some(AbilityCondition::RevealedHasCardType {
             card_types: vec![CoreType::Land],
             additional_filter: None,
             subtype_filter: None
         })
     );
+    assert!(matches!(
+        destination.effect.as_ref(),
+        Effect::ChangeZone { destination: Zone::Battlefield, enter_tapped, .. }
+            if enter_tapped.is_tapped()
+    ));
+    assert!(matches!(
+        destination
+            .else_ability
+            .as_deref()
+            .expect("nonland to hand")
+            .effect
+            .as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            ..
+        }
+    ));
+    assert!(matches!(
+        destination
+            .sub_ability
+            .as_deref()
+            .expect("shuffle after either branch")
+            .effect
+            .as_ref(),
+        Effect::Shuffle {
+            target: TargetFilter::Controller
+        }
+    ));
 }
 
 /// SHAPE: delivered topology must not claim the charter-deferred named/art

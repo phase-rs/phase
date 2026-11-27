@@ -45526,17 +45526,8 @@ fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
     // nested `alt()` over the pronoun axis (CLAUDE.md "compose nom
     // combinators, don't enumerate permutations") within a shared "put …
     // into your hand" frame.
-    let hand_recall = (
-        tag::<_, _, OracleError<'_>>("put "),
-        alt((
-            tag::<_, _, OracleError<'_>>("that card"),
-            tag("them"),
-            tag("it"),
-        )),
-        tag(" into your hand"),
-    )
-        .parse(lower)
-        .is_ok();
+    let hand_recall = sequence::parse_put_into_your_hand_prefix(lower)
+        .is_ok_and(|(_, (_, referent))| referent != "those cards ");
 
     // Issue #377: Anikthea, Hand of Erebos — "create a token that's a copy of
     // it" uses the bare pronoun "it" instead of "that card". Both anaphors
@@ -51312,6 +51303,7 @@ fn search_hand_fold_owners(non_absorbed: &[&ClauseIr]) -> Option<Vec<ClauseId>> 
 fn adjacent_search_result_owners(
     clauses: &[ClauseIr],
     ctx: &ParseContext,
+    required_reveal: Option<AnaphorNumber>,
 ) -> Option<Vec<ClauseId>> {
     let (last, prefix) = clauses.split_last()?;
     let clauses = if matches!(
@@ -51336,19 +51328,27 @@ fn adjacent_search_result_owners(
         {
             return None;
         }
-        let previous = prefix.last()?;
-        let mut trial = ctx.clone_throwaway();
-        if !matches!(
-            parse_followup_continuation_ast(
-                last.source.fragment()?,
-                &previous.parsed.effect,
-                &mut trial
-            ),
-            Some(ContinuationAst::SearchRevealResult)
-        ) {
+        let fragment = last.source.fragment()?;
+        let is_reveal = match required_reveal {
+            Some(number) => {
+                sequence::search_result_reveal_number(&fragment.to_ascii_lowercase())
+                    == Some(number)
+            }
+            None => {
+                let previous = prefix.last()?;
+                let mut trial = ctx.clone_throwaway();
+                matches!(
+                    parse_followup_continuation_ast(fragment, &previous.parsed.effect, &mut trial),
+                    Some(ContinuationAst::SearchRevealResult)
+                )
+            }
+        };
+        if !is_reveal {
             return None;
         }
         prefix
+    } else if required_reveal.is_some() {
+        return None;
     } else {
         clauses
     };
@@ -51384,6 +51384,92 @@ fn adjacent_search_result_owners(
     search_hand_fold_owners(&clauses.iter().rev().collect::<Vec<_>>())
 }
 
+fn is_plural_hand_delivery(source: &str, effect: &Effect) -> bool {
+    // The demonstrative can inherit Library from the reveal, or carry the
+    // generic tracked-set move's Exile default. The full source check below
+    // rules out a printed origin, and the adjacent search proves the library.
+    if !matches!(
+        effect,
+        Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            origin: None,
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget | TargetFilter::TrackedSet { .. },
+            ..
+        } | Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            origin: None | Some(Zone::Library | Zone::Exile),
+            destination: Zone::Hand,
+            target: TargetFilter::TrackedSet { .. },
+            ..
+        }
+    ) {
+        return false;
+    }
+    let lower = source.trim_end_matches('.').trim_end().to_ascii_lowercase();
+    let parsed = all_consuming(sequence::parse_put_into_your_hand_prefix).parse(lower.as_str());
+    parsed.is_ok_and(|(_, (number, _))| number == AnaphorNumber::Plural)
+}
+
+// CR 608.2c + CR 701.23a: only the locally defined scalar search and its
+// adjacent plural reveal can own this Hand delivery.
+fn plural_hand_search_owner(
+    clauses: &[ClauseIr],
+    local_where_x: &HashSet<ClauseId>,
+    ctx: &ParseContext,
+) -> Option<ClauseId> {
+    let (_, searches) = clauses.split_last()?;
+    let owners = adjacent_search_result_owners(clauses, ctx, Some(AnaphorNumber::Plural))?;
+    let [owner] = owners.as_slice() else {
+        return None;
+    };
+    let search = searches.iter().rev().find(|clause| clause.id == *owner)?;
+    if search.is_optional
+        || search.parsed.optional
+        || search.parsed.distribute.is_some()
+        || search.unless_pay.is_some()
+        || search.parsed.unless_pay.is_some()
+        || search.parsed.duration.is_some()
+    {
+        return None;
+    }
+    if !matches!(
+        search.disposition,
+        ClauseDisposition::Emit {
+            intrinsic: Some(ContinuationAst::SearchDestination {
+                destination: Zone::Hand,
+                enter_tapped: false,
+                enters_under: EntersUnderSpec::Default,
+                reveal: true,
+                attach_host: None,
+            }),
+            followup: None,
+        }
+    ) {
+        return None;
+    }
+    let Effect::SearchLibrary {
+        source_zones,
+        count: QuantityExpr::UpTo { max },
+        target_player: None | Some(TargetFilter::Controller),
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+        split: None,
+        ..
+    } = &search.parsed.effect
+    else {
+        return None;
+    };
+    if source_zones.as_slice() != [Zone::Library]
+        || !local_where_x.contains(owner)
+        || !matches!(max.as_ref(), QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name.eq_ignore_ascii_case("X"))
+    {
+        return None;
+    }
+    let bound =
+        lower::apply_where_x_quantity_expression(max.as_ref().clone(), search.where_x_binding())?;
+    (bound != **max).then_some(*owner)
+}
+
 // The unsupported State policy is unchanged outside this proven search-result
 // destination. Diagnose from the original AST before shell stripping loses it.
 fn unsupported_search_result_guard(
@@ -51391,7 +51477,7 @@ fn unsupported_search_result_guard(
     clauses: &[ClauseIr],
     ctx: &ParseContext,
 ) -> Option<(String, ParsedEffectClause)> {
-    adjacent_search_result_owners(clauses, ctx)?;
+    adjacent_search_result_owners(clauses, ctx, None)?;
     let mut trial = ctx.clone_throwaway();
     let ClauseAst::Conditional {
         guard: ConditionalGuard::Unlowered(GuardReading::State),
@@ -51677,6 +51763,7 @@ fn parse_effect_chain_ir_body(
     // the leading duration a later coordinated chunk of the sentence cannot see.
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
     let mut builder = ClauseIrBuilder::new(full_text);
+    let mut search_local_where_x = HashSet::new();
     // CR 608.2c: the gate a chain root took on its own target's controller,
     // checked against the assembled chain by `keep_own_target_gate_readable`.
     let mut own_target_gate: Option<AbilityCondition> = None;
@@ -55405,6 +55492,7 @@ fn parse_effect_chain_ir_body(
         // in the same sentence binds X, propagate the sibling binding so "target
         // player loses X life" and "you gain X life" in the same sentence share
         // the same X expression (Essence Harvest, Debt to the Deathless, etc.).
+        let has_local_where_x = local_where_x_expression.is_some();
         let where_x_expression = local_where_x_expression.or_else(|| {
             sentence_where_x
                 .get(chunk_idx)
@@ -57451,7 +57539,27 @@ fn parse_effect_chain_ir_body(
                         .any(|c| effect_installs_continuous_effect(&effective_effect_of(c)))
                         .then_some(ContinuationAst::EndEffectCost { cost })
                 });
-            if search_reveal_owners.is_some() {
+            let plural_hand_delivery = is_plural_hand_delivery(normalized_text, &clause.effect)
+                && condition.is_none()
+                && clause.condition.is_none()
+                && clause.unlowered_guard.is_none()
+                && !is_optional
+                && !clause.optional
+                && unless_pay.is_none()
+                && clause.unless_pay.is_none()
+                && delayed_condition.is_none()
+                && player_scope.is_none()
+                && opponent_may_scope.is_none()
+                && repeat_for.is_none()
+                && multi_target.is_none()
+                && clause.multi_target.is_none()
+                && clause.distribute.is_none()
+                && clause.sub_ability.is_none()
+                && clause.duration.is_none()
+                && !is_distributed_chunk
+                && plural_hand_search_owner(builder.clauses(), &search_local_where_x, ctx)
+                    .is_some();
+            if search_reveal_owners.is_some() || plural_hand_delivery {
                 followup_continuation = Some(ContinuationAst::SearchResultClauseHandled);
             }
             // CR 701.20a + CR 608.2c: the clause names a reveal remainder, but
@@ -57988,6 +58096,10 @@ fn parse_effect_chain_ir_body(
             // that instruction.
             if let Some(pushed) = builder.last_mut() {
                 pushed.instruction_join = chunk_instruction_join;
+                if has_local_where_x && matches!(pushed.parsed.effect, Effect::SearchLibrary { .. })
+                {
+                    search_local_where_x.insert(pushed.id);
+                }
             }
 
             // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the

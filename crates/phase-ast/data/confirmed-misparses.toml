@@ -1640,7 +1640,6 @@ face = [
   { key = "ordeal of thassa", class = "wrong_object", clauses = ["Then if it has three or more +1/+1 counters on it, sacrifice this Aura."] },
   { key = "order of the alabaster host", class = "wrong_object", clauses = ["Whenever this creature becomes blocked by a creature, the blocking creature gets -1/-1 until end of turn."] },
   { key = "ordinary pony", class = "dropped_qualifier", clauses = ["When this creature enters, you may exile target non-Horse creature you control that wasn't put onto the battlefield with this ability this turn, then return it to the battlefield under its owner's control."] },
-  { key = "oreskos explorer", class = "extra_effect", clauses = ["Reveal those cards, put them into your hand, then shuffle."] },
   { key = "origin of black widow", class = "wrong_player", clauses = ["I — Each opponent sacrifices a creature of their choice."] },
   { key = "origin of the hidden ones", class = "wrong_duration", clauses = ["III — Whenever an Assassin you control attacks this turn, create a 1/1 black Assassin creature token with menace that's tapped and attacking."] },
   { key = "origin of thor", class = "target_wrong", clauses = ["II — Whenever you cast a spell this turn, put a +1/+1 counter on target creature you control.", "III — Target creature you control deals damage equal to its power to each opponent."] },

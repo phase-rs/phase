@@ -3,10 +3,10 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, one_of};
 use nom::combinator::{
-    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, consumed, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
-use nom::sequence::{pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
@@ -178,19 +178,27 @@ fn strip_search_result_subject(lower: &str) -> &str {
 }
 
 fn is_search_result_reveal_clause(lower: &str) -> bool {
-    all_consuming((
+    search_result_reveal_number(lower).is_some()
+}
+
+pub(super) fn search_result_reveal_number(lower: &str) -> Option<AnaphorNumber> {
+    all_consuming(delimited(
         tag::<_, _, OracleError<'_>>("reveal "),
         alt((
-            tag("that card"),
-            tag("those cards"),
-            tag("the card"),
-            tag("them"),
-            tag("it"),
+            value(
+                AnaphorNumber::Singular,
+                alt((tag("that card"), tag("the card"), tag("it"))),
+            ),
+            value(
+                AnaphorNumber::Plural,
+                alt((tag("those cards"), tag("them"))),
+            ),
         )),
         opt(tag(".")),
     ))
     .parse(lower.trim())
-    .is_ok()
+    .ok()
+    .map(|(_, number)| number)
 }
 
 /// CR 701.23a + CR 406.3: compose the optional continuation connector, the
@@ -224,14 +232,27 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
-fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, AnaphorNumber> {
     alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
+        value(
+            AnaphorNumber::Singular,
+            alt((tag("that card "), tag("it "))),
+        ),
+        value(
+            AnaphorNumber::Plural,
+            alt((tag("them "), tag("those cards "))),
+        ),
     ))
     .parse(input)
+}
+
+pub(super) fn parse_put_into_your_hand_prefix(
+    input: &str,
+) -> OracleResult<'_, (AnaphorNumber, &str)> {
+    let (input, _) = tag("put ").parse(input)?;
+    let (input, (referent, number)) = consumed(parse_search_result_referent).parse(input)?;
+    let (input, _) = tag("into your hand").parse(input)?;
+    Ok((input, (number, referent)))
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
