@@ -9,11 +9,271 @@ use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const INVENTOR: &str = "Vigilance\nWhen this creature enters, you may search your library for an artifact card, reveal it, then shuffle. Put that card into your hand if you control an Assassin. Otherwise, put that card on top of your library.";
 const VERDANT: &str = "Search your library for a basic land card and put it onto the battlefield tapped. Search your library and graveyard for a card named Nissa, Nature's Artisan, reveal it, put it into your hand, then shuffle.";
 const BRIBERY: &str = "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.";
+const ORESKOS: &str = "When this creature enters, search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.";
+const PRISMATIC: &str = "Vivid — When this enchantment enters, search your library for up to X basic land cards, where X is the number of colors among permanents you control. Reveal those cards, put them into your hand, then shuffle.\nYou may play an additional land on each of your turns.";
+
+#[test]
+fn oreskos_explorer_delivers_selected_plains_once() {
+    for (response, cap, pick) in [(true, 2, 2), (false, 1, 0), (false, 0, 0)] {
+        let mut scenario = GameScenario::new_n_player(4, 217);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_to_hand_from_oracle(P0, "Oreskos Explorer", 2, 2, ORESKOS)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let opposing_land = (cap != 0).then(|| scenario.add_basic_land(P1, ManaColor::Blue));
+        let response = response.then(|| {
+            for (player, lands) in [(PlayerId(2), 2), (PlayerId(3), 3)] {
+                for _ in 0..lands {
+                    scenario.add_basic_land(player, ManaColor::Blue);
+                }
+            }
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Boomerang",
+                    true,
+                    "Return target permanent to its owner's hand.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            (
+                spell,
+                opposing_land.expect("Boomerang has an opposing land"),
+            )
+        });
+        let nonbasic = scenario
+            .add_land_to_library_top(P0, "Nonbasic Plains")
+            .with_subtypes(vec!["Plains", "Island"])
+            .id();
+        let cover = scenario
+            .add_land_to_library_top(P0, "Island cover")
+            .with_subtypes(vec!["Island"])
+            .id();
+        let plains = [
+            scenario.add_basic_land(P0, ManaColor::White),
+            scenario.add_basic_land(P0, ManaColor::White),
+        ];
+        let mut runner = scenario.build();
+        move_test_basics_to_library(&mut runner, &plains);
+        let candidates = [nonbasic, plains[0], plains[1]];
+        let events = finish_plural_search(&mut runner, source, response, cap, &candidates, pick);
+        assert_selected_delivery(&runner, source, &events, &candidates[..pick]);
+        for card in &candidates[pick..] {
+            assert_eq!(runner.state().objects[card].zone, Zone::Library);
+        }
+        assert_eq!(runner.state().objects[&cover].zone, Zone::Library);
+    }
+}
+
+#[test]
+fn prismatic_undercurrents_delivers_selected_basics_once() {
+    for (respond, have_basics, pick) in [(true, true, 2), (false, true, 0), (false, false, 0)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_enchantment_to_hand_from_oracle(P0, "Prismatic Undercurrents", PRISMATIC)
+            .with_mana_cost(ManaCost::zero())
+            .with_color(vec![ManaColor::Green])
+            .id();
+        scenario
+            .add_creature(P0, "White and blue permanent", 1, 1)
+            .with_color(vec![ManaColor::White, ManaColor::Blue]);
+        scenario
+            .add_creature(P0, "Second blue permanent", 1, 1)
+            .with_color(vec![ManaColor::Blue]);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let response = respond.then(|| {
+            let red = scenario
+                .add_creature(P0, "Unique red permanent", 1, 1)
+                .with_color(vec![ManaColor::Red])
+                .id();
+            let unsummon = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Unsummon",
+                    true,
+                    "Return target creature to its owner's hand.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            (unsummon, red)
+        });
+        let nonbasic = scenario
+            .add_land_to_library_top(P0, "Nonbasic Plains")
+            .with_subtypes(vec!["Plains", "Island"])
+            .id();
+        let basics = if have_basics {
+            [
+                ManaColor::White,
+                ManaColor::Blue,
+                ManaColor::Red,
+                ManaColor::Green,
+            ]
+            .map(|color| scenario.add_basic_land(P0, color))
+            .to_vec()
+        } else {
+            Vec::new()
+        };
+        let mut runner = scenario.build();
+        move_test_basics_to_library(&mut runner, &basics);
+        let events = finish_plural_search(&mut runner, source, response, 3, &basics, pick);
+        assert_selected_delivery(&runner, source, &events, &basics[..pick]);
+        for card in &basics[pick..] {
+            assert_eq!(runner.state().objects[card].zone, Zone::Library);
+        }
+        assert_eq!(runner.state().objects[&nonbasic].zone, Zone::Library);
+    }
+}
+
+fn move_test_basics_to_library(runner: &mut GameRunner, cards: &[ObjectId]) {
+    for card in cards {
+        assert!(!move_object_for_test(
+            runner.state_mut(),
+            ZoneMoveRequest::pregame(*card, Zone::Library),
+            &mut Vec::new(),
+        ));
+    }
+}
+
+fn finish_plural_search(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    response: Option<(ObjectId, ObjectId)>,
+    cap: usize,
+    candidates: &[ObjectId],
+    pick: usize,
+) -> Vec<GameEvent> {
+    runner.cast(source).commit();
+    let player_count = runner.state().players.len();
+    for _ in 0..player_count {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(runner.state().stack.len(), 1, "the ETB is on the stack");
+    if let Some((spell, target)) = response {
+        runner.cast(spell).target_object(target).commit();
+        assert_eq!(runner.state().stack.len(), 2);
+        for _ in 0..player_count {
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().objects[&target].zone, Zone::Hand);
+        assert_eq!(runner.state().stack.len(), 1, "the response leaves the ETB");
+    }
+    let mut events = Vec::new();
+    for _ in 0..player_count {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    if !candidates.is_empty() {
+        let WaitingFor::SearchChoice {
+            player,
+            library_owner,
+            cards,
+            count,
+            up_to,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("eligible cards must open the search prompt");
+        };
+        // CR 608.2h: Determine the search cap as the triggered ability resolves.
+        assert_eq!(
+            (*player, *library_owner, *count, *up_to),
+            (P0, Some(P0), cap, true)
+        );
+        let mut actual = cards.clone();
+        actual.sort_unstable();
+        let mut expected = candidates.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: candidates[..pick].to_vec(),
+                })
+                .unwrap()
+                .events,
+        );
+    }
+    assert_complete(runner);
+    events
+}
+
+fn assert_selected_delivery(
+    runner: &GameRunner,
+    source: ObjectId,
+    events: &[GameEvent],
+    selected: &[ObjectId],
+) {
+    let search_actions: Vec<_> = events.iter().enumerate().filter_map(|(index, event)| match event {
+        GameEvent::PlayerPerformedAction {
+            player_id,
+            action: action @ (PlayerActionKind::SearchedLibrary | PlayerActionKind::ShuffledLibrary),
+            ..
+        } => Some((index, *player_id, action)),
+        _ => None,
+    }).collect();
+    let [(search, P0, PlayerActionKind::SearchedLibrary), (shuffle, P0, PlayerActionKind::ShuffledLibrary)] =
+        search_actions.as_slice()
+    else {
+        panic!("controller must search and then shuffle: {search_actions:?}");
+    };
+    let reveals: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::CardsRevealed {
+                player, card_ids, ..
+            } => Some((index, *player, card_ids)),
+            _ => None,
+        })
+        .collect();
+    let deliveries: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                ..
+            } => Some((index, *object_id)),
+            _ => None,
+        })
+        .collect();
+    // CR 608.2c + CR 701.20a–b + CR 701.23a–b + CR 701.24a: Reveal the selected cards, deliver them to hand, then shuffle, including on an empty find.
+    assert_eq!(
+        deliveries.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+        selected
+    );
+    if selected.is_empty() {
+        assert!(reveals.is_empty());
+        return;
+    }
+    let [(reveal, P0, revealed)] = reveals.as_slice() else {
+        panic!("one public reveal: {reveals:?}");
+    };
+    assert_eq!(revealed.as_slice(), selected);
+    assert!(search < reveal);
+    for (index, card) in deliveries {
+        assert!(reveal < &index && &index < shuffle);
+        assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    }
+    assert_eq!(
+        events[*reveal + 1..*shuffle].iter().filter(|event| matches!(
+            event,
+            GameEvent::EffectResolved { kind: EffectKind::ChangeZone, source_id, .. } if *source_id == source
+        )).count(),
+        1,
+        "exactly one delivery dispatch, including any empty repeated attempts",
+    );
+}
 
 fn assert_complete(runner: &GameRunner) {
     let state = runner.state();
