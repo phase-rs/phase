@@ -9,9 +9,11 @@
 //! is milled this way, …" sentences is not the mill, so a token one of them
 //! creates (CR 111.1) must not become what the next gate reads (Old Rutstein).
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -212,11 +214,12 @@ fn old_rutstein_instant_makes_only_blood() {
 
 const STINKWEED_IMP: &str = "Flying\nWhenever this creature deals combat damage to a creature, destroy that creature.\nDredge 5 (If you would draw a card, you may mill five cards instead. If you do, return this card from your graveyard to your hand.)";
 
-/// Activate Lord Windgrace's +2 with Stinkweed Imp in the graveyard, accept
-/// Dredge for the first draw, and return how many draws the library lost
-/// beyond the five milled cards. `discard_land` picks Forest (else Bolt);
-/// `mill_lands` stages five lands (else five sorceries) on top.
-fn windgrace_plus_two_dredged(discard_land: bool, mill_lands: bool) -> usize {
+const NOTION_THIEF: &str = "Flash\nIf an opponent would draw a card except the first one they draw in each of their draw steps, instead that player skips that draw and you draw a card.";
+
+const DAKMOR_SALVAGE: &str = "This land enters tapped.\n{T}: Add {B}.\nDredge 2 (If you would draw a card, you may mill two cards instead. If you do, return this card from your graveyard to your hand.)";
+
+/// Lord Windgrace on P0's battlefield over three filler library cards.
+fn windgrace_scenario() -> (GameScenario, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let walker = scenario
@@ -225,23 +228,10 @@ fn windgrace_plus_two_dredged(discard_land: bool, mill_lands: bool) -> usize {
     for n in 0..3 {
         scenario.add_spell_to_library_top(P0, &format!("Filler {n}"), false);
     }
-    for n in 0..5 {
-        if mill_lands {
-            scenario.add_land_to_library_top(P0, &format!("Swamp {n}"));
-        } else {
-            scenario.add_spell_to_library_top(P0, &format!("Sorcery {n}"), false);
-        }
-    }
-    scenario
-        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
-        .from_oracle_text(STINKWEED_IMP);
-    let pick = if discard_land {
-        scenario.add_land_to_hand(P0, "Forest").id()
-    } else {
-        scenario.add_bolt_to_hand(P0)
-    };
-    let mut runner = scenario.build();
-    let library_before = runner.state().players[0].library.len();
+    (scenario, walker)
+}
+
+fn activate_plus_two(runner: &mut GameRunner, walker: ObjectId) {
     runner
         .act(GameAction::ActivateAbility {
             source_id: walker,
@@ -249,38 +239,250 @@ fn windgrace_plus_two_dredged(discard_land: bool, mill_lands: bool) -> usize {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate +2");
-    let mut dredged = false;
+}
+
+/// The engine's own save/undo/P2P restore pipeline (`PersistedGameState`), not
+/// a bare `serde_json::from_str::<GameState>`.
+fn round_trip(runner: &GameRunner) -> GameRunner {
+    let json = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("state serializes");
+    let state = serde_json::from_str::<PersistedGameState>(&json)
+        .expect("persisted state decodes")
+        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+        .expect("persisted state is admissible")
+        .finalize_after_rehydration(|_| Ok(()))
+        .expect("restored state is publishable");
+    GameRunner::from_state(state)
+}
+
+/// How each Dredge offer (CR 702.52a) is answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DredgeAnswer {
+    /// Dredge the first draw; decline any later offer.
+    AcceptFirst,
+    /// Draw every card normally.
+    DeclineAll,
+}
+
+/// The option of the pending replacement offer labelled `label`.
+fn offer_index(runner: &GameRunner, label: &str) -> usize {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.description == label)
+            .unwrap_or_else(|| panic!("a {label} option is offered: {candidates:?}")),
+        other => panic!("expected a replacement offer, got {other:?}"),
+    }
+}
+
+/// Settle the +2: discard `pick` and answer each Dredge offer per `answer`.
+/// `at_first_offer` runs on the runner before the first offer is answered.
+/// Returns how many Dredge offers appeared.
+fn settle_dredge_offers(
+    runner: &mut GameRunner,
+    pick: ObjectId,
+    answer: DredgeAnswer,
+    mut at_first_offer: impl FnMut(&mut GameRunner),
+) -> usize {
+    let mut offers = 0;
     for _ in 0..64 {
-        let action = match &runner.state().waiting_for {
+        let action = match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => GameAction::PassPriority,
-            WaitingFor::DiscardChoice { .. } => GameAction::SelectCards { cards: vec![pick] },
-            WaitingFor::ReplacementChoice { .. } if !dredged => {
-                dredged = true;
-                GameAction::ChooseReplacement { index: 0 }
+            WaitingFor::DiscardChoice { cards, .. } => {
+                assert!(cards.contains(&pick), "the staged pick is offered");
+                GameAction::SelectCards { cards: vec![pick] }
             }
-            WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
+            WaitingFor::ReplacementChoice { .. } => {
+                offers += 1;
+                if offers == 1 {
+                    at_first_offer(runner);
+                }
+                let label = match answer {
+                    DredgeAnswer::AcceptFirst if offers == 1 => "Accept",
+                    DredgeAnswer::AcceptFirst | DredgeAnswer::DeclineAll => "Decline",
+                };
+                GameAction::ChooseReplacement {
+                    index: offer_index(runner, label),
+                }
+            }
             other => panic!("unexpected prompt {other:?}"),
         };
         runner.act(action).expect("action accepted");
     }
-    assert!(dredged, "Dredge was offered for the first draw");
-    assert!(runner.state().stack.is_empty(), "resolution completed");
-    library_before - runner.state().players[0].library.len() - 5
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "resolution completed: {:?}",
+        runner.state().waiting_for
+    );
+    offers
+}
+
+/// Lord Windgrace with Stinkweed Imp in P0's graveyard, five lands (else five
+/// sorceries) on top of the library, and Forest (else Bolt) as the only card in
+/// hand. Returns (runner, walker, discard pick, Imp).
+fn windgrace_imp_board(
+    discard_land: bool,
+    mill_lands: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut scenario, walker) = windgrace_scenario();
+    for n in 0..5 {
+        if mill_lands {
+            scenario.add_land_to_library_top(P0, &format!("Swamp {n}"));
+        } else {
+            scenario.add_spell_to_library_top(P0, &format!("Sorcery {n}"), false);
+        }
+    }
+    let imp = scenario
+        .add_creature_to_graveyard(P0, "Stinkweed Imp", 1, 2)
+        .from_oracle_text(STINKWEED_IMP)
+        .id();
+    let pick = if discard_land {
+        scenario.add_land_to_hand(P0, "Forest").id()
+    } else {
+        scenario.add_bolt_to_hand(P0)
+    };
+    (scenario.build(), walker, pick, imp)
+}
+
+/// Activate Lord Windgrace's +2 over [`windgrace_imp_board`] and answer each
+/// Dredge offer per `answer`. Returns (cards drawn — the library's loss beyond
+/// the five milled cards when Dredge was accepted — Dredge offers, Imp's zone).
+fn windgrace_plus_two_dredged(
+    discard_land: bool,
+    mill_lands: bool,
+    answer: DredgeAnswer,
+) -> (usize, usize, Zone) {
+    let (mut runner, walker, pick, imp) = windgrace_imp_board(discard_land, mill_lands);
+    let library_before = runner.state().players[0].library.len();
+    activate_plus_two(&mut runner, walker);
+    let offers = settle_dredge_offers(&mut runner, pick, answer, |_| {});
+    assert_eq!(runner.state().objects[&pick].zone, Zone::Graveyard);
+    let milled = match answer {
+        DredgeAnswer::AcceptFirst => 5,
+        DredgeAnswer::DeclineAll => 0,
+    };
+    let drawn = library_before - runner.state().players[0].library.len() - milled;
+    (drawn, offers, runner.state().objects[&imp].zone)
 }
 
 /// CR 608.2c + CR 702.52a: when Dredge replaces the draw, the gate still reads
-/// the discard, not the milled cards.
+/// the discard, not the milled cards or the returned dredger.
 #[test]
 fn lord_windgrace_dredged_draw_gate_reads_the_discard() {
     assert_eq!(
-        windgrace_plus_two_dredged(false, true),
-        0,
+        windgrace_plus_two_dredged(false, true, DredgeAnswer::AcceptFirst),
+        (0, 1, Zone::Hand),
         "Bolt discarded, lands milled"
     );
     assert_eq!(
-        windgrace_plus_two_dredged(true, false),
-        1,
+        windgrace_plus_two_dredged(true, false, DredgeAnswer::AcceptFirst),
+        (1, 1, Zone::Hand),
         "Forest discarded, sorceries milled"
+    );
+}
+
+/// CR 702.52a: a declined Dredge draws normally, and the Imp still in the
+/// graveyard is offered again for the additional draw.
+#[test]
+fn lord_windgrace_declined_dredge_gate_reads_the_discard() {
+    assert_eq!(
+        windgrace_plus_two_dredged(true, false, DredgeAnswer::DeclineAll),
+        (2, 2, Zone::Graveyard),
+        "Forest discarded"
+    );
+    assert_eq!(
+        windgrace_plus_two_dredged(false, true, DredgeAnswer::DeclineAll),
+        (1, 1, Zone::Graveyard),
+        "Bolt discarded"
+    );
+}
+
+/// CR 608.2c + CR 614.6: Notion Thief replaces each of P0's draws with its
+/// controller's draw, with no choice. The gate still reads the discard, not the
+/// card the thief's controller drew. P0 holds Forest and Bolt and discards
+/// Forest (else Bolt). Returns (P0 library loss, P1 hand gain).
+fn windgrace_plus_two_under_notion_thief(discard_land: bool, p1_top_land: bool) -> (usize, usize) {
+    let (mut scenario, walker) = windgrace_scenario();
+    scenario.add_creature_from_oracle(P1, "Notion Thief", 3, 1, NOTION_THIEF);
+    for n in 0..3 {
+        scenario.add_spell_to_library_top(P1, &format!("P1 Filler {n}"), false);
+    }
+    if p1_top_land {
+        scenario.add_land_to_library_top(P1, "P1 Swamp");
+    } else {
+        scenario.add_spell_to_library_top(P1, "P1 Sorcery", false);
+    }
+    let forest = scenario.add_land_to_hand(P0, "Forest").id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let pick = if discard_land { forest } else { bolt };
+    let mut runner = scenario.build();
+    let p0_library_before = runner.state().players[0].library.len();
+    let p1_hand_before = runner.state().players[1].hand.len();
+    activate_plus_two(&mut runner, walker);
+    assert_eq!(settle(&mut runner, Some(pick)), 1, "one discard prompt");
+    assert_eq!(runner.state().objects[&pick].zone, Zone::Graveyard);
+    (
+        p0_library_before - runner.state().players[0].library.len(),
+        runner.state().players[1].hand.len() - p1_hand_before,
+    )
+}
+
+#[test]
+fn lord_windgrace_notion_thief_replaced_draw_gate_reads_the_discard() {
+    assert_eq!(
+        windgrace_plus_two_under_notion_thief(true, false),
+        (0, 2),
+        "Forest discarded, the thief's controller draws nonland cards"
+    );
+    assert_eq!(
+        windgrace_plus_two_under_notion_thief(false, true),
+        (0, 1),
+        "Bolt discarded, the thief's controller draws a land"
+    );
+}
+
+/// CR 608.2c + CR 701.9a: Dakmor Salvage was discarded this way, and dredging
+/// it back to hand for the first draw does not undo that discard.
+#[test]
+fn lord_windgrace_dakmor_salvage_dredged_back_still_counts() {
+    let (mut scenario, walker) = windgrace_scenario();
+    for n in 0..2 {
+        scenario.add_spell_to_library_top(P0, &format!("Sorcery {n}"), false);
+    }
+    let dakmor = scenario
+        .add_land_to_hand(P0, "Dakmor Salvage")
+        .from_oracle_text_with_keywords(&["Dredge"], DAKMOR_SALVAGE)
+        .id();
+    let mut runner = scenario.build();
+    let library_before = runner.state().players[0].library.len();
+    activate_plus_two(&mut runner, walker);
+    let offers = settle_dredge_offers(&mut runner, dakmor, DredgeAnswer::AcceptFirst, |_| {});
+    assert_eq!(offers, 1, "Dredge offered once, for the first draw");
+    assert_eq!(runner.state().objects[&dakmor].zone, Zone::Hand);
+    assert_eq!(
+        library_before - runner.state().players[0].library.len() - 2,
+        1,
+        "the additional card is drawn beyond the two milled"
+    );
+}
+
+/// The draw instruction's held ledger survives a save/restore taken while the
+/// Dredge offer is pending.
+#[test]
+fn lord_windgrace_dredged_draw_gate_survives_a_state_round_trip() {
+    let (mut runner, walker, pick, imp) = windgrace_imp_board(true, false);
+    let library_before = runner.state().players[0].library.len();
+    activate_plus_two(&mut runner, walker);
+    let offers = settle_dredge_offers(&mut runner, pick, DredgeAnswer::AcceptFirst, |runner| {
+        *runner = round_trip(runner);
+    });
+    assert_eq!(offers, 1);
+    assert_eq!(runner.state().objects[&imp].zone, Zone::Hand);
+    assert_eq!(
+        library_before - runner.state().players[0].library.len() - 5,
+        1,
+        "Forest discarded: one additional card beyond the five milled"
     );
 }

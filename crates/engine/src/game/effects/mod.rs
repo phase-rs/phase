@@ -18874,6 +18874,10 @@ fn when_you_do_mandatory_parent_did_nothing(
 ///   ("If you put a card into your hand this way" — Sidequest: Catch a Fish)
 ///   directly after a draw. Lord Windgrace's "Discard a card, then draw a
 ///   card. If a land card is discarded this way, draw an additional card."
+///   The draw's frame also holds the ledger in force when it began and
+///   restores it on completion (`DrawSequenceFrame::this_way_antecedent_ledger`),
+///   because an action replacing one of its draws (CR 614.6: Dredge, Notion
+///   Thief) runs as its own chain and publishes its own ledger.
 /// - The heads of one gated run all name the run's shared antecedent, so a
 ///   gated node — even one that moved an object or created a token (CR 111.1)
 ///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
@@ -30925,7 +30929,8 @@ fn resolve_chain_body(
     // CR 608.2c: "… this way" names the earlier instruction that moved the
     // cards. A node that is not that instruction (a play permission, a draw, a
     // member of the head's gated run) directly followed by a "this way" head
-    // leaves the moving instruction's ledger in place for the head.
+    // leaves the moving instruction's ledger in place for the head. A draw's
+    // frame holds and restores that ledger across any replacement of its draws.
     if !keeps_this_way_ledger_for_following_head(ability) {
         state.last_zone_changed_ids = zone_changed_ids;
     }
