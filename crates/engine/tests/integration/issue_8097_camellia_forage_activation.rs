@@ -12,7 +12,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -423,4 +423,100 @@ fn camellia_forage_ai_legal_actions_match_engine_branches() {
     let costs = activate(&mut runner, source);
     assert_eq!(costs.len(), 1);
     assert_eq!(ai_branch_indices(&runner), vec![0]);
+}
+
+fn add_camellia_and_foods(scenario: &mut GameScenario, count: usize) -> Vec<ObjectId> {
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Camellia, the Seedmiser", 3, 3)
+        .with_subtypes(vec!["Squirrel", "Warlock"])
+        .from_oracle_text(CAMELLIA_ORACLE);
+    (0..count)
+        .map(|_| {
+            scenario
+                .add_creature(P0, "Food", 0, 0)
+                .as_artifact()
+                .with_subtypes(vec!["Food"])
+                .from_oracle_text("{2}, {T}, Sacrifice this artifact: You gain 3 life.")
+                .id()
+        })
+        .collect()
+}
+
+fn squirrel_tokens(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[*id];
+            obj.controller == P0
+                && obj.is_token
+                && obj.card_types.subtypes.iter().any(|s| s == "Squirrel")
+        })
+        .count()
+}
+
+fn activate_first_ability(runner: &mut GameRunner, source_id: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the printed ability");
+}
+
+#[test]
+fn camellia_food_batch_peregrin_three_foods_one_squirrel() {
+    let mut scenario = GameScenario::new();
+    let foods = add_camellia_and_foods(&mut scenario, 3);
+    let peregrin = scenario.add_creature_from_oracle(P0, "Peregrin Took", 2, 3,
+        "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead.\nSacrifice three Foods: Draw a card.").id();
+    scenario.with_library_top(P0, &["Forest"]);
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[0].hand.len();
+    activate_first_ability(&mut runner, peregrin);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                count: 3,
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: foods.clone(),
+        })
+        .expect("sacrifice three Foods together");
+    runner.advance_until_stack_empty();
+    assert!(foods
+        .iter()
+        .all(|id| !runner.state().battlefield.contains(id)));
+    assert_eq!(runner.state().players[0].hand.len(), hand_before + 1);
+    assert_eq!(squirrel_tokens(&runner), 1, "one simultaneous sacrifice");
+}
+
+#[test]
+fn camellia_food_batch_two_food_activations_two_squirrels() {
+    let mut scenario = GameScenario::new();
+    let foods = add_camellia_and_foods(&mut scenario, 2);
+    scenario.with_mana_pool(P0, colorless(4));
+    let mut runner = scenario.build();
+    let starting_life = runner.state().players[0].life;
+    for (index, food) in foods.into_iter().enumerate() {
+        activate_first_ability(&mut runner, food);
+        runner.advance_until_stack_empty();
+        assert!(!runner.state().battlefield.contains(&food));
+        assert_eq!(
+            runner.state().players[0].life,
+            starting_life + 3 * (index as i32 + 1)
+        );
+        assert_eq!(squirrel_tokens(&runner), index + 1);
+    }
 }

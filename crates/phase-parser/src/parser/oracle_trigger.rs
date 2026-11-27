@@ -26406,6 +26406,10 @@ fn try_parse_sacrifice_trigger(
     }
     let (after_verb, actor) = parse_sacrifice_actor.parse(event).ok()?;
 
+    // CR 603.2c: "one or more" describes a single sacrifice event.
+    let (after_verb, one_or_more) = opt(tag::<_, _, OracleError<'_>>("one or more "))
+        .parse(after_verb)
+        .ok()?;
     let (filter, remainder) = parse_trigger_subject(after_verb, &mut ParseContext::default());
 
     // CR 603.2 + CR 603.7: Optional trailing turn constraint — "during your
@@ -26425,6 +26429,7 @@ fn try_parse_sacrifice_trigger(
 
     let mut def = make_base();
     def.mode = TriggerMode::Sacrificed;
+    def.batched = one_or_more.is_some();
     def.valid_card = Some(match actor {
         Some(cr) => add_controller(filter, cr),
         None => filter,

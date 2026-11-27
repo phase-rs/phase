@@ -286,7 +286,6 @@ face = [
   { key = "callous giant", class = "dropped_qualifier", clauses = ["If a source would deal 3 or less damage to this creature, prevent that damage."] },
   { key = "calming licid", class = "missing_effect", clauses = ["{W}, {T}: This creature loses this ability and becomes an Aura enchantment with enchant creature."] },
   { key = "camato scout", class = "missing_effect", clauses = ["Camato Scout has landwalk of the chosen type."] },
-  { key = "camellia, the seedmiser", class = "trigger_wrong", clauses = ["Other Squirrels you control have menace.", "Whenever you sacrifice one or more Foods, create a 1/1 green Squirrel creature token."] },
   { key = "campfire", class = "wrong_zone", clauses = ["{2}, {T}, Exile this artifact: Put all commanders you own from the command zone and from your graveyard into your hand.", "Then shuffle your graveyard into your library."] },
   { key = "can't quite recall", class = "target_wrong", clauses = ["Forbidden", "Target player draws three cards."] },
   { key = "canal dredger", class = "missing_effect", clauses = ["Draft this card face up.", "Each player passes the last card from each booster pack to a player who drafted a card named Canal Dredger."] },
