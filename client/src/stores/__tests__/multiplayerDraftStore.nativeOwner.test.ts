@@ -361,6 +361,7 @@ import {
   getDraftStore,
   publishActiveNativeDraft,
   saveNativeDraftCapability,
+  withActiveDraftPointer,
 } from "../../services/draftPersistence";
 import type { CreateDraftSettings } from "../../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../../adapter/draft-adapter";
@@ -1691,10 +1692,11 @@ describe("a native seat's private record once no pointer leads to it", () => {
     expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: predecessor });
     await expect(storedRecord(predecessor)).resolves.toMatchObject({ capabilityId: predecessor });
 
-    guests.instances[0]!.emit({
+    await withActiveDraftPointer((recovery) => guests.instances[0]!.emit({
       type: "recoveryCommitted",
       pointer: { roomCode: "ABCDE", displayName: "A", hostPeerId: "phase2-OWN", capabilityId: "cap-guest" },
-    });
+      recovery,
+    }));
     await flush();
     expect(storedPointer()).toMatchObject({ hostPeerId: "phase2-OWN", capabilityId: "cap-guest" });
     expect(storedPointer()).not.toHaveProperty("transport");
@@ -1891,6 +1893,69 @@ describe("a native owner under the cross-tab recovery-pointer transaction", () =
         expect(outcome).toEqual({ status: "resumed" });
         expect(storedPointer()).toMatchObject({ transport: "native", capabilityId: "cap-B" });
         await expect(storedRecord("cap-B")).resolves.toEqual(recordB);
+        // Reach: the trigger fired once, the resume compared and published its
+        // own pointer, and its handoff retired the predecessor and installed it.
+        expect(fired).toBe(1);
+        expect(storage.log).toContain(`republish:published:${ownId}`);
+        expect(store()).toMatchObject({ role: "guest", transport: "native" });
+        expect(predecessorDisposals()).toBe(1);
+      } finally {
+        spy?.mockRestore();
+        uninstallWebLocks();
+      }
+    },
+  );
+
+  it.each(["beside a P2P guest", "beside a native seat that lost its connection"] as const)(
+    "a native resume's comparison and write are one step against another context's guest seat publication: %s",
+    async (leg) => {
+      installFifoWebLocks();
+      const getItem = localStorage.getItem.bind(localStorage);
+      let spy: { mockRestore: () => void } | null = null;
+      try {
+        const predecessorDisposals = await seatPredecessor(leg);
+        const ownId = storedPointer()?.capabilityId as string;
+        const tab = await otherTab();
+        const hostB = "phase2-FGHJK";
+        await tab.saveDraftGuestSession(hostB, {
+          draftToken: "token-G",
+          seatIndex: 3,
+          draftCode: "draft-G",
+          roomCode: "FGHJK",
+          displayName: "Bob",
+          capabilityId: "cap-G",
+        });
+        storage.log.length = 0;
+
+        // Another tab's guest seat publishes at the resume's first read of the
+        // pointer after its private record commits: its comparison read.
+        let publishedB: Promise<void> | null = null;
+        let fired = 0;
+        spy = vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+          const seen = getItem(key);
+          if (key === POINTER_KEY && fired === 0 && storage.log.includes("privateSave:committed")) {
+            fired += 1;
+            publishedB = tab.saveActiveDraftGuest({
+              roomCode: "FGHJK",
+              displayName: "Bob",
+              hostPeerId: hostB,
+              capabilityId: "cap-G",
+            });
+          }
+          return seen;
+        });
+        const outcome = await store().resumeNativeDraft();
+        await publishedB;
+        spy.mockRestore();
+        spy = null;
+
+        expect(outcome).toEqual({ status: "resumed" });
+        expect(storedPointer()).toMatchObject({ roomCode: "FGHJK", hostPeerId: hostB, capabilityId: "cap-G" });
+        expect(storedPointer()).not.toHaveProperty("transport");
+        await expect(tab.loadDraftGuestSession(hostB)).resolves.toMatchObject({
+          draftToken: "token-G",
+          capabilityId: "cap-G",
+        });
         // Reach: the trigger fired once, the resume compared and published its
         // own pointer, and its handoff retired the predecessor and installed it.
         expect(fired).toBe(1);

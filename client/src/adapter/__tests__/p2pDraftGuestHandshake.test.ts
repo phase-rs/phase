@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  ActiveDraftPointerTxn,
   clearDraftDeckSubmission,
   clearDraftGuestRecovery,
   DraftGuestCapability,
   loadDraftGuestCapability,
   saveDraftGuestSession,
+  withActiveDraftPointer,
 } from "../../services/draftPersistence";
 import type { DraftGuestEvent } from "../p2p-draft-guest";
 
@@ -38,6 +40,15 @@ const persistenceState = vi.hoisted(() => ({
   loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
   saveDraftGuestSession: vi.fn<typeof saveDraftGuestSession>(async () => {}),
+  // With no lock manager the real transaction runs its body at the call.
+  withActiveDraftPointer: vi.fn<typeof withActiveDraftPointer>(
+    async (body) => ({ status: "committed", value: body({} as ActiveDraftPointerTxn) }),
+  ),
+  ActiveDraftPointerUnavailableError: class ActiveDraftPointerUnavailableError extends Error {
+    constructor(reason: string) {
+      super(`Recovery pointer unavailable: ${reason}`);
+    }
+  },
 }));
 
 vi.mock("../../network/draftPeerSession", () => ({
@@ -413,6 +424,7 @@ describe("P2P draft guest handshake attempts", () => {
           hostPeerId: "phase2-ABCDE",
           capabilityId: writtenCapabilityId(),
         },
+        recovery: expect.anything(),
       },
       settled: false,
     });
@@ -672,6 +684,7 @@ describe("P2P draft guest handshake attempts", () => {
         hostPeerId: "phase2-ABCDE",
         capabilityId: "stored-cap",
       },
+      recovery: expect.anything(),
     });
   });
 
@@ -703,6 +716,7 @@ describe("P2P draft guest handshake attempts", () => {
     expect(events).toContainEqual({
       type: "recoveryCommitted",
       pointer: expect.objectContaining({ capabilityId }),
+      recovery: expect.anything(),
     });
   });
 
@@ -839,6 +853,82 @@ describe("P2P draft guest handshake attempts", () => {
     expect(events).toContainEqual({ type: "reconnected", seatIndex: 2 });
     expect(events.map((event) => event.type)).not.toContain("recoveryCommitted");
   });
+
+  /** A guest at its admission: a new seat's welcome, or a resumed seat's reconnect acknowledgement. */
+  function admit(reconnect: boolean) {
+    sessionState.sessions.length = 0;
+    const guest = new P2PDraftGuest(
+      {} as never,
+      "phase2-ABCDE",
+      {} as never,
+      reconnect
+        ? { kind: "reconnect", roomCode: "ABCDE", displayName: "Alice", draftToken: "opaque-token" }
+        : { kind: "new", roomCode: "ABCDE", displayName: "Alice" },
+    );
+    const events: DraftGuestEvent[] = [];
+    guest.onEvent((event) => events.push(event));
+    const privateGuest = guest as unknown as {
+      handshakeOn: (connection: unknown, signal: AbortSignal | undefined, reconnect: boolean) => Promise<void>;
+    };
+    const handshake = privateGuest.handshakeOn({} as never, undefined, reconnect);
+    const acknowledge = () => sessionState.sessions[0]!.handler!(reconnect ? reconnectAck : {
+      type: "draft_welcome",
+      draftProtocolVersion: DRAFT_PROTOCOL_VERSION,
+      draftToken: "opaque-token",
+      seatIndex: 2,
+      draftCode: "draft-xyz",
+      view: { launch_capability: "None", status: "Deckbuilding", draft_effects: [], seats: [] },
+    }) as unknown as Promise<void>;
+    return { events, handshake, acknowledge };
+  }
+
+  it.each([false, true])(
+    "hands no pointer to its owner when the session ends while it waits for the recovery-pointer transaction (reconnect: %s)",
+    async (reconnect) => {
+      let grant!: () => void;
+      const granted = new Promise<void>((resolve) => {
+        grant = resolve;
+      });
+      const bodyResults: unknown[] = [];
+      persistenceState.withActiveDraftPointer.mockImplementationOnce(async (body) => {
+        await granted;
+        const value = body({} as ActiveDraftPointerTxn);
+        bodyResults.push(value);
+        return { status: "committed", value };
+      });
+      const { events, handshake, acknowledge } = admit(reconnect);
+      await Promise.resolve();
+      const handled = acknowledge();
+      await vi.waitFor(() => expect(persistenceState.withActiveDraftPointer).toHaveBeenCalledOnce());
+
+      const rejected = expect(handshake).rejects.toThrow("disconnected before acknowledging");
+      sessionState.sessions[0]!.end!();
+      await rejected;
+
+      grant();
+      await handled;
+      // Reach: the private write committed, and the transaction's body ran once and declined.
+      expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledOnce();
+      expect(bodyResults).toEqual([false]);
+      expect(events.map((event) => event.type)).not.toContain("recoveryCommitted");
+    },
+  );
+
+  it.each([false, true])(
+    "fails its admission with the save-error text when the recovery-pointer transaction cannot run (reconnect: %s)",
+    async (reconnect) => {
+      persistenceState.withActiveDraftPointer.mockResolvedValueOnce({ status: "skipped", reason: "lock-refused" });
+      const { events, handshake, acknowledge } = admit(reconnect);
+      await Promise.resolve();
+      void acknowledge();
+
+      await expect(handshake).rejects.toThrow("Recovery pointer unavailable: lock-refused");
+      // Reach: the private write committed, then the transaction was requested once.
+      expect(persistenceState.saveDraftGuestSession).toHaveBeenCalledOnce();
+      expect(persistenceState.withActiveDraftPointer).toHaveBeenCalledOnce();
+      expect(events).toEqual([{ type: "error", message: "Could not save draft recovery details" }]);
+    },
+  );
 
   it("rejects an incompatible welcome immediately with typed non-retryable recovery", async () => {
     sessionState.sessions.length = 0;

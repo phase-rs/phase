@@ -3,16 +3,18 @@ import { clear as idbClear, get, set as idbSet } from "idb-keyval";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeDraftDataConnection } from "../../network/__tests__/fakeDraftDataConnection";
 import { DRAFT_PROTOCOL_VERSION } from "../../network/draftProtocol";
-import type { DraftGuestCapability } from "../../services/draftPersistence";
-import { installFifoWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
+import type { ActiveDraftPointerTxn, DraftGuestCapability } from "../../services/draftPersistence";
+import { setCrossTabTxnLockWaitForTests } from "../../services/crossTabTransaction";
+import { installFifoWebLocks, installRefusingWebLocks, uninstallWebLocks } from "../../test/helpers/webLocks";
 
 /*
  * Who publishes a guest's public recovery pointer, on the real lifecycle
  * store, the real guest adapter and P2PDraftGuest, the real draft peer session
  * over a fake data connection, and real persistence on fake-indexeddb. Only
- * the room join is doubled; four persistence functions are wrapped so each
- * row can read the order in which the private commit, the public pointer and
- * any revocation happened.
+ * the room join is doubled; the private save, the revocation and the guest
+ * publications of the recovery-pointer transaction's capability are wrapped
+ * so each row can read the order in which the private commit, the public
+ * pointer and any revocation happened.
  */
 const harness = vi.hoisted(() => ({
   joinRoom: vi.fn(),
@@ -38,15 +40,19 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => {
       await actual.saveDraftGuestSession(...args);
       harness.log.push("privateSave:committed");
     },
-    saveActiveDraftGuest: (...args: Parameters<typeof actual.saveActiveDraftGuest>) => {
-      harness.log.push(`pointerWrite:${args[0].capabilityId}`);
-      actual.saveActiveDraftGuest(...args);
-    },
-    republishActiveDraftGuest: (...args: Parameters<typeof actual.republishActiveDraftGuest>) => {
-      const written = actual.republishActiveDraftGuest(...args);
-      harness.log.push(`${written === null ? "pointerRefused" : "pointerWrite"}:${args[1].capabilityId}`);
-      return written;
-    },
+    withActiveDraftPointer: <T,>(body: (pointer: ActiveDraftPointerTxn) => T) =>
+      actual.withActiveDraftPointer((pointer) => body({
+        ...pointer,
+        publishGuest: (...args) => {
+          harness.log.push(`pointerWrite:${args[0].capabilityId}`);
+          return pointer.publishGuest(...args);
+        },
+        republishGuest: (...args) => {
+          const written = pointer.republishGuest(...args);
+          harness.log.push(`${written === null ? "pointerRefused" : "pointerWrite"}:${args[1].capabilityId}`);
+          return written;
+        },
+      })),
     clearDraftGuestRecovery: async (capability: DraftGuestCapability) => {
       harness.log.push("revoke:clear");
       await actual.clearDraftGuestRecovery(capability);
@@ -59,6 +65,7 @@ import { useConnectivityStore } from "../connectivityStore";
 import {
   getDraftStore,
   inspectActiveDraftGuest,
+  loadDraftGuestSession,
   saveActiveDraftGuest,
   saveDraftGuestSession,
 } from "../../services/draftPersistence";
@@ -182,7 +189,7 @@ async function seedNamedPair(capabilityId = "cap-S"): Promise<void> {
     displayName: "Alice",
     capabilityId,
   });
-  saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: hostPeerIdFor("ABCDE"), capabilityId });
+  await saveActiveDraftGuest({ roomCode: "ABCDE", displayName: "Alice", hostPeerId: hostPeerIdFor("ABCDE"), capabilityId });
   harness.log.length = 0;
 }
 
@@ -643,5 +650,233 @@ describe("guest recovery pointer publication", () => {
       spy?.mockRestore();
       uninstallWebLocks();
     }
+  });
+
+  describe("under the cross-tab recovery-pointer transaction", () => {
+    const POINTER_LOCK = "phase-active-draft-pointer";
+    type PersistenceModule = typeof import("../../services/draftPersistence");
+    /** Another context's guest seat: its private record and the pointer it publishes. */
+    const seatB = {
+      roomCode: "FGHJK",
+      displayName: "Bob",
+      hostPeerId: hostPeerIdFor("FGHJK"),
+      capabilityId: "cap-G",
+    };
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      setCrossTabTxnLockWaitForTests(null);
+      uninstallWebLocks();
+    });
+
+    /**
+     * Another same-origin tab: its own module graph of the persistence
+     * authority, sharing only localStorage, IndexedDB and the lock manager.
+     */
+    async function otherTab(): Promise<PersistenceModule> {
+      vi.resetModules();
+      const tab = await vi.importActual<PersistenceModule>("../../services/draftPersistence");
+      // Reach: a distinct graph, not this one.
+      expect(tab.getDraftStore).not.toBe(getDraftStore);
+      return tab;
+    }
+
+    /** Saves seat B's private record through `tab`, and returns it as stored. */
+    async function saveSeatB(tab: PersistenceModule): Promise<Record<string, unknown> | undefined> {
+      await tab.saveDraftGuestSession(seatB.hostPeerId, {
+        draftToken: "token-G",
+        seatIndex: 3,
+        draftCode: "draft-G",
+        roomCode: seatB.roomCode,
+        displayName: seatB.displayName,
+        capabilityId: seatB.capabilityId,
+      });
+      return storedRecord(seatB.roomCode);
+    }
+
+    /** Records the capability each pointer write names, in order, from now. */
+    function recordPointerWrites(onWrite: (capabilityId: string) => void = () => {}): string[] {
+      const setItem = localStorage.setItem.bind(localStorage);
+      const written: string[] = [];
+      vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+        setItem(key, value);
+        if (key !== POINTER_KEY) return;
+        const capabilityId = (JSON.parse(value) as { capabilityId: string }).capabilityId;
+        written.push(capabilityId);
+        onWrite(capabilityId);
+      });
+      return written;
+    }
+
+    /** Holds the pointer lock as another tab's step would, until released. */
+    function holdPointerLock(): { held: Promise<void>; release: () => void } {
+      const gate = deferred();
+      const holding = navigator.locks.request(POINTER_LOCK, { mode: "exclusive" }, () => gate.promise);
+      return { held: holding, release: () => gate.resolve() };
+    }
+
+    async function pendingPointerRequests(): Promise<number> {
+      const { pending } = await navigator.locks.query();
+      return (pending ?? []).filter((request) => request.name === POINTER_LOCK).length;
+    }
+
+    it("a resumed guest's reconnect compares and writes in one step against another context's guest publication", async () => {
+      installFifoWebLocks();
+      await seedNamedPair("cap-S");
+      const tab = await otherTab();
+      const recordB = await saveSeatB(tab);
+      harness.log.length = 0;
+
+      // Another tab's guest seat publishes at the reconnect's first read of
+      // the pointer after its private record commits: its comparison read.
+      const getItem = localStorage.getItem.bind(localStorage);
+      let publishedB: Promise<void> | null = null;
+      let fired = 0;
+      vi.spyOn(localStorage, "getItem").mockImplementation((key: string) => {
+        const seen = getItem(key);
+        if (key === POINTER_KEY && fired === 0 && harness.log.includes("privateSave:committed")) {
+          fired += 1;
+          publishedB = tab.saveActiveDraftGuest(seatB);
+        }
+        return seen;
+      });
+      const written = recordPointerWrites();
+
+      const { resumed } = await startResume();
+      await connFor("ABCDE").receiveRaw(rawMessage(reconnectAck()));
+      await expect(resumed).resolves.toBe("resumed");
+      await publishedB;
+      await flush();
+
+      expect(storedPointer()).toMatchObject({ roomCode: "FGHJK", hostPeerId: seatB.hostPeerId, capabilityId: "cap-G" });
+      await expect(storedRecord("FGHJK")).resolves.toEqual(recordB);
+      await expect(loadDraftGuestSession(seatB.hostPeerId)).resolves.toMatchObject({ draftToken: "token-G" });
+      // Reach: the trigger fired once, the reconnect's comparison passed and it wrote.
+      expect(fired).toBe(1);
+      expect(written).toEqual(["cap-S", "cap-G"]);
+      expect(harness.log).toContain("pointerWrite:cap-S");
+    });
+
+    it(
+      "a new seat's welcome reads its standing pointer in the same step as its write, against another context's guest publication",
+      { timeout: 15_000 },
+      async () => {
+        installFifoWebLocks();
+        const tab = await otherTab();
+        const recordB = await saveSeatB(tab);
+        harness.log.length = 0;
+
+        // Another tab's guest seat publishes right after the welcome's write.
+        let publishedB: Promise<void> | null = null;
+        let fired = 0;
+        const written = recordPointerWrites((capabilityId) => {
+          if (capabilityId === "cap-G" || fired > 0) return;
+          fired += 1;
+          publishedB = tab.saveActiveDraftGuest(seatB);
+        });
+
+        const { joined } = await startNewJoin();
+        await connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+        await expect(joined).resolves.toEqual({ status: "opened" });
+        await publishedB;
+        const ownId = (await storedRecord())?.capabilityId as string;
+        expect(ownId).toEqual(expect.any(String));
+
+        connFor("ABCDE").simulateClose();
+        await new Promise((done) => setTimeout(done, 1_100));
+        const dial = roomFor("ABCDE").dials.at(-1)!;
+        dial.simulateOpen();
+        await vi.waitFor(() => expect(dial.sentRaw.length).toBeGreaterThan(0));
+        await dial.receiveRaw(rawMessage(reconnectAck()));
+        // Reach: the reconnect's commit ran.
+        await vi.waitFor(() => expect(harness.log.filter((entry) => entry === "privateSave:committed")).toHaveLength(2));
+        await flush();
+
+        expect(storedPointer()).toMatchObject({ roomCode: "FGHJK", hostPeerId: seatB.hostPeerId, capabilityId: "cap-G" });
+        await expect(storedRecord("FGHJK")).resolves.toEqual(recordB);
+        await expect(tab.loadDraftGuestSession(seatB.hostPeerId)).resolves.toMatchObject({ draftToken: "token-G" });
+        expect(harness.log).toContain(`pointerRefused:${ownId}`);
+        // Reach: the trigger fired once, after the welcome's own write.
+        expect(fired).toBe(1);
+        expect(written).toEqual([ownId, "cap-G"]);
+      },
+    );
+
+    it.each(["a new seat's welcome", "a resumed seat's reconnect"] as const)(
+      "%s hands its pointer over only under the recovery-pointer lock",
+      async (admission) => {
+        installFifoWebLocks();
+        if (admission === "a resumed seat's reconnect") await seedNamedPair("cap-S");
+        const before = localStorage.getItem(POINTER_KEY);
+        const holder = holdPointerLock();
+        try {
+          let outcome: unknown = null;
+          let received: Promise<void>;
+          if (admission === "a new seat's welcome") {
+            const { joined } = await startNewJoin();
+            void joined.then((value) => {
+              outcome = value;
+            });
+            received = connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+          } else {
+            const { resumed } = await startResume();
+            void resumed.then((value) => {
+              outcome = value;
+            });
+            received = connFor("ABCDE").receiveRaw(rawMessage(reconnectAck()));
+          }
+
+          await vi.waitFor(async () => expect(await pendingPointerRequests()).toBe(1));
+          // Reach: the private record committed, and the hand-over waits for the lock.
+          expect(harness.log).toContain("privateSave:committed");
+          expect(pointerWrites()).toEqual([]);
+          expect(localStorage.getItem(POINTER_KEY)).toBe(before);
+          expect(outcome).toBeNull();
+
+          holder.release();
+          await holder.held;
+          await received;
+          await vi.waitFor(() => expect(outcome).not.toBeNull());
+          expect(outcome).toEqual(admission === "a new seat's welcome" ? { status: "opened" } : "resumed");
+          const capabilityId = (await storedRecord())?.capabilityId as string;
+          expect(pointerWrites()).toEqual([`pointerWrite:${capabilityId}`]);
+          expect(storedPointer()).toMatchObject({ capabilityId });
+        } finally {
+          holder.release();
+        }
+      },
+    );
+
+    it.each(["refused", "timed out"] as const)(
+      "a new seat whose recovery-pointer transaction is %s fails its join and publishes nothing",
+      async (refusal) => {
+        let holder: { held: Promise<void>; release: () => void } | null = null;
+        if (refusal === "refused") {
+          installRefusingWebLocks(new DOMException("denied", "SecurityError"));
+        } else {
+          installFifoWebLocks();
+          setCrossTabTxnLockWaitForTests(50);
+          holder = holdPointerLock();
+        }
+        const errors: Array<string | null> = [];
+        const unsubscribe = useMultiplayerDraftStore.subscribe((state, previous) => {
+          if (state.error !== previous.error) errors.push(state.error);
+        });
+        try {
+          const { joined } = await startNewJoin();
+          await connFor("ABCDE").receiveRaw(rawMessage(welcome()));
+          await expect(joined).resolves.toMatchObject({ status: "failed" });
+
+          // Reach: the private record committed before the hand-over's transaction.
+          expect(harness.log).toContain("privateSave:committed");
+          expect(pointerWrites()).toEqual([]);
+          expect(errors).toContain("Could not save draft recovery details");
+          expect(storedPointer()).toBeNull();
+        } finally {
+          unsubscribe();
+          holder?.release();
+        }
+      },
+    );
   });
 });

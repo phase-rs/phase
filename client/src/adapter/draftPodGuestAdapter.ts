@@ -24,6 +24,7 @@ import type {
   DraftMatchSettlement,
   DraftPauseReason,
 } from "../network/draftProtocol";
+import type { ActiveDraftPointerTxn } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
 import type { DraftWorkspaceState } from "../components/draft/workspace/types";
@@ -45,7 +46,7 @@ export type DraftPodGuestStatus =
 
 export type DraftPodGuestEvent =
   | { type: "statusChanged"; status: DraftPodGuestStatus }
-  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer }
+  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer; recovery: ActiveDraftPointerTxn }
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
   | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
@@ -267,7 +268,7 @@ export class DraftPodGuestAdapter {
   private handleGuestEvent(event: DraftGuestEvent): void {
     switch (event.type) {
       case "recoveryCommitted":
-        this.emit({ type: "recoveryCommitted", pointer: event.pointer });
+        this.emit({ type: "recoveryCommitted", pointer: event.pointer, recovery: event.recovery });
         break;
       case "joined":
         this._seatIndex = event.seatIndex;

@@ -241,6 +241,7 @@ describe("P2P draft guest capability", () => {
     expect(committed).toEqual({
       type: "recoveryCommitted",
       pointer: { roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID, capabilityId: admitted!.capabilityId },
+      recovery: expect.anything(),
     });
     // Owner double: the lifecycle store publishes exactly this pointer.
     saveActiveDraftGuest(committed!.pointer);
@@ -288,7 +289,7 @@ describe("P2P draft guest capability", () => {
     // The guest leaves the public pointer to its owner.
     expect(storedPointer()).toEqual(seededPointer);
     const committedPointer = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: HOST_PEER_ID, capabilityId };
-    expect(first.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer });
+    expect(first.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer, recovery: expect.anything() });
     expect(loadDraftGuestCapability).toHaveBeenCalledOnce();
     first.guest.dispose();
 
@@ -298,7 +299,7 @@ describe("P2P draft guest capability", () => {
     await secondInitialized;
 
     await expect(storedRecord()).resolves.toMatchObject({ draftToken: "token-L", capabilityId });
-    expect(second.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer });
+    expect(second.events).toContainEqual({ type: "recoveryCommitted", pointer: committedPointer, recovery: expect.anything() });
     expect(loadDraftGuestCapability).toHaveBeenCalledTimes(2);
   });
 

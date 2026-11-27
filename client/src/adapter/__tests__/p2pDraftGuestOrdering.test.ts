@@ -4,11 +4,13 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Peer from "peerjs";
 import type {
+  ActiveDraftPointerTxn,
   clearDraftDeckSubmission,
   clearDraftGuestRecovery,
   loadDraftGuestCapability,
   PersistedDraftDeckSubmission,
   saveDraftGuestSession,
+  withActiveDraftPointer,
 } from "../../services/draftPersistence";
 
 const persistence = vi.hoisted(() => ({
@@ -19,6 +21,10 @@ const persistence = vi.hoisted(() => ({
   // No stored record owns this token unless a test answers otherwise.
   loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
   saveDraftDeckSubmission: vi.fn(async () => {}),
+  // With no lock manager the real transaction runs its body at the call.
+  withActiveDraftPointer: vi.fn<typeof withActiveDraftPointer>(
+    async (body) => ({ status: "committed", value: body({} as ActiveDraftPointerTxn) }),
+  ),
 }));
 
 vi.mock("../../services/draftPersistence", () => persistence);

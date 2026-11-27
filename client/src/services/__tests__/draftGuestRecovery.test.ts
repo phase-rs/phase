@@ -93,7 +93,7 @@ async function saveCapability(capability: NamedCapability): Promise<void> {
     displayName: capability.displayName,
     capabilityId: capability.capabilityId,
   });
-  saveActiveDraftGuest({
+  await saveActiveDraftGuest({
     roomCode: capability.roomCode,
     displayName: capability.displayName,
     hostPeerId: capability.hostPeerId,
@@ -851,7 +851,7 @@ describe("guest recovery records", () => {
 
       // Over an equal pointer: written, with a new timestamp, and its capture returned.
       setRawPointer({ timestamp, capabilityId: "cap-A" });
-      const written = republishActiveDraftGuest(standsOn, publication);
+      const written = await republishActiveDraftGuest(standsOn, publication);
       expect(written).toMatchObject({ roomCode: "ABCDE", hostPeerId: HOST1, capabilityId: "cap-A" });
       expect(written!.timestamp).toBeGreaterThan(timestamp);
       const active = inspectActiveDraftGuest();
@@ -860,20 +860,20 @@ describe("guest recovery records", () => {
       // Over a pointer differing only in its capability: refused, unchanged.
       setRawPointer({ timestamp, capabilityId: "cap-B" });
       const otherGuest = localStorage.getItem(POINTER_KEY);
-      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
+      await expect(republishActiveDraftGuest(standsOn, publication)).resolves.toBeNull();
       expect(localStorage.getItem(POINTER_KEY)).toBe(otherGuest);
 
       // Over a native pointer: refused, and the pointer and its record stay.
       publishActiveNativeDraft(await saveNativeDraftCapability(capC));
       const nativeText = localStorage.getItem(POINTER_KEY);
       const nativeRecord = await storedNative("cap-C");
-      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
+      await expect(republishActiveDraftGuest(standsOn, publication)).resolves.toBeNull();
       expect(localStorage.getItem(POINTER_KEY)).toBe(nativeText);
       await expect(storedNative("cap-C")).resolves.toEqual(nativeRecord);
 
       // Over no stored pointer: refused, nothing written.
       localStorage.removeItem(POINTER_KEY);
-      expect(republishActiveDraftGuest(standsOn, publication)).toBeNull();
+      await expect(republishActiveDraftGuest(standsOn, publication)).resolves.toBeNull();
       expect(localStorage.getItem(POINTER_KEY)).toBeNull();
     });
 
@@ -1062,6 +1062,70 @@ describe("guest recovery records", () => {
               await clearActiveDraftGuest();
               expect(localStorage.getItem(POINTER_KEY)).toBeNull();
             }
+          } finally {
+            uninstallWebLocks();
+          }
+        },
+      );
+
+      /**
+       * Every exact clear, and the unparseable-text clear, whose last read of
+       * the pointer before its removal is its second: the first is its
+       * inspection of the text as unreadable.
+       */
+      const guestContentionClearLegs: Record<string, ClearLeg> = {
+        ...clearLegs,
+        "clearActiveDraftGuest (an unparseable text)": {
+          comparisonRead: 2,
+          stage: async () => {
+            localStorage.setItem(POINTER_KEY, "{not json");
+            return () => clearActiveDraftGuest();
+          },
+        },
+      };
+
+      it.each(Object.keys(guestContentionClearLegs))(
+        "an exact clear leaves a guest pointer another context's guest seat publishes during it: %s",
+        async (leg) => {
+          installFifoWebLocks();
+          try {
+            const tab = await otherTab();
+            await tab.saveDraftGuestSession(HOST2, {
+              draftToken: "token-G",
+              seatIndex: 3,
+              draftCode: "draft-G",
+              roomCode: "FGHJK",
+              displayName: "Bob",
+              capabilityId: "cap-G",
+            });
+            const recordB = await storedRecord(HOST2);
+            const events: string[] = [];
+            let publishedB: Promise<void> | null = null;
+            const publishB = () => {
+              events.push("published");
+              publishedB = tab.saveActiveDraftGuest({
+                roomCode: "FGHJK",
+                displayName: "Bob",
+                hostPeerId: HOST2,
+                capabilityId: "cap-G",
+              });
+            };
+
+            const { comparisonRead, stage } = guestContentionClearLegs[leg]!;
+            const clear = await stage();
+            const trigger = atPointerRead(comparisonRead, publishB);
+            const removals = recordPointerRemovals(events);
+            await clear();
+            await publishedB;
+            // Reach: the clear compared at that read, then reached its removal.
+            expect(trigger.fired()).toBe(1);
+            expect(removals()).toBe(1);
+            expect(events).toEqual(["published", "remove"]);
+
+            expect(storedPointer()).toMatchObject({ roomCode: "FGHJK", hostPeerId: HOST2, capabilityId: "cap-G" });
+            expect(storedPointer()).not.toHaveProperty("transport");
+            await expect(storedRecord(HOST2)).resolves.toEqual(recordB);
+            await expect(tab.loadDraftGuestSession(HOST2)).resolves.toMatchObject({ draftToken: "token-G" });
           } finally {
             uninstallWebLocks();
           }

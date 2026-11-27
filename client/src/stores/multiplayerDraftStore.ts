@@ -96,9 +96,7 @@ import {
   loadDraftGuestSession,
   loadDraftSettlementOutbox,
   loadNativeDraftCapability,
-  republishActiveDraftGuest,
   sameActiveDraftGuestCapture,
-  saveActiveDraftGuest,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
@@ -107,6 +105,7 @@ import {
   type ActiveDraftGuestMetaCapture,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
+  type ActiveDraftPointerTxn,
   type ActiveNativeDraftPointer,
   type NativeDraftCapabilityHold,
   type NativeDraftRepublication,
@@ -4690,15 +4689,21 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
 }
 
 /**
- * Publishes a guest seat's committed pointer. A new seat's welcome is an
- * explicit open and writes over whatever is stored; what it wrote becomes the
- * seat's standing pointer only when it is the pointer actually stored. Every
- * later commit writes only over the pointer the seat stands on.
+ * Publishes a guest seat's committed pointer through the capability of the
+ * recovery-pointer transaction the committing guest holds. A new seat's
+ * welcome is an explicit open and writes over whatever is stored; what it
+ * wrote becomes the seat's standing pointer only when it is the pointer
+ * actually stored. Every later commit writes only over the pointer the seat
+ * stands on.
  */
-function publishGuestRecoveryPointer(owner: InstalledGuestOwner, pointer: DraftGuestRecoveryPointer): void {
+function publishGuestRecoveryPointer(
+  owner: InstalledGuestOwner,
+  pointer: DraftGuestRecoveryPointer,
+  recovery: ActiveDraftPointerTxn,
+): void {
   if (owner.standsOn === null) {
     // A native pointer it replaces takes its record with it.
-    void saveActiveDraftGuest(pointer);
+    void recovery.publishGuest(pointer);
     const stored = inspectActiveDraftGuest();
     if (
       stored.type === "present"
@@ -4709,7 +4714,7 @@ function publishGuestRecoveryPointer(owner: InstalledGuestOwner, pointer: DraftG
     }
     return;
   }
-  const written = republishActiveDraftGuest(owner.standsOn, pointer);
+  const written = recovery.republishGuest(owner.standsOn, pointer);
   if (written !== null) owner.standsOn = written;
 }
 
@@ -4718,8 +4723,9 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn, owner: Installe
     case "recoveryCommitted":
       // This event reaches only the installed owner, so a superseded or ended
       // owner publishes nothing, and the write runs in the commit's own
-      // continuation.
-      publishGuestRecoveryPointer(owner, event.pointer);
+      // continuation, inside the recovery-pointer transaction the committing
+      // guest holds.
+      publishGuestRecoveryPointer(owner, event.pointer, event.recovery);
       break;
     case "workspaceRestored":
       restoredWorkspace = {

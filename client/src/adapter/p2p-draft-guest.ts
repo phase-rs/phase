@@ -44,9 +44,12 @@ import {
   loadDraftDeckSubmission,
   loadDraftGuestCapability,
   saveDraftDeckSubmission,
+  withActiveDraftPointer,
+  ActiveDraftPointerUnavailableError,
 } from "../services/draftPersistence";
 import type {
   ActiveDraftGuestMeta,
+  ActiveDraftPointerTxn,
   DraftGuestCapability,
   DraftGuestCapabilityOwner,
 } from "../services/draftPersistence";
@@ -63,14 +66,15 @@ import {
 
 /**
  * The public pointer to a committed private recovery record. Only the
- * lifecycle owner publishes it; the guest hands it over and never writes it.
+ * lifecycle owner publishes it; the guest hands it over, with the
+ * recovery-pointer transaction it holds, and never writes it.
  */
 export type DraftGuestRecoveryPointer = Readonly<Pick<ActiveDraftGuestMeta, "roomCode" | "displayName" | "hostPeerId">> & {
   readonly capabilityId: string;
 };
 
 export type DraftGuestEvent =
-  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer }
+  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer; recovery: ActiveDraftPointerTxn }
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
   | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
@@ -738,7 +742,7 @@ export class P2PDraftGuest {
             draftCode: msg.draftCode,
           }, "welcome", session);
           if (pointer === null || this.session !== session) return;
-          this.emit({ type: "recoveryCommitted", pointer });
+          if (!(await this.handOverRecoveryPointer(pointer, session))) return;
         } catch (err) {
           this.rejectHandshake(session, asError(err), "retire");
           this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -769,7 +773,7 @@ export class P2PDraftGuest {
               draftCode: msg.draftCode,
             }, "reconnect", session);
             if (pointer === null || this.session !== session) return;
-            this.emit({ type: "recoveryCommitted", pointer });
+            if (!(await this.handOverRecoveryPointer(pointer, session))) return;
           } catch (err) {
             this.rejectHandshake(session, asError(err), "retire");
             this.emit({ type: "error", message: "Could not save draft recovery details" });
@@ -1242,6 +1246,23 @@ export class P2PDraftGuest {
       hostPeerId: owner.hostPeerId,
       capabilityId,
     };
+  }
+
+  /**
+   * Hands the committed pointer to the lifecycle owner inside one
+   * recovery-pointer transaction this guest holds, so the owner's publication
+   * is ordered against every other tab's pointer step. A session retired while
+   * the transaction waited hands over nothing and returns false. A transaction
+   * that cannot run throws, as a refused write does.
+   */
+  private async handOverRecoveryPointer(pointer: DraftGuestRecoveryPointer, session: DraftPeerSession): Promise<boolean> {
+    const handedOver = await withActiveDraftPointer((recovery) => {
+      if (this.session !== session) return false;
+      this.emit({ type: "recoveryCommitted", pointer, recovery });
+      return true;
+    });
+    if (handedOver.status === "skipped") throw new ActiveDraftPointerUnavailableError(handedOver.reason);
+    return handedOver.value;
   }
 
   private cancelRecoveryRoute(route: GuestRecoveryRoute, reason: Error): void {

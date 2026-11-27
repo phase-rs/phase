@@ -138,6 +138,7 @@ vi.mock("../../adapter/p2p-draft-host", async (importOriginal) => {
 });
 
 vi.mock("../../adapter/p2p-draft-guest", async () => {
+  const { withActiveDraftPointer } = await import("../../services/draftPersistence");
   return {
     P2PDraftGuest: vi.fn().mockImplementation(function (
       _peer: unknown,
@@ -152,9 +153,9 @@ vi.mock("../../adapter/p2p-draft-guest", async () => {
           return () => { listener = null; };
         },
         // Like the real guest, hand the committed pointer to the lifecycle
-        // owner, which publishes it.
+        // owner, which publishes it, inside the recovery-pointer transaction.
         initialize: vi.fn(async () => {
-          listener?.({
+          await withActiveDraftPointer((recovery) => listener?.({
             type: "recoveryCommitted",
             pointer: {
               roomCode: connection?.roomCode ?? "GGGGG",
@@ -162,7 +163,8 @@ vi.mock("../../adapter/p2p-draft-guest", async () => {
               hostPeerId,
               capabilityId: `capability-${hostPeerId}`,
             },
-          });
+            recovery,
+          }));
         }),
         leave: vi.fn(async () => {}),
         dispose: vi.fn(),

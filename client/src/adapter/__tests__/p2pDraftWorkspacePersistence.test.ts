@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { loadDraftGuestCapability } from "../../services/draftPersistence";
+import type {
+  ActiveDraftPointerTxn,
+  loadDraftGuestCapability,
+  withActiveDraftPointer,
+} from "../../services/draftPersistence";
 
 const persistenceMocks = vi.hoisted(() => ({
   saveDraftHostSession: vi.fn(async () => {}),
@@ -11,6 +15,10 @@ const persistenceMocks = vi.hoisted(() => ({
   clearDraftGuestRecovery: vi.fn(async () => {}),
   // No stored record owns this token unless a test answers otherwise.
   loadDraftGuestCapability: vi.fn<typeof loadDraftGuestCapability>(async () => null),
+  // With no lock manager the real transaction runs its body at the call.
+  withActiveDraftPointer: vi.fn<typeof withActiveDraftPointer>(
+    async (body) => ({ status: "committed", value: body({} as ActiveDraftPointerTxn) }),
+  ),
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);

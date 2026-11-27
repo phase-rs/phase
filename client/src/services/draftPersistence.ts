@@ -481,12 +481,15 @@ function publishGuestBody(meta: ActiveDraftGuestPublication): Promise<void> {
 }
 
 /**
- * A guest seat's publication, written at the call outside the recovery-pointer
- * transaction, so another tab's pointer step is not ordered against it.
- * Otherwise as `ActiveDraftPointerTxn.publishGuest`.
+ * A guest seat's publication written over whatever is stored, inside the
+ * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.publishGuest`.
+ * Settles once a native record the pointer replaces is dealt with, after the
+ * transaction ends. Rejects with `ActiveDraftPointerUnavailableError`, writing
+ * nothing, when the transaction cannot run, and as the write does.
  */
-export function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
-  return publishGuestBody(meta);
+export async function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
+  const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishGuest(meta)));
+  await removal;
 }
 
 /**
@@ -509,15 +512,17 @@ function republishGuestBody(
 }
 
 /**
- * A guest seat's republication, compared and written at the call outside the
- * recovery-pointer transaction, so another tab's pointer step is not ordered
- * against it. Otherwise as `ActiveDraftPointerTxn.republishGuest`.
+ * A guest seat's republication compared and written inside the
+ * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.republishGuest`.
+ * Resolves to the capture of what it wrote, or null when it wrote nothing.
+ * Rejects with `ActiveDraftPointerUnavailableError`, writing nothing, when the
+ * transaction cannot run, and as the write does.
  */
-export function republishActiveDraftGuest(
+export async function republishActiveDraftGuest(
   standsOn: ActiveDraftGuestMetaCapture,
   meta: ActiveDraftGuestPublication,
-): ActiveDraftGuestMetaCapture | null {
-  return republishGuestBody(standsOn, meta);
+): Promise<ActiveDraftGuestMetaCapture | null> {
+  return committedPointerStep(await withActiveDraftPointer((txn) => txn.republishGuest(standsOn, meta)));
 }
 
 /** Whether two guest captures are the same stored pointer, capability included. */
