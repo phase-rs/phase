@@ -18855,17 +18855,17 @@ fn when_you_do_mandatory_parent_did_nothing(
 /// - CR 121.1: a draw puts a card into its owner's hand, which no head's verb
 ///   names (the condition verb table `ThisWayVerb` has no draw verb, and no
 ///   printed card has an "if … drawn this way" head). Lord Windgrace's "Discard
-///   a card, then draw a card. If a land card is discarded this way, …"; Mog,
-///   Moogle Warrior's "Each player who discarded a card this way draws a card.
-///   If a creature card was discarded this way, …".
-/// - The heads of one gated run all name the run's shared antecedent (every
-///   printed run: Old Rutstein, Bonehoard Dracosaur, Deathgorge Scavenger, Mog),
-///   so a gated node — even one that moved an object or created a token
-///   (CR 111.1) — is not the antecedent. "If a creature card is discarded this
-///   way, untap this creature, then transform it" (Civilized Scholar): the gate
-///   names the earlier instruction that moved the cards, not the gated effects
-///   between, so the untap must leave that instruction's ledger in place for
-///   the transform.
+///   a card, then draw a card. If a land card is discarded this way, draw an
+///   additional card."
+/// - The heads of one gated run all name the run's shared antecedent, so a
+///   gated node — even one that moved an object or created a token (CR 111.1)
+///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
+///   milled this way, create a Treasure token. If a creature card is milled
+///   this way, …": the creature gate reads the milled card, not the Treasure.
+///   "If a creature card is discarded this way, untap this creature, then
+///   transform it" (Civilized Scholar): the gate names the earlier instruction
+///   that moved the cards, not the gated effects between, so the untap must
+///   leave that instruction's ledger in place for the transform.
 fn keeps_this_way_ledger_for_following_head(ability: &ResolvedAbility) -> bool {
     let is_this_way_head = |condition: Option<&AbilityCondition>| {
         condition.is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
@@ -24148,18 +24148,11 @@ pub(crate) fn publish_player_scope_clause_results(
     // `last_zone_changed_ids`.
     // CR 608.2c: see `clause_ledger_outcome` — observed moves publish, an empty
     // moving clause clears, a nonmoving clause preserves the earlier ledger.
-    // CR 608.2c + CR 121.1: a scoped clause that is not the antecedent of the
-    // "this way" head after it (Mog, Moogle Warrior's "Each player who
-    // discarded a card this way draws a card" before "If a creature card was
-    // discarded this way") keeps the earlier instruction's ledger.
-    state.last_zone_changed_ids = if keeps_this_way_ledger_for_following_head(outer) {
-        ledger_before_clause
-    } else {
+    state.last_zone_changed_ids =
         match clause_ledger_outcome(&scoped_template.effect, scoped_events) {
             ClauseLedgerOutcome::Publish(ids) => ids,
             ClauseLedgerOutcome::Preserve => ledger_before_clause,
-        }
-    };
+        };
     if next_sub_needs_tracked_set(outer) {
         publish_tracked_set_for_resolution(
             state,

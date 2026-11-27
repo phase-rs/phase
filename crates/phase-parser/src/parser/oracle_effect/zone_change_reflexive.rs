@@ -157,11 +157,12 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
 }
 
 /// CR 608.2c: a play permission over the moved cards directly before the head
-/// is not the moving instruction; the runtime
-/// (`keeps_this_way_ledger_for_following_head`) also skips a Draw node, but
-/// this parser guard deliberately stays permission-only, so a reflexive after
-/// "then draw" remains `zone_change_reflexive_event_source` (fail-closed; see
-/// plan B3).
+/// is not the moving instruction. The runtime ledger writer
+/// (`keeps_this_way_ledger_for_following_head`) also leaves the ledger in place
+/// across a draw, but this guard deliberately skips only a play permission: a
+/// "when … this way" reflexive directly after a draw keeps its
+/// `zone_change_reflexive_event_source` gap, so it fails closed rather than
+/// being accepted without a runtime test.
 fn grants_play_permission(effect: &Effect) -> bool {
     matches!(effect, Effect::GrantCastingPermission { .. })
 }
