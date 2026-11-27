@@ -16446,12 +16446,13 @@ pub enum PlayerFilter {
     /// report this variant as a consumer or the producer never publishes and
     /// the count silently resolves to 0.
     ///
-    /// Used in the count position (`repeat_for` / `QuantityRef::PlayerCount`)
-    /// and as an `ability.player_scope`: the owner-library shuffle
-    /// (`imperative.rs`) and the "each player who discarded/sacrificed a
-    /// <filter> this way" subject
-    /// (`lower.rs::strip_tracked_set_action_this_way_clause`).
-    /// `scope_keeps_scoped_whole_hand_shuffle_local` lists it exhaustively.
+    /// USED IN THE COUNT POSITION ONLY (`repeat_for` / `QuantityRef::PlayerCount`).
+    /// Before using it as an `ability.player_scope`, see issue #6957:
+    /// `is_player_scope_local_continuation` ends on
+    /// `matches!(scope, PlayerFilter::All)`, so a scope-position variant it does
+    /// not list silently returns `false` and its continuation is detached as an
+    /// unscoped tail — the same silent-default mechanism as the publication
+    /// allowlist above, in a different predicate.
     ///
     /// Deliberately distinct from `ZoneChangedThisWay` (the unconditional,
     /// unfiltered `last_zone_changed_ids` ledger) and `PerformedActionThisWay`
