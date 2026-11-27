@@ -2,8 +2,8 @@ use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
     AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
-    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
-    TargetRef, ThisWayCause,
+    EffectKind, QuantityExpr, ResolutionCastWindow, ResolvedAbility,
+    SpellStackToGraveyardReplacement, TargetFilter, TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -92,8 +92,21 @@ fn tracked_set_cast_candidates(
     state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
+    window_bounds: Option<ResolutionCastWindow>,
 ) -> Vec<ObjectId> {
-    let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, target_filter.clone());
+    // CR 712.11c: bind membership and producer provenance before looking at
+    // spell characteristics. The cast window tests the chosen face instead.
+    let membership_filter = match target_filter {
+        TargetFilter::TrackedSetFiltered { id, caused_by, .. } if window_bounds.is_some() => {
+            TargetFilter::TrackedSetFiltered {
+                id: *id,
+                filter: Box::new(TargetFilter::Any),
+                caused_by: *caused_by,
+            }
+        }
+        filter => filter.clone(),
+    };
+    let bound = crate::game::targeting::resolve_tracked_set_sentinel(state, membership_filter);
     let (id, caused_by) = match &bound {
         TargetFilter::TrackedSet { id } => (*id, None),
         TargetFilter::TrackedSetFiltered { id, caused_by, .. } => (*id, caused_by.as_ref()),
@@ -825,6 +838,9 @@ pub fn resolve(
     // so a Bolt with a real mana cost was rejected and stayed in the
     // graveyard (issue #4943; the lingering route already froze it).
     let constraint = freeze_cast_permission_constraint(state, ability, constraint);
+    let window_bounds = driver
+        .window_bounds()
+        .filter(|_| without_paying && alt_ability_cost.is_none());
 
     // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
     // reference whose members the chain published, so it binds INTRINSICALLY
@@ -833,7 +849,7 @@ pub fn resolve(
     // target list and keeps the announcement-time targets.
     let mut target_ids: Vec<_> = match target_filter {
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
-            tracked_set_cast_candidates(state, ability, target_filter)
+            tracked_set_cast_candidates(state, ability, target_filter, window_bounds)
         }
         // CR 400.7 + CR 603.7c: a delayed cast-from-zone whose pinned referent
         // became a new object casts nothing. This `_` arm is THE single read
@@ -1123,19 +1139,17 @@ pub fn resolve(
     // `LastRevealed` selection fallbacks and the "No targets resolved" exit,
     // which emits `EffectKind::CastFromZone`) stays the single authority for
     // that case.
-    if let Some(bounds) = driver.window_bounds() {
-        if without_paying && alt_ability_cost.is_none() && !target_ids.is_empty() {
-            return open_resolution_cast_window(
-                state,
-                ability,
-                target_filter,
-                constraint.as_ref(),
-                bounds,
-                mode,
-                target_ids,
-                events,
-            );
-        }
+    if let Some(bounds) = window_bounds.filter(|_| !target_ids.is_empty()) {
+        return open_resolution_cast_window(
+            state,
+            ability,
+            target_filter,
+            constraint.as_ref(),
+            bounds,
+            mode,
+            target_ids,
+            events,
+        );
     }
 
     // CR 310.12b + CR 608.2c: "exile it, then you may cast it transformed" —
@@ -1950,10 +1964,12 @@ fn open_resolution_cast_window(
         target_filter
             .without_exile_anaphor()
             .unwrap_or(TargetFilter::Any)
-    } else if matches!(target_filter, TargetFilter::ParentTarget) {
-        TargetFilter::Any
     } else {
-        target_filter.clone()
+        match target_filter {
+            TargetFilter::ParentTarget | TargetFilter::TrackedSet { .. } => TargetFilter::Any,
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.as_ref().clone(),
+            filter => filter.clone(),
+        }
     };
     let window_filter = freeze_resolution_cast_filter(state, ability, window_filter, None);
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);

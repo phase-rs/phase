@@ -39181,6 +39181,21 @@ fn exiled_cast_target_with_type_gate(rest: &str) -> TargetFilter {
     }
 }
 
+/// CR 701.17c + CR 601.3: a bare "from among them" cast after a same-chain
+/// producer names that producer's batch, wherever its cards went, gated by the
+/// clause's card type when one is printed.
+fn batch_cast_target_with_type_gate(rest: &str, cause: ThisWayCause) -> TargetFilter {
+    let filter = match parse_cast_type_gate(rest) {
+        Some(gate) => gate,
+        None => TargetFilter::Any,
+    };
+    TargetFilter::TrackedSetFiltered {
+        id: TrackedSetId(0),
+        filter: Box::new(filter),
+        caused_by: Some(cause),
+    }
+}
+
 /// CR 608.2g + CR 611.2a: what a `from among …` batch anaphor lowers
 /// to, once its printed bound has been paired with the mechanism its grammar
 /// implies.
@@ -41347,9 +41362,16 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // Velomachus Lorehold's "an instant or sorcery spell with mana value
         // less than or equal to [its] power" enforced only the mana-value
         // ceiling and offered creatures inside it (issue #6880).
+        let target = match (&driver, ctx.bare_cast_batch_cause) {
+            (
+                FromAmongBatchLowering::Driver(CastFromZoneDriver::ResolutionWindow { .. }),
+                Some(cause),
+            ) => batch_cast_target_with_type_gate(rest, cause),
+            _ => exiled_cast_target_with_type_gate(rest),
+        };
         return Some(from_among_batch_cast_effect(
             driver,
-            exiled_cast_target_with_type_gate(rest),
+            target,
             mode,
             without_paying,
             constraint,
@@ -54983,6 +55005,24 @@ fn parse_effect_chain_ir_body(
             // absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
             chain_prior_publishers,
+            // CR 701.17c: the bare cast names the preceding mill batch, including
+            // cards that a replacement sends to another public zone.
+            bare_cast_batch_cause: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find(|clause| {
+                    classify_latest_bare_card_publisher_in_clause(&clause.parsed).is_some()
+                        || clause_ir_is_exile_producer(clause)
+                })
+                .and_then(|clause| match &clause.parsed.effect {
+                    Effect::Mill {
+                        destination: Zone::Graveyard,
+                        position: LibraryPosition::Top,
+                        ..
+                    } if clause.parsed.sub_ability.is_none() => Some(ThisWayCause::Milled),
+                    _ => None,
+                }),
             chain_prior_self_library_peek: builder
                 .clauses()
                 .iter()

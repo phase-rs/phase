@@ -111003,3 +111003,110 @@ fn source_owner_shuffle_preserves_blink_investigate() {
             .any(|node| matches!(node.effect.as_ref(), Effect::Investigate)));
     }
 }
+
+fn only_cast_from_zone(parsed: &crate::parser::oracle::ParsedAbilities) -> &Effect {
+    let mut casts = parsed
+        .abilities
+        .iter()
+        .chain(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref()),
+        )
+        .flat_map(collect_chain_effects)
+        .filter(|effect| matches!(effect, Effect::CastFromZone { .. }));
+    let cast = casts
+        .next()
+        .expect("expected a CastFromZone in the parsed card");
+    assert!(casts.next().is_none(), "expected just one CastFromZone");
+    cast
+}
+
+#[test]
+fn mill_cast_from_among_them_keeps_type_gate_and_cast_bounds() {
+    for (name, card_type, text, expected_constraint) in [
+        (
+            "Summons of Saruman",
+            "Sorcery",
+            "Amass Orcs X. Mill X cards. You may cast an instant or sorcery spell with mana value X or less from among them without paying its mana cost. (To amass Orcs X, put X +1/+1 counters on an Army you control. It's also an Orc. If you don't control an Army, create a 0/0 black Orc Army creature token first.)\nFlashback—{3}{U}{R}, Exile X cards from your graveyard.",
+            Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".to_owned() },
+                },
+            }),
+        ),
+        (
+            "Jace's Mindseeker",
+            "Creature",
+            "Flying\nWhen this creature enters, target opponent mills five cards. You may cast an instant or sorcery spell from among them without paying its mana cost.",
+            None,
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[card_type.to_owned()], &[]);
+        let cast = only_cast_from_zone(&parsed);
+        let Effect::CastFromZone {
+            target: TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter,
+                caused_by: Some(ThisWayCause::Milled),
+            },
+            constraint,
+            driver: CastFromZoneDriver::ResolutionWindow { bounds },
+            mode: Cast,
+            without_paying_mana_cost: true,
+            ..
+        } = cast else {
+            panic!("{name}: unexpected cast effect {cast:?}");
+        };
+        assert_eq!(
+            **filter,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+                TypeFilter::Instant,
+                TypeFilter::Sorcery,
+            ]))),
+            "{name}",
+        );
+        assert_eq!(bounds.max_casts, Some(1), "{name}");
+        assert_eq!(bounds.pool, crate::types::ability::ResolutionCastPool::CurrentResolution, "{name}");
+        assert_eq!(*constraint, expected_constraint, "{name}");
+    }
+}
+
+#[test]
+fn mill_cast_from_among_them_preserves_explicit_graveyard_casts() {
+    for (name, card_type, text) in [
+        (
+            "Diviner of Mist",
+            "Creature",
+            "Flying\nWhenever this creature attacks, mill four cards. You may cast an instant or sorcery spell from your graveyard with mana value 4 or less without paying its mana cost. If that spell would be put into your graveyard, exile it instead.",
+        ),
+        (
+            "Sorcerous Squall",
+            "Sorcery",
+            "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nTarget opponent mills nine cards, then you may cast an instant or sorcery spell from that player's graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[card_type.to_owned()], &[]);
+        let Effect::CastFromZone { target, .. } = only_cast_from_zone(&parsed) else {
+            unreachable!()
+        };
+        assert_eq!(target.extract_in_zone(), Some(Zone::Graveyard), "{name}");
+    }
+}
+
+#[test]
+fn mill_cast_from_among_them_preserves_linked_hideaway_cast() {
+    let parsed = parse_oracle_text(
+        "Hideaway 5 (When this enchantment enters, look at the top five cards of your library, exile one face down, then put the rest on the bottom in a random order.)\nAt the beginning of your upkeep, you may mill three cards. Then if there are twenty or more cards in your graveyard, you may play the exiled card without paying its mana cost.",
+        "Cemetery Tampering",
+        &["Hideaway".to_owned()],
+        &["Enchantment".to_owned()],
+        &[],
+    );
+    let Effect::CastFromZone { target, .. } = only_cast_from_zone(&parsed) else {
+        unreachable!()
+    };
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+}

@@ -1615,7 +1615,6 @@ fn from_among_them_cast_retains_the_instant_or_sorcery_gate() {
 
     for (name, oracle, types) in [
         ("Velomachus Lorehold", VELOMACHUS, &["Creature"][..]),
-        ("Jace's Mindseeker", JACE, &["Creature"][..]),
         ("Talent of the Telepath", TALENT, &["Sorcery"][..]),
     ] {
         let target = cast_target_of(oracle, name, types);
