@@ -474,6 +474,7 @@ fn ability_activation_scope_rank(value: AbilityActivationScope) -> u8 {
     match value {
         AbilityActivationScope::OfSpellType => 0,
         AbilityActivationScope::Any => 1,
+        AbilityActivationScope::AnyNonSpellPayment => 2,
     }
 }
 

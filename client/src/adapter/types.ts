@@ -1205,7 +1205,7 @@ export type KeywordKind = string;
 
 export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
 
-export type AbilityActivationScope = "OfSpellType" | "Any";
+export type AbilityActivationScope = "OfSpellType" | "Any" | "AnyNonSpellPayment";
 
 export type AbilityTag = {
   type:

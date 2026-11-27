@@ -309,6 +309,7 @@ pub enum InteractionManaComparator {
 pub enum InteractionManaAbilityActivationScope {
     OfSpellType,
     Any,
+    AnyNonSpellPayment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

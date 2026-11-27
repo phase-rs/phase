@@ -45,7 +45,7 @@ export type InteractionManaColor = "white" | "blue" | "black" | "red" | "green";
 
 export type InteractionManaComparator = "greaterThan" | "lessThan" | "atLeast" | "atMost" | "equal" | "notEqual";
 
-export type InteractionManaAbilityActivationScope = "ofSpellType" | "any";
+export type InteractionManaAbilityActivationScope = "ofSpellType" | "any" | "anyNonSpellPayment";
 
 export type InteractionManaZoneSpendPolarity = "from" | "notFrom";
 

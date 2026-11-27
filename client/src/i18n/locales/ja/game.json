@@ -1323,6 +1323,7 @@
       "onlyForSpellColor": "{{color}}の呪文にのみ使用可能。",
       "onlyForSpellFromZone": "呪文の使用条件：{{polarity}} {{zone}}。",
       "cannotCastSpellFromZone": "{{zone}}から呪文を唱えるためには使用できません。",
+      "cannotCastSpellsOutsideType": "{{spellType}}でない呪文を唱えるためには使用できません。",
       "onlyForFaceDownSpell": "裏向きの呪文にのみ使用可能。",
       "onlyForAny": "次のいずれかの用途にのみ使用可能：{{restrictions}}",
       "onlyForSpecialAction": "特別な処理「{{action}}」にのみ使用可能。",

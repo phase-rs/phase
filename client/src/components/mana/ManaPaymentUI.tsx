@@ -810,7 +810,7 @@ function ManaChip({ group, count, selected = false, onActivate }: ManaChipProps)
   // Combine the restriction/grant detail with the source name so neither is
   // hidden when both exist (the inline source label may be truncated).
   const tooltip =
-    [manaGroupTooltip((k) => t(k), group), group.sourceName]
+    [manaGroupTooltip((key, options) => t(key, options), group), group.sourceName]
       .filter(Boolean)
       .join(" — ") || undefined;
 

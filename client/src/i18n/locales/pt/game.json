@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Apenas para mágicas da cor {{color}}.",
       "onlyForSpellFromZone": "Apenas para mágicas {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Não pode ser gasto para conjurar mágicas de {{zone}}.",
+      "cannotCastSpellsOutsideType": "Não pode ser gasto para conjurar mágicas que não sejam do tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Apenas para mágicas viradas para baixo.",
       "onlyForAny": "Apenas para um destes usos: {{restrictions}}",
       "onlyForSpecialAction": "Apenas para a ação especial {{action}}.",
