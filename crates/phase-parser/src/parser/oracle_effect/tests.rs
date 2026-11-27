@@ -110896,3 +110896,110 @@ fn delayed_player_damage_forth_head_accepts_an_independent_body() {
     assert!(monarch.sub_ability.is_none());
     assert!(face.abilities[0].sub_ability.is_none());
 }
+
+// SHAPE: a complete source-owner body declares no target and assigns both
+// instructions to the source's owner.
+fn assert_source_owner_shuffle_shape(trigger: &crate::types::ability::TriggerDefinition) {
+    let movement = trigger.execute.as_deref().expect("trigger body");
+    assert!(extract_target_filter_from_effect(movement.effect.as_ref()).is_none());
+    crate::parser::test_support::assert_no_unimplemented(movement);
+    assert!(
+        matches!(
+            movement.effect.as_ref(),
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                destination: Zone::Library,
+                actor: crate::types::ability::LibraryInstructionActor::Player {
+                    player: TargetFilter::Owner,
+                },
+                owner_library: true,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }
+        ),
+        "{:?}",
+        movement.effect
+    );
+    let shuffle = movement.sub_ability.as_deref().expect("terminal shuffle");
+    assert!(extract_target_filter_from_effect(shuffle.effect.as_ref()).is_none());
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::Owner
+        }
+    );
+    assert!(shuffle.sub_ability.is_none());
+}
+
+#[test]
+fn lembas_source_owner_shuffle_shape() {
+    let parsed = parse_oracle_text(
+        "When this artifact enters, scry 1, then draw a card.\n{2}, {T}, Sacrifice this artifact: You gain 3 life.\nWhen this artifact is put into a graveyard from the battlefield, its owner shuffles it into their library.",
+        "Lembas",
+        &[],
+        &["Artifact".into()],
+        &["Food".into()],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    assert!(parsed.triggers.iter().any(|trigger| {
+        trigger.destination == Some(Zone::Battlefield)
+            && trigger
+                .execute
+                .as_ref()
+                .is_some_and(|ability| matches!(ability.effect.as_ref(), Effect::Scry { .. }))
+    }));
+    assert!(parsed
+        .abilities
+        .iter()
+        .any(|ability| { ability.kind == AbilityKind::Activated && ability.cost.is_some() }));
+    let departure = parsed
+        .triggers
+        .iter()
+        .find(|trigger| {
+            trigger.origin == Some(Zone::Battlefield)
+                && trigger.destination == Some(Zone::Graveyard)
+        })
+        .expect("Lembas departure trigger");
+    assert_source_owner_shuffle_shape(departure);
+}
+
+#[test]
+fn inferno_hellion_source_owner_shuffle_shape() {
+    let parsed = parse_oracle_text(
+        "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nAt the beginning of each end step, if this creature attacked or blocked this turn, its owner shuffles it into their library.",
+        "Inferno Hellion",
+        &[],
+        &["Creature".into()],
+        &["Hellion".into()],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one trigger: {:?}", parsed.triggers);
+    };
+    assert_eq!(trigger.phase, Some(crate::types::phase::Phase::End));
+    assert_source_owner_shuffle_shape(trigger);
+}
+
+// SHAPE: Blink's Saga chapter still reaches its follow-up instruction.
+#[test]
+fn source_owner_shuffle_preserves_blink_investigate() {
+    let parsed = parse_oracle_text(
+        "I, III — Choose target creature. Its owner shuffles it into their library, then investigates. (They create a Clue token.)",
+        "Blink",
+        &[],
+        &["Enchantment".into()],
+        &["Saga".into()],
+    );
+    assert_eq!(parsed.triggers.len(), 2);
+    for trigger in parsed.triggers {
+        let body = trigger.execute.as_deref().expect("chapter body");
+        assert!(matches!(body.effect.as_ref(), Effect::TargetOnly { .. }));
+        let mut nodes = Vec::new();
+        collect_test_tree(body, false, &mut nodes);
+        assert!(nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Shuffle { .. })));
+        assert!(nodes
+            .iter()
+            .any(|node| matches!(node.effect.as_ref(), Effect::Investigate)));
+    }
+}
