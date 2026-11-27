@@ -12,6 +12,160 @@ const REFUSED_NAMED_SEARCH: &str = "Search your library for an Equipment card an
 const REPRESENTED_FARMER_SEARCH: &str = "Search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.";
 const ORESKOS_SEARCH: &str = "Search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.";
 const PRISMATIC_SEARCH: &str = "Search your library for up to X basic land cards, where X is the number of colors among permanents you control. Reveal those cards, put them into your hand, then shuffle.";
+const HELLKITE_BODY: &str = "Destroy target nonbasic land an opponent controls. Its controller searches their library for a basic land card, puts it onto the battlefield tapped with a stun counter on it, then shuffles.";
+
+#[test]
+fn magmatic_hellkite_has_one_tapped_stun_delivery_before_shuffle() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::zones::EtbTapState;
+
+    let oracle = format!(
+        "Flying\nWhen this creature enters, destroy{} (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+        HELLKITE_BODY.strip_prefix("Destroy").unwrap()
+    );
+    let parsed = parse_card(&oracle, "Magmatic Hellkite", &["Flying"], &["Creature"]);
+    assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected a single ETB trigger");
+    };
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    let destroy = trigger.execute.as_deref().expect("destroy instruction");
+    assert!(matches!(
+        destroy.effect.as_ref(),
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter { type_filters, controller: Some(ControllerRef::Opponent), properties }),
+            cant_regenerate: false,
+        } if type_filters.as_slice() == [TypeFilter::Land]
+            && properties.as_slice() == [FilterProp::NotSupertype { value: Supertype::Basic }]
+    ));
+    let search = destroy
+        .sub_ability
+        .as_deref()
+        .expect("land controller's search");
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary {
+            target_player: Some(TargetFilter::ParentTargetController),
+            reveal: false,
+            ..
+        }
+    ));
+    let delivery = search.sub_ability.as_deref().expect("found-card delivery");
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTarget },
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Any,
+            enter_tapped,
+            enter_with_counters,
+            enters_under: None,
+            ..
+        } if *enter_tapped == EtbTapState::from_legacy_bool(true)
+            && enter_with_counters.as_slice() == [(CounterType::Stun, QuantityExpr::Fixed { value: 1 })]
+    ));
+    assert!(!delivery.forward_result);
+    let shuffle = delivery
+        .sub_ability
+        .as_deref()
+        .expect("independent shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(!shuffle.forward_result);
+    assert!(shuffle.sub_ability.is_none());
+}
+
+#[test]
+fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery() {
+    let parse = |body: &str| {
+        parse_effect_chain_ir_ability_root(body, AbilityKind::Spell, &mut ParseContext::default())
+    };
+    let ir = parse(HELLKITE_BODY);
+    let [destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!("destroy, search, put, shuffle: {:?}", ir.clauses);
+    };
+    assert!(
+        matches!(chain_declared_slot_registry(std::slice::from_ref(destroy)),
+            DeclaredSlotRegistry::Known(slots) if matches!(slots.as_slice(), [DeclaredSlotEntry { index: Some(0), .. }])
+        )
+    );
+    assert_eq!(search.id, ClauseId(destroy.id.0 + 1));
+    assert!(matches!(
+        search.disposition.intrinsic(),
+        Some(ContinuationAst::SearchDestination {
+            entry_counter: Some(CounterType::Stun),
+            ..
+        })
+    ));
+    let span = put.source.span();
+    assert_eq!(
+        &HELLKITE_BODY[span.start_byte..span.end_byte],
+        "puts it onto the battlefield tapped with a stun counter on it"
+    );
+    assert_eq!(put.boundary, Some(ClauseBoundary::Then));
+    assert!(matches!(
+        put.disposition.followup(),
+        Some(ContinuationAst::SearchResultClauseHandled)
+    ));
+    assert_eq!(
+        shuffle.incoming_link,
+        Some(SubAbilityLink::SequentialSibling)
+    );
+
+    // Synthetic variants of Hellkite isolate actor, adjacency, and the put shell.
+    for (tail, shuffle_actor, draw, guarded) in [
+        ("puts it onto the battlefield tapped with a stun counter on it, then you shuffle.", TargetFilter::Controller, false, false),
+        ("puts it onto the battlefield tapped with a stun counter on it, then draws a card, then shuffles.", TargetFilter::ParentTargetController, true, false),
+        ("puts it onto the battlefield tapped with a stun counter on it if it's your turn, then shuffles.", TargetFilter::ParentTargetController, false, true),
+    ] {
+        let body = format!("Destroy target nonbasic land an opponent controls. Its controller searches their library for a basic land card, {tail}");
+        let ir = parse(&body);
+        let [_, search, put, rest @ ..] = ir.clauses.as_slice() else {
+            panic!("search and put must reach the gate: {:?}", ir.clauses);
+        };
+        assert!(matches!(search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { destination: Zone::Battlefield, entry_counter: None, .. })
+        ));
+        assert!(matches!(put.parsed.effect, Effect::ChangeZone { destination: Zone::Battlefield, .. }));
+        assert!(matches!(put.disposition, ClauseDisposition::Emit { followup: None, intrinsic: None }));
+        if guarded {
+            assert!(put.condition.is_some() || put.parsed.condition.is_some());
+        }
+        let shuffle = rest.last().expect("printed shuffle must reach ordinary lowering");
+        assert_eq!(shuffle.parsed.effect, Effect::Shuffle { target: shuffle_actor });
+        assert!(matches!(shuffle.disposition, ClauseDisposition::Emit { followup: None, intrinsic: None }));
+        assert_eq!(rest.len(), if draw { 2 } else { 1 });
+        if draw {
+            assert!(matches!(rest[0].parsed.effect, Effect::Draw { .. }));
+        }
+        for (previous, clause) in ir.clauses.iter().zip(ir.clauses.iter().skip(1)) {
+            assert!(clause.incoming_link.is_none());
+            assert_eq!(clause.incoming_link(previous.boundary), sub_link_after_boundary(previous.boundary));
+        }
+        let lowered = lower_effect_chain_ir(&ir);
+        let mut lowered_followers =
+            std::iter::successors(Some(&lowered), |def| def.sub_ability.as_deref()).skip(3);
+        for (previous, expected) in ir.clauses[1..].iter().zip(&ir.clauses[2..]) {
+            let actual = lowered_followers.next().expect("ordinary follower lowers");
+            assert_eq!(actual.effect.as_ref(), &expected.parsed.effect);
+            assert_eq!(actual.sub_link, sub_link_after_boundary(previous.boundary));
+        }
+        assert!(lowered_followers.next().is_none());
+    }
+}
 
 // Chapter IV of The Hunger Tide Rises reads “Sacrifice any number of creatures.
 // Search your library and/or graveyard for a creature card with mana value
@@ -1393,6 +1547,8 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
             enters_under: Default::default(),
             reveal: false,
             attach_host: None,
+            actor: Default::default(),
+            entry_counter: None,
         })
     };
     folded

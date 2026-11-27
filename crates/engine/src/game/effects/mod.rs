@@ -28037,6 +28037,125 @@ fn try_resolve_simultaneous_token_fan_out(
     SimultaneousTokenOutcome::Done
 }
 
+fn plain_search_delivery_node(node: &ResolvedAbility) -> bool {
+    !node.optional
+        && !node.optional_targeting
+        && !node.forward_result
+        && node.optional_for.is_none()
+        && node.optional_player.is_none()
+        && node.condition.is_none()
+        && node.else_ability.is_none()
+        && node.duration.is_none()
+        && node.repeat_for.is_none()
+        && node.player_scope.is_none()
+        && node.multi_target.is_none()
+        && node.target_constraints.is_empty()
+        && node.unless_pay.is_none()
+}
+
+fn has_inherited_search_delivery(delivery: &ResolvedAbility) -> bool {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::zones::EtbTapState;
+
+    plain_search_delivery_node(delivery)
+        && matches!(
+            &delivery.effect,
+            Effect::ChangeZone {
+                actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTarget },
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                library_shuffle: LibraryShuffleMode::PerObject,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters,
+                conditional_enter_with_counters,
+                face_down_profile: None,
+                enters_modified_if: None,
+            } if matches!(enter_with_counters.as_slice(), [(_, QuantityExpr::Fixed { value: 1 })])
+                && conditional_enter_with_counters.is_empty()
+        )
+        && delivery.sub_ability.as_deref().is_some_and(|shuffle| {
+            plain_search_delivery_node(shuffle)
+                && shuffle.sub_link == SubAbilityLink::SequentialSibling
+                && matches!(
+                    shuffle.effect,
+                    Effect::Shuffle {
+                        target: TargetFilter::ParentTargetController
+                    }
+                )
+        })
+}
+
+// CR 701.23a + CR 110.2a + CR 701.24a: the found cards belong to the
+// delivery. The named player performs both the delivery and the shuffle.
+pub(crate) fn bind_inherited_search_delivery(
+    delivery: &mut ResolvedAbility,
+    searcher: PlayerId,
+    chosen: &[ObjectId],
+) -> bool {
+    if !has_inherited_search_delivery(delivery) {
+        return false;
+    }
+    let player = TargetRef::Player(searcher);
+    delivery.set_unpinned_targets(
+        chosen
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .chain(std::iter::once(player.clone()))
+            .collect(),
+    );
+    delivery
+        .sub_ability
+        .as_deref_mut()
+        .expect("validated shuffle")
+        .set_unpinned_targets(vec![player]);
+    true
+}
+
+fn synchronous_search_delivery_player(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<PlayerId> {
+    use crate::types::ability::SearchSelectionConstraint;
+
+    if !plain_search_delivery_node(ability)
+        || ability.has_authoritative_empty_binding()
+        || !matches!(
+            &ability.effect,
+            Effect::SearchLibrary {
+                source_zones,
+                filter: TargetFilter::Typed(_),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+            } if source_zones.as_slice() == [Zone::Library]
+        )
+        || !ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(has_inherited_search_delivery)
+    {
+        return None;
+    }
+    ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Player(player) => Some(*player),
+            TargetRef::Object(_) => None,
+        })
+        .or_else(|| crate::game::ability_utils::parent_target_controller(ability, state))
+        .or(Some(ability.controller))
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -30184,6 +30303,7 @@ fn resolve_chain_body(
         begin_seat_created_tokens(created, seat);
     }
     let mut immediate_effect_result = None;
+    let mut synchronous_searcher = None;
     let mut damage_delivery_owner = None;
     let mut damage_records = None;
     // CR 610.3a / CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
@@ -30654,6 +30774,12 @@ fn resolve_chain_body(
                         &mut state.current_step_targets_hydrated_from_event_context,
                         hydrated_only_for_step,
                     );
+                    // CR 101.2 + CR 608.2c: capture the actor before dispatch.
+                    // A prohibited search completes without a search action.
+                    let searcher = (iterations == 1 && !head_was_swapped)
+                        .then(|| synchronous_search_delivery_player(state, iter_effective))
+                        .flatten();
+                    let dispatch_start = events.len();
                     let mut resolve_step = |state: &mut GameState| {
                         if ability.repeat_for.is_some() {
                             with_iteration_return_result_occurrence(
@@ -30693,6 +30819,17 @@ fn resolve_chain_body(
                             tail_ownership = step.tail;
                             if iterations == 1 {
                                 immediate_effect_result = step.result;
+                            }
+                            if !progress.is_pending()
+                                && matches!(tail_ownership, TailOwnership::Caller)
+                            {
+                                synchronous_searcher = searcher.filter(|_| {
+                                    events[dispatch_start..].iter().any(|event| {
+                                        matches!(event, GameEvent::EffectResolved {
+                                            kind: EffectKind::SearchLibrary, source_id, ..
+                                        } if *source_id == iter_effective.source_id)
+                                    })
+                                });
                             }
                         }
                         Err(error)
@@ -31656,6 +31793,11 @@ fn resolve_chain_body(
             }
             None => sub,
         };
+        let rebound_search_delivery = synchronous_searcher.and_then(|searcher| {
+            let mut delivery = sub.clone();
+            bind_inherited_search_delivery(&mut delivery, searcher, &[]).then_some(delivery)
+        });
+        let sub = rebound_search_delivery.as_ref().unwrap_or(sub);
         // CR 603.10 + CR 608.2c: the parent instruction completed; its entries are observed
         // before the next instruction can change the entrant (S-a). The boundary is the next
         // WRITTEN instruction, judged after the metadata splice: a consumed rider modifies only

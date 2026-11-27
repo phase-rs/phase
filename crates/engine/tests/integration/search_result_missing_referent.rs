@@ -1,13 +1,16 @@
+use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::zones::create_object;
-use engine::types::ability::{EffectKind, SearchSelectionConstraint};
+use engine::types::ability::{EffectKind, SearchSelectionConstraint, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
+use engine::types::counter::CounterType;
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId, TrackedSetId};
-use engine::types::mana::{ManaColor, ManaCost};
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -17,6 +20,356 @@ const VERDANT: &str = "Search your library for a basic land card and put it onto
 const BRIBERY: &str = "Search target opponent's library for a creature card and put that card onto the battlefield under your control. Then that player shuffles.";
 const ORESKOS: &str = "When this creature enters, search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.";
 const PRISMATIC: &str = "Vivid — When this enchantment enters, search your library for up to X basic land cards, where X is the number of colors among permanents you control. Reveal those cards, put them into your hand, then shuffle.\nYou may play an additional land on each of your turns.";
+const HELLKITE: &str = "Flying\nWhen this creature enters, destroy target nonbasic land an opponent controls. Its controller searches their library for a basic land card, puts it onto the battlefield tapped with a stun counter on it, then shuffles. (If a permanent with a stun counter would become untapped, remove one from it instead.)";
+const ANNEX: &str = "Enchant land (Target a land as you cast this. This card enters attached to that land.)\nYou control enchanted land.";
+const P2: PlayerId = PlayerId(2);
+
+fn add_hellkite(scenario: &mut GameScenario) -> ObjectId {
+    // A forced target would bypass TriggerTargetSelection.
+    scenario.add_land(P1, "Terramorphic Expanse");
+    scenario
+        .add_creature_to_hand_from_oracle(P0, "Magmatic Hellkite", 4, 4, HELLKITE)
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+fn attach_annex(runner: &mut GameRunner, aura: ObjectId, land: ObjectId) {
+    let state = runner.state_mut();
+    state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Object(land));
+    state.objects.get_mut(&land).unwrap().attachments.push(aura);
+    state.layers_dirty.mark_full();
+    engine::game::layers::flush_layers(state);
+}
+
+fn announce_hellkite_target(runner: &mut GameRunner, source: ObjectId, land: ObjectId) {
+    runner.cast(source).commit();
+    pass_hellkite_priority(runner);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    let WaitingFor::TriggerTargetSelection {
+        player: P0,
+        target_slots,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Hellkite needs an announced target: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let [slot] = target_slots.as_slice() else {
+        panic!("Hellkite announces exactly one target");
+    };
+    let target = TargetRef::Object(land);
+    assert!(slot.legal_targets.contains(&target));
+    assert!(slot.legal_targets.len() > 1);
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(target.clone()),
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    let ability = runner
+        .state()
+        .stack
+        .last()
+        .and_then(|entry| entry.ability())
+        .unwrap();
+    assert_eq!(ability.targets.as_slice(), [target]);
+}
+
+fn pass_hellkite_priority(runner: &mut GameRunner) -> Vec<GameEvent> {
+    let mut events = Vec::new();
+    for _ in 0..runner.state().players.len() {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    events
+}
+
+fn assert_hellkite_search(runner: &GameRunner, candidate: ObjectId) {
+    let WaitingFor::SearchChoice {
+        player: P2,
+        library_owner: Some(P2),
+        cards,
+        count: 1,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the land's controller searches their library: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards.as_slice(), [candidate]);
+}
+
+fn hellkite_library_actions(events: &[GameEvent]) -> Vec<(usize, PlayerId, PlayerActionKind)> {
+    events.iter().enumerate().filter_map(|(index, event)| match event {
+        GameEvent::PlayerPerformedAction {
+            player_id,
+            action: action @ (PlayerActionKind::SearchedLibrary | PlayerActionKind::ShuffledLibrary),
+            ..
+        } => Some((index, *player_id, *action)),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn hellkite_delivers_the_land_controllers_find_once_and_shuffles_after_delivery() {
+    for choose in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 241);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = add_hellkite(&mut scenario);
+        let victim = scenario
+            .add_land_from_oracle(P1, "Darksteel Citadel", "Indestructible\n{T}: Add {C}.")
+            .id();
+        let annex = scenario
+            .add_enchantment_from_oracle(P2, "Annex", ANNEX)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let found = scenario.add_basic_land(P2, ManaColor::Green);
+        let other = scenario.add_basic_land(P1, ManaColor::Blue);
+        let mut runner = scenario.build();
+        move_test_basics_to_library(&mut runner, &[found, other]);
+        attach_annex(&mut runner, annex, victim);
+        assert_eq!(runner.state().objects[&victim].owner, P1);
+        assert_eq!(runner.state().objects[&victim].controller, P2);
+        announce_hellkite_target(&mut runner, source, victim);
+        let mut events = pass_hellkite_priority(&mut runner);
+        assert_hellkite_search(&runner, found);
+        let choice_start = events.len();
+        events.extend(
+            runner
+                .act(GameAction::SelectCards {
+                    cards: if choose { vec![found] } else { vec![] },
+                })
+                .unwrap()
+                .events,
+        );
+        assert_complete(&runner);
+        assert!(runner.state().pending_library_search_delivery.is_none());
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+        let actions = hellkite_library_actions(&events);
+        let [(_, P2, PlayerActionKind::SearchedLibrary), (shuffle, P2, PlayerActionKind::ShuffledLibrary)] =
+            actions.as_slice()
+        else {
+            panic!("only P2 searches and then shuffles: {actions:?}");
+        };
+        let deliveries: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Library),
+                    to: Zone::Battlefield,
+                    ..
+                } => Some((index, *object_id)),
+                _ => None,
+            })
+            .collect();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardsRevealed { .. })));
+        if choose {
+            let [(arrival, delivered)] = deliveries.as_slice() else {
+                panic!("expected exactly one delivery: {deliveries:?}");
+            };
+            assert_eq!(*delivered, found);
+            assert!(*arrival < *shuffle);
+            let card = &runner.state().objects[&found];
+            // CR 110.2a: The player instructed to put the land onto the battlefield controls it.
+            assert_eq!(card.controller, P2);
+            assert_eq!(
+                (card.tapped, card.counters.get(&CounterType::Stun).copied()),
+                (true, Some(1)),
+                "tapped entry and exactly one stun counter",
+            );
+            assert_eq!(events[choice_start..*shuffle].iter().filter(|event| matches!(
+                event,
+                GameEvent::EffectResolved { kind: EffectKind::ChangeZone, source_id, .. } if *source_id == source
+            )).count(), 1);
+        } else {
+            assert!(deliveries.is_empty());
+            assert_eq!(runner.state().objects[&found].zone, Zone::Library);
+        }
+    }
+}
+
+#[test]
+fn hellkite_shuffles_the_land_controllers_library_after_empty_or_prohibited_search() {
+    for prohibited in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 242);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = add_hellkite(&mut scenario);
+        let victim = scenario
+            .add_land_from_oracle(P2, "Darksteel Citadel", "Indestructible\n{T}: Add {C}.")
+            .id();
+        let other = scenario.add_basic_land(P1, ManaColor::Blue);
+        let mut p2_library = vec![
+            scenario.add_land_to_library_top(P2, "Evolving Wilds").id(),
+            scenario
+                .add_land_to_library_top(P2, "Terramorphic Expanse")
+                .id(),
+        ];
+        let candidate = prohibited.then(|| {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Mindlock Orb",
+                "Players can't search libraries.",
+            );
+            scenario.add_basic_land(P2, ManaColor::Green)
+        });
+        let mut runner = scenario.build();
+        move_test_basics_to_library(&mut runner, &[other]);
+        if let Some(candidate) = candidate {
+            move_test_basics_to_library(&mut runner, &[candidate]);
+            p2_library.push(candidate);
+        }
+        announce_hellkite_target(&mut runner, source, victim);
+        let events = pass_hellkite_priority(&mut runner);
+        assert_complete(&runner);
+        assert!(runner.state().pending_library_search_delivery.is_none());
+        assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+        assert!(p2_library
+            .iter()
+            .all(|card| runner.state().library_of(P2).contains(card)));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Library),
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(event,
+            GameEvent::EffectResolved { kind: EffectKind::SearchLibrary, source_id, .. } if *source_id == source
+        )));
+        let actions: Vec<_> = hellkite_library_actions(&events)
+            .into_iter()
+            .map(|(_, player, action)| (player, action))
+            .collect();
+        let mut expected = Vec::new();
+        if !prohibited {
+            expected.push((P2, PlayerActionKind::SearchedLibrary));
+        }
+        expected.push((P2, PlayerActionKind::ShuffledLibrary));
+        assert_eq!(actions, expected);
+    }
+}
+
+#[test]
+fn hellkite_uses_the_destroyed_lands_controller_and_skips_an_illegal_target() {
+    for illegal in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 243);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = add_hellkite(&mut scenario);
+        let victim = scenario.add_land_from_oracle(P1, "Evolving Wilds", "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.").id();
+        let annex = scenario
+            .add_enchantment_from_oracle(P2, "Annex", ANNEX)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let response = illegal.then(|| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Boomerang",
+                    true,
+                    "Return target permanent to its owner's hand.",
+                )
+                .with_mana_cost(ManaCost::zero())
+                .id()
+        });
+        let mut runner = scenario.build();
+        attach_annex(&mut runner, annex, victim);
+        assert_eq!(runner.state().objects[&victim].controller, P2);
+        announce_hellkite_target(&mut runner, source, victim);
+        if let Some(response) = response {
+            runner.cast(response).target_object(victim).commit();
+            assert_eq!(runner.state().stack.len(), 2);
+            pass_hellkite_priority(&mut runner);
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Hand);
+            assert_eq!(runner.state().stack.len(), 1);
+        }
+        let events = pass_hellkite_priority(&mut runner);
+        assert_complete(&runner);
+        let actions = hellkite_library_actions(&events);
+        if illegal {
+            assert!(actions.is_empty());
+            assert!(!events.iter().any(|event| matches!(event,
+                GameEvent::EffectResolved { kind: EffectKind::SearchLibrary | EffectKind::ChangeZone, source_id, .. } if *source_id == source
+            )));
+        } else {
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+            assert!(runner.state().graveyard_of(P1).contains(&victim));
+            let departure = events.iter().position(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. } if *object_id == victim
+            )).expect("targeted land was destroyed");
+            let [(search, P2, PlayerActionKind::SearchedLibrary), (shuffle, P2, PlayerActionKind::ShuffledLibrary)] =
+                actions.as_slice()
+            else {
+                panic!("the departed land's controller searches and shuffles: {actions:?}");
+            };
+            assert!(departure < *search && search < shuffle);
+        }
+    }
+}
+
+#[test]
+fn hellkite_empty_search_does_not_deliver_the_colossus_that_replaced_its_destruction() {
+    let mut scenario = GameScenario::new_n_player(3, 244);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let source = add_hellkite(&mut scenario);
+    scenario.add_creature_from_oracle(P2, "Ashaya, Soul of the Wild", 0, 0,
+        "Ashaya's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types. (They're still affected by summoning sickness.)");
+    let colossus = scenario.add_creature(P2, "Darksteel Colossus", 11, 11)
+        .from_oracle_text_with_keywords(&["Trample", "Indestructible"],
+        "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Damage and effects that say \"destroy\" don't destroy this creature.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.").id();
+    let spear = scenario.add_artifact_from_oracle(P0, "Shadowspear",
+        "Equipped creature gets +1/+1 and has trample and lifelink.\n{1}: Permanents your opponents control lose hexproof and indestructible until end of turn.\nEquip {2}").id();
+    let mut runner = scenario.build();
+    assert!(runner.state().objects[&colossus].has_keyword(&Keyword::Indestructible));
+    runner.activate(spear, 0).resolve();
+    assert_complete(&runner);
+    assert!(!runner.state().objects[&colossus].has_keyword(&Keyword::Indestructible));
+    assert!(runner.state().objects[&colossus]
+        .card_types
+        .core_types
+        .contains(&CoreType::Land));
+    announce_hellkite_target(&mut runner, source, colossus);
+    let events = pass_hellkite_priority(&mut runner);
+    assert_complete(&runner);
+    let replacement = events.iter().position(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. } if *object_id == colossus
+    )).expect("Colossus replaces its destruction by moving to its owner's library");
+    let actions = hellkite_library_actions(&events);
+    let search = actions
+        .iter()
+        .position(|&(_, player, action)| {
+            player == P2 && action == PlayerActionKind::SearchedLibrary
+        })
+        .expect("P2 searches after Colossus enters the library");
+    let (search_event, _, _) = actions[search];
+    assert!(replacement < search_event);
+    assert!(
+        runner.state().library_of(P2).contains(&colossus),
+        "the empty search must leave the unselected Colossus in P2's library",
+    );
+    assert!(matches!(
+        &actions[search + 1..],
+        [(_, P2, PlayerActionKind::ShuffledLibrary)]
+    ));
+    assert!(!events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Battlefield, .. } if *object_id == colossus
+    )));
+}
 
 #[test]
 fn oreskos_explorer_delivers_selected_plains_once() {

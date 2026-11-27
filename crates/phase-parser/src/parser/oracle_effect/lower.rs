@@ -15191,7 +15191,7 @@ pub(crate) fn parse_with_counters_suffix_spanned(
 /// It is `many0` over an explicit first element rather than `separated_list1`
 /// because the two positions no longer take the same parser: only a NON-LEADING
 /// element may elide its count.
-fn parse_enter_counters_clause_body(
+pub(super) fn parse_enter_counters_clause_body(
     input: &str,
 ) -> OracleResult<'_, Vec<(CounterType, QuantityExpr)>> {
     let (rest, _) = tag("with ").parse(input)?;
