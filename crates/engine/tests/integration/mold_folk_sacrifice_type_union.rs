@@ -948,7 +948,7 @@ fn an_independent_exile_cast_and_the_sacrifice_are_separate_choices() {
 /// CR 116.2f: a real non-mana activation triggers Burning-Tree Shaman, but Suspend does not.
 #[test]
 fn suspend_generates_no_activation_event_or_history() {
-    use engine::types::events::GameEvent;
+    use engine::types::events::{ActivatedAbilityKind, GameEvent};
 
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
@@ -974,10 +974,13 @@ fn suspend_generates_no_activation_event_or_history() {
     assert!(r.state().objects[&spare].counters.is_empty());
     assert!(!r.state().objects[&card].face_down);
     assert!(r.state().abilities_activated_this_turn_by_player.is_empty());
-    assert!(!finished
-        .events
-        .iter()
-        .any(|event| matches!(event, GameEvent::AbilityActivated { .. })));
+    assert!(finished.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated { source_id, kind: ActivatedAbilityKind::Mana, .. }
+            if *source_id == mountain
+    )));
+    assert!(!finished.events.iter().any(|event| matches!(event,
+        GameEvent::AbilityActivated { source_id, .. } if *source_id == card
+    )));
     assert!(finished.events.iter().any(|event| matches!(event,
         GameEvent::CounterAdded { object_id, counter_type: CounterType::Time, count: 10, actor: P0 }
             if *object_id == card
