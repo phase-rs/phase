@@ -36110,6 +36110,54 @@ fn mangara_attack_batch_intervening_if_counts_attacking_you_or_planeswalkers() {
     );
 }
 
+#[test]
+fn player_led_attack_demonstratives_follow_the_head() {
+    use crate::types::ability::Effect;
+
+    let tomik = parse_trigger_line(
+        "Whenever an opponent attacks with creatures, if two or more of those creatures are attacking you and/or planeswalkers you control, that opponent loses 3 life and you draw a card.",
+        "Tomik, Wielder of Law",
+    );
+    let explicit_defender = parse_trigger_line(
+        "Whenever a creature attacks one of your opponents, that player loses 1 life.",
+        "Calculating Lich",
+    );
+    for (trigger, expected) in [
+        (tomik, TargetFilter::TriggeringPlayer),
+        (explicit_defender, TargetFilter::DefendingPlayer),
+    ] {
+        let execute = trigger.execute.expect("trigger has a parsed effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    target: Some(player),
+                    ..
+                } if *player == expected
+            ),
+            "{execute:?}"
+        );
+    }
+
+    // Tahngarth, First Mate: "that opponent" after the same player-led head is
+    // the attacking opponent who gains control.
+    let tahngarth = parse_trigger_line(
+        "Whenever an opponent attacks with one or more creatures, if Tahngarth is tapped, you may have that opponent gain control of Tahngarth until end of combat.",
+        "Tahngarth, First Mate",
+    );
+    let execute = tahngarth.execute.expect("trigger has a parsed effect");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::GiveControl {
+                recipient: TargetFilter::TriggeringPlayer,
+                ..
+            }
+        ),
+        "{execute:?}"
+    );
+}
+
 /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar's first trigger introduces
 /// the attacked player in the condition; "that player controls" inside the
 /// effect must resolve to `ControllerRef::DefendingPlayer` so the runtime

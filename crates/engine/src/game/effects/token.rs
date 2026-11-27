@@ -2736,7 +2736,7 @@ fn commit_liminal_copy_token_entry_with_continuation(
         }
     };
     let post_actions = continuation
-        .map(|continuation| liminal_copy_token_continuation_post_action(continuation, 0))
+        .map(|continuation| liminal_copy_token_continuation_post_action(continuation.after_entry()))
         .into_iter()
         .collect();
     commit_liminal_token_entry_with_post_actions(
@@ -2771,12 +2771,11 @@ fn complete_liminal_token_entry_and_continue_copy_batch(
     rediscover: bool,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let continuation = match &event {
-        ProposedEvent::TokenEntry { entry_ref, .. } => {
-            liminal_copy_token_continuation(state, *entry_ref)
-        }
-        _ => None,
+    let ProposedEvent::TokenEntry { entry_ref, .. } = &event else {
+        return continue_liminal_copy_token_batch(state, None, events);
     };
+    let entry_ref = *entry_ref;
+    let continuation = liminal_copy_token_continuation(state, entry_ref);
     if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
@@ -2786,6 +2785,11 @@ fn complete_liminal_token_entry_and_continue_copy_batch(
     ) {
         return false;
     }
+    let continuation = if state.last_created_token_ids.contains(&entry_ref) {
+        continuation.map(LiminalCopyTokenContinuation::after_entry)
+    } else {
+        continuation
+    };
     continue_liminal_copy_token_batch(state, continuation, events)
 }
 
@@ -2798,12 +2802,38 @@ pub(crate) struct LiminalCopyTokenContinuation {
     remaining_count: u32,
 }
 
+impl LiminalCopyTokenContinuation {
+    /// CR 508.4: the remaining batch starts at the next named destination
+    /// after the current entrant was created.
+    pub(crate) fn after_entry(mut self) -> Self {
+        self.copy.attack_request = self.copy.attack_request.after_entrants(1);
+        self
+    }
+}
+
 pub(crate) fn liminal_copy_token_continuation(
     state: &GameState,
     entry_ref: ObjectId,
 ) -> Option<LiminalCopyTokenContinuation> {
     let entry = state.liminal_entries.get(&entry_ref)?;
-    let copy = entry.copy_resume.clone()?;
+    let mut copy = entry.copy_resume.clone()?;
+    // CR 508.4: the stored request still starts at the beginning of the
+    // interrupted batch. Find this entrant's already bound destination in
+    // that list of distinct players, even if that player has since left.
+    if let (
+        TokenAttackRequest::Named { first, rest },
+        crate::types::ability::EntryAttackDestination::Exact {
+            target: crate::game::combat::AttackTarget::Player(player),
+        },
+    ) = (&copy.attack_request, &entry.attack_destination)
+    {
+        if let Some(ordinal) = std::iter::once(first)
+            .chain(rest)
+            .position(|id| id == player)
+        {
+            copy.attack_request = copy.attack_request.after_entrants(ordinal);
+        }
+    }
     Some(LiminalCopyTokenContinuation {
         owner: entry.object.projected().owner,
         copy,
@@ -2941,13 +2971,8 @@ pub(crate) fn finish_liminal_copy_token_batch(
 }
 
 pub(crate) fn liminal_copy_token_continuation_post_action(
-    mut continuation: LiminalCopyTokenContinuation,
-    entrants_to_skip: usize,
+    continuation: LiminalCopyTokenContinuation,
 ) -> PendingCounterPostAction {
-    continuation.copy.attack_request = continuation
-        .copy
-        .attack_request
-        .after_entrants(entrants_to_skip);
     PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
         owner: continuation.owner,
         copy: continuation.copy,
@@ -3134,7 +3159,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
     let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
         return true;
     };
-    let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
+    let mut finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
     let counters_to_apply: Vec<_> = enter_with_counters
         .iter()
         .chain(entry.enter_with_counters.iter())
@@ -3475,6 +3500,15 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
         }
     }
 
+    // CR 506.3a + CR 508.4: the synchronous parked route assigns combat
+    // membership after installing the selected copy. A counter pause above
+    // owns its own finalization and keeps its saved entry instruction.
+    if let PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        enters_attacking, ..
+    } = &mut finalization
+    {
+        *enters_attacking &= entry_events == TokenEntryEventEmission::Emit;
+    }
     finalize_committed_liminal_token_entry_from_action(state, finalization, events);
     true
 }

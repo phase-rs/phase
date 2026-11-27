@@ -44384,6 +44384,47 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn reflector_mage_bounces_one_target_then_restricts_its_owner() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return target creature an opponent controls to its owner's hand. That creature's owner can't cast spells with the same name as that creature until your next turn.",
+        "Reflector Mage",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one ETB trigger")
+    };
+    let bounce = trigger.execute.as_deref().expect("ETB bounce");
+    assert!(matches!(&*bounce.effect, Effect::Bounce { .. }));
+    assert_eq!(
+        bounce.effect.target_filter(),
+        Some(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent)
+        ))
+    );
+    let ban = bounce
+        .sub_ability
+        .as_deref()
+        .expect("restriction follows the bounce");
+    assert!(matches!(&*ban.effect, Effect::AddRestriction {
+        restriction: GameRestriction::ProhibitActivity {
+            affected_players: RestrictionPlayerScope::ParentObjectTarget { possession: PossessionAxis::Owner },
+            activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
+            ..
+        }
+    } if filter == &TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget])));
+    assert_eq!(
+        ban.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    assert!(ban.effect.target_filter().is_none());
+    assert!(ban.sub_ability.is_none());
+}
+
+#[test]
 fn render_silent_its_controller_cant_cast_spells() {
     // CR 109.4 + CR 608.2c + CR 701.6: Render Silent (DGM) — "Counter target
     // spell. Its controller can't cast spells this turn." The head is a counter;
@@ -44418,7 +44459,9 @@ fn render_silent_its_controller_cant_cast_spells() {
             &*sub.effect,
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                     ..
@@ -44428,6 +44471,8 @@ fn render_silent_its_controller_cant_cast_spells() {
         "sub got {:?}",
         sub.effect
     );
+    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    assert!(sub.effect.target_filter().is_none());
     // Discriminating guard: no Effect::Unimplemented anywhere in the parsed chain.
     // A swallowed "this turn" tail or an unrecognized "its controller" subject
     // would surface here as an Unimplemented sub-ability — the exact blind spot a
@@ -44840,10 +44885,12 @@ fn conjurers_ban_compound_cant_be_cast_and_cant_be_played() {
         "spell half must carry the shared 'until your next turn' duration"
     );
 
+    assert!(def.effect.target_filter().is_none());
     let land_sub = def
         .sub_ability
         .as_deref()
         .expect("the compound must chain a land-play restriction sub-ability");
+    assert!(land_sub.effect.target_filter().is_none());
     assert!(
         matches!(
             &*land_sub.effect,
@@ -110261,7 +110308,6 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
     };
     for (name, card_type, target, oracle) in [
         ("Depthshaker Titan", "Creature", Some(TargetFilter::ParentTarget), "When this creature enters, any number of target noncreature artifacts you control become 3/3 artifact creatures. Sacrifice them at the beginning of the next end step.\nEach artifact creature you control has melee, trample, and haste. (Whenever a creature with melee attacks, it gets +1/+1 until end of turn for each opponent you attacked this combat.)"),
-        ("Mardu Siegebreaker", "Creature", Some(tracked.clone()), "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens."),
         ("Tears of Rage", "Instant", Some(tracked), "Cast this spell only during the declare attackers step.\nAttacking creatures you control get +X/+0 until end of turn, where X is the number of attacking creatures. Sacrifice those creatures at the beginning of the next end step."),
         ("Malik, Grim Manipulator", "Creature", None, "When Malik, Grim Manipulator enters, you and target opponent each secretly choose a creature that player controls. Then those choices are revealed, and that player sacrifices those creatures.\nWhenever an opponent sacrifices a creature, you create a Treasure token."),
     ] {
@@ -110274,6 +110320,63 @@ fn plural_sacrifice_keeps_deferred_routes_counted() {
             assert!(sacrifices.iter().all(|(_, count)| *count == one), "{name}: {sacrifices:?}");
         }
     }
+}
+
+#[test]
+fn mardu_siegebreaker_lowers_to_one_named_copy_batch_and_one_cleanup() {
+    use crate::types::ability::{NamedDefenderScope, SacrificeSelection, TokenAttackDestination};
+
+    let oracle = "Deathtouch, haste\nWhen this creature enters, exile up to one other target creature you control until this creature leaves the battlefield.\nWhenever this creature attacks, for each opponent, create a tapped token that's a copy of the exiled card attacking that opponent. At the beginning of your next end step, sacrifice those tokens.";
+    let parsed = parse_named_face(oracle, "Mardu Siegebreaker", &["Creature"]);
+    let attack = parsed.triggers[1]
+        .execute
+        .as_deref()
+        .expect("attack effect");
+    assert!(
+        matches!(
+            attack.effect.as_ref(),
+            Effect::CopyTokenOf {
+                target: TargetFilter::ExiledBySource,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount {
+                        filter: PlayerFilter::Opponent
+                    },
+                },
+                tapped: true,
+                enters_attacking: true,
+                attack_destination: TokenAttackDestination::EachPlayer {
+                    filter: PlayerFilter::Opponent,
+                    scope: NamedDefenderScope::Player,
+                },
+                ..
+            }
+        ),
+        "{attack:#?}"
+    );
+    assert!(attack.repeat_for.is_none());
+    assert_eq!(attack.repeat_timing, Default::default());
+    let cleanup = attack.sub_ability.as_deref().expect("delayed cleanup");
+    let Effect::CreateDelayedTrigger {
+        condition:
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::End, ..
+            },
+        effect,
+        uses_tracked_set: false,
+        ..
+    } = cleanup.effect.as_ref()
+    else {
+        panic!("expected controller-relative cleanup: {cleanup:#?}");
+    };
+    assert!(matches!(
+        effect.effect.as_ref(),
+        Effect::Sacrifice {
+            target: TargetFilter::LastCreated,
+            count: SacrificeSelection::EntireReferent,
+            ..
+        }
+    ));
+    assert!(cleanup.sub_ability.is_none());
 }
 
 #[test]
