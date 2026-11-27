@@ -1972,7 +1972,6 @@ face = [
   { key = "scion of the ur-dragon", class = "wrong_object", clauses = ["{2}: Search your library for a Dragon permanent card and put it into your graveyard.", "If you do, Scion of the Ur-Dragon becomes a copy of that card until end of turn."] },
   { key = "scour the desert", class = "wrong_object", clauses = ["Create X 1/1 white Bird creature tokens with flying, where X is the exiled card's toughness."] },
   { key = "scour the scene", class = "wrong_zone", clauses = ["Whenever you sacrifice an artifact, choose a creature card in your hand or a creature you control. It perpetually gets +1/+0."] },
-  { key = "scourge of the throne", class = "trigger_wrong", clauses = ["Whenever this creature attacks for the first time each turn, if it's attacking the player with the most life or tied for most life, untap all attacking creatures."] },
   { key = "scouting trek", class = "wrong_object", clauses = ["Search your library for any number of basic land cards, reveal those cards, then shuffle and put them on top."] },
   { key = "scrambleverse", class = "wrong_object", clauses = ["For each nonland permanent, choose a player at random.", "Then each player gains control of each permanent for which they were chosen."] },
   { key = "scrap trawler", class = "wrong_object", clauses = ["Whenever this creature dies or another artifact you control is put into a graveyard from the battlefield, return to your hand target artifact card in your graveyard with lesser mana value."] },
