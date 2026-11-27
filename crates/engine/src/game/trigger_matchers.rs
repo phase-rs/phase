@@ -965,7 +965,11 @@ fn player_matches_filter_as(
             .chosen_attributes
             .iter()
             .any(|choice| matches!(choice, crate::types::ability::ChosenAttribute::Player(chosen) if *chosen == player_id)),
-        TargetFilter::AttachedTo => {
+        TargetFilter::AttachedTo
+        | TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::EnchantedPlayer),
+            ..
+        }) => {
             source_context
                 .source_read(state)
                 .attached_to()

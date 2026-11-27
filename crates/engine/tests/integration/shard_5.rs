@@ -291,6 +291,7 @@ mod temporal_anchor;
 mod temporal_extortion_priority;
 mod temporary_cant_be_blocked_view;
 mod tempt_with_discovery;
+mod tenuous_truce_reciprocal_attack;
 mod tergrid_mirrormade_copy_on_effect_entry;
 mod termination_facilitator_bounty_damage_8379;
 mod terra_magical_adept_milled_enchantment;
