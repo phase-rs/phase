@@ -12694,6 +12694,7 @@ fn trigger_matchers_read_filter_population(
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,
+        attack_declaration_ordinal: _,
         // CR 509.3e: the blocker-count filter is a matcher like `valid_target`.
         blocker_count,
         player_actions: _,
@@ -12971,6 +12972,7 @@ fn trigger_condition_reads_filter_population(
     match condition {
         TriggerCondition::ControlsType { filter } => has_filter(filter),
         TriggerCondition::DuringPlayersTurn { player } => has_player(player),
+        TriggerCondition::SourceIsAttacking { player } => player.as_deref().is_some_and(has_player),
         TriggerCondition::MinCoAttackers { filter, .. } => filter.as_ref().is_some_and(has_filter),
         TriggerCondition::DealtDamageThisTurnBySource { source } => has_filter(source),
         TriggerCondition::ControlCount { filter, .. } => has_filter(filter),
@@ -13016,7 +13018,6 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::WasCast { .. }
         | TriggerCondition::WasPlayed
         | TriggerCondition::AdditionalCostPaid { .. }
-        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana

@@ -41267,9 +41267,13 @@ pub enum TriggerCondition {
         min_count: u32,
     },
 
-    /// "if it's attacking" — true when the trigger source object is currently an attacker.
-    /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
-    SourceIsAttacking,
+    /// CR 506.3 + CR 508.1k + CR 603.4: the source is attacking. If a
+    /// player predicate is supplied, its current destination must be a player
+    /// who satisfies that predicate.
+    SourceIsAttacking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<Box<PlayerFilter>>,
+    },
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
     /// cost was paid this turn". True when the source permanent entered via the
@@ -41802,7 +41806,7 @@ impl TriggerCondition {
             | TriggerCondition::WasCast { .. }
             | TriggerCondition::WasPlayed
             | TriggerCondition::AdditionalCostPaid { .. }
-            | TriggerCondition::SourceIsAttacking
+            | TriggerCondition::SourceIsAttacking { .. }
             | TriggerCondition::CastVariantPaid { .. }
             | TriggerCondition::CastVariantPaidPersistent { .. }
             | TriggerCondition::ActivatedAbilityIsNonMana
@@ -42658,6 +42662,9 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 508.3a: Required attack declaration ordinal for the attacking creature this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_declaration_ordinal: Option<u32>,
     /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
     /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
     /// When `Some`, the trigger fires once for an attacker whose matching
@@ -43626,6 +43633,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
@@ -50682,6 +50690,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,

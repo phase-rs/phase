@@ -3583,44 +3583,23 @@ fn nonself_etb_source_zone_shorthand_is_not_misbound_to_source() {
     );
 }
 
-// CR 603.4 + CR 702.105a (phase-rs/phase#5449 review, second finding):
-// Scourge of the Throne's "if it's attacking the player with the most life or
-// tied for most life" must map to the SAME typed QuantityComparison condition
-// Dethrone's own synthesized trigger uses (build_dethrone_trigger,
-// database/synthesis.rs) — not the wrong bare SourceIsAttacking (dropping the
-// life-total qualifier, the original regression) and not an unconditional
-// None (which would make UntapAll + the extra combat phase fire regardless of
-// who's being attacked — strictly worse than the original bug, since the
-// ability would then work "too well" under the wrong conditions).
 #[test]
-fn trigger_attacking_highest_life_player_condition_maps_to_dethrone_shape() {
+fn trigger_attacking_highest_life_player_requires_a_direct_attack() {
     let def = parse_trigger_line(
         "Whenever this creature attacks for the first time each turn, if it's \
              attacking the player with the most life or tied for most life, untap \
              all attacking creatures.",
         "Scourge of the Throne",
     );
-    assert_eq!(
+    assert!(matches!(
         def.condition,
-        Some(TriggerCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::DefendingPlayer,
-                },
-            },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Ref {
-                qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::AllPlayers {
-                        aggregate: AggregateFunction::Max,
-                        exclude: None,
-                    },
-                },
-            },
-        }),
-        "must map to the same typed life-total comparison Dethrone uses, not \
-         a bare SourceIsAttacking and not an unconditional None"
-    );
+        Some(TriggerCondition::SourceIsAttacking { player: Some(player) })
+            if matches!(*player, PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::All,
+                comparator: Comparator::GE,
+                ..
+            })
+    ));
     let Some(execute) = &def.execute else {
         panic!("expected an UntapAll execute ability, got None");
     };
@@ -26103,7 +26082,10 @@ fn trigger_etb_from_hand_if_attacking() {
     assert_eq!(def.destination, Some(Zone::Battlefield));
     assert_eq!(def.origin, Some(Zone::Hand));
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-    assert_eq!(def.condition, Some(TriggerCondition::SourceIsAttacking));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::SourceIsAttacking { player: None })
+    );
     // Effect should be CopyTokenOf
     assert!(def.execute.is_some());
     let exec = def.execute.as_ref().unwrap();
@@ -29574,7 +29556,7 @@ fn trigger_cast_spell_while_attacking_gates_on_combat() {
     assert_eq!(
         def.condition,
         Some(TriggerCondition::EventTime {
-            condition: Box::new(TriggerCondition::SourceIsAttacking),
+            condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
         }),
         "the `while ~ is attacking` gate must become an event-time SourceIsAttacking condition"
     );
@@ -29600,14 +29582,14 @@ fn trigger_while_attacking_composes_with_existing_condition() {
         Some(TriggerCondition::And { conditions }) => {
             assert!(
                 conditions.contains(&TriggerCondition::EventTime {
-                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                    condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
                 }),
                 "expected SourceIsAttacking among AND conditions, got {conditions:?}"
             );
             assert!(
                 conditions
                     .iter()
-                    .any(|c| !matches!(c, TriggerCondition::SourceIsAttacking)),
+                    .any(|c| !matches!(c, TriggerCondition::SourceIsAttacking { player: None })),
                 "expected the intervening-if to also be present, got {conditions:?}"
             );
         }
@@ -35510,19 +35492,14 @@ fn saddles_a_mount_singular_parses() {
 }
 
 #[test]
-fn first_time_each_turn_in_condition_sets_once_per_turn() {
-    // Part D: condition-scoped constraint assignment.
+fn first_attack_each_turn_sets_declaration_ordinal() {
     let def = parse_trigger_line(
         "Whenever ~ attacks for the first time each turn, draw a card.",
         "Godo, Bandit Warlord",
     );
     assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(
-        def.constraint,
-        Some(TriggerConstraint::OncePerTurn {
-            spent_by: TriggerLimitSpend::Triggering
-        })
-    );
+    assert_eq!(def.attack_declaration_ordinal, Some(1));
+    assert_eq!(def.constraint, None);
 }
 
 #[test]
@@ -35579,20 +35556,14 @@ fn valiant_rescuer_regression() {
 }
 
 #[test]
-fn aurelia_attacks_first_time_has_constraint() {
-    // Regression guard: Aurelia was previously parsed as TriggerMode::Attacks
-    // but without the OncePerTurn constraint (latent multi-card bug).
+fn aurelia_attacks_first_time_has_declaration_ordinal() {
     let def = parse_trigger_line(
             "Whenever Aurelia, the Warleader attacks for the first time each turn, untap all attacking creatures.",
             "Aurelia, the Warleader",
         );
     assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(
-        def.constraint,
-        Some(TriggerConstraint::OncePerTurn {
-            spent_by: TriggerLimitSpend::Triggering
-        })
-    );
+    assert_eq!(def.attack_declaration_ordinal, Some(1));
+    assert_eq!(def.constraint, None);
 }
 
 #[test]

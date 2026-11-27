@@ -7398,10 +7398,22 @@ pub(super) fn commit_attack_declaration(
     let attacker_declarations: Vec<_> = attacker_ids
         .iter()
         .filter_map(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+            state.objects.get(id).map(|obj| {
+                let mut declaration = obj.snapshot_for_attack_declaration(*id);
+                let previous_declarations = state
+                    .attacker_declarations_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.object_id == *id && record.incarnation == declaration.incarnation
+                    })
+                    .count();
+                declaration.ordinal_this_turn = Some(
+                    u32::try_from(previous_declarations)
+                        .unwrap_or(u32::MAX)
+                        .saturating_add(1),
+                );
+                declaration
+            })
         })
         .collect();
 
@@ -9223,7 +9235,10 @@ fn attack_target_referent(
     )?)
 }
 
-fn live_attack_destination(state: &GameState, attacker: ObjectId) -> Option<AttackDestination> {
+pub(super) fn live_attack_destination(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<AttackDestination> {
     state
         .combat
         .as_ref()?

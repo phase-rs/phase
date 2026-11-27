@@ -6495,10 +6495,8 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     )
     .description("Put a +1/+1 counter on this creature".to_string());
 
-    // CR 702.105a: "attacks the player with the most life or tied for most
-    // life". The defending player's life total must be >= the maximum life
-    // total among all players. This is an intervening-if condition checked
-    // at both detection and resolution per CR 603.4.
+    // CR 702.105a + CR 603.4: the life comparison qualifies the attack event.
+    // Once Dethrone triggers, subsequent changes in life totals cannot stop it.
     let condition = TriggerCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::LifeTotal {
@@ -6518,7 +6516,9 @@ fn build_dethrone_trigger() -> TriggerDefinition {
 
     let mut trigger = TriggerDefinition::new(TriggerMode::Attacks)
         .valid_card(TargetFilter::SelfRef)
-        .condition(condition)
+        .condition(TriggerCondition::EventTime {
+            condition: Box::new(condition),
+        })
         .execute(put_counter)
         .description(
             "CR 702.105a: Dethrone — whenever ~ attacks the player with the most life or tied for most life, put a +1/+1 counter on ~."
@@ -16327,7 +16327,7 @@ mod riot_synthesis_tests {
 #[cfg(test)]
 mod dethrone_tests {
     //! CR 702.105a: Dethrone synthesis tests. The synthesized trigger must be
-    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an intervening-if
+    //! `TriggerMode::Attacks` with `valid_card = SelfRef`, an event-time
     //! condition comparing the defending player's life total against the maximum
     //! life total among all players, and execute body `Effect::PutCounter` with
     //! a single +1/+1 counter on `SelfRef`.
@@ -16377,8 +16377,12 @@ mod dethrone_tests {
         assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
         assert!(matches!(target, TargetFilter::SelfRef));
         assert!(
-            trigger.condition.is_some(),
-            "dethrone trigger must have an intervening-if condition"
+            matches!(
+                trigger.condition.as_ref(),
+                Some(TriggerCondition::EventTime { condition })
+                    if matches!(condition.as_ref(), TriggerCondition::QuantityComparison { .. })
+            ),
+            "dethrone must compare life totals at the attack event"
         );
     }
 

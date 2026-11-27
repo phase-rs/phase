@@ -2007,6 +2007,9 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
             quality: _,
         } => legacy_quantity_expr(quantity),
         TriggerCondition::DuringPlayersTurn { player } => legacy_player_filter(player),
+        TriggerCondition::SourceIsAttacking { player } => {
+            player.as_deref().is_some_and(legacy_player_filter)
+        }
         TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
             conditions.iter().any(legacy_trigger_condition)
         }
@@ -2034,7 +2037,6 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::SourceEnteredThisTurn
         | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
-        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
         | TriggerCondition::SourceIsFaceUp
         | TriggerCondition::SourceIsFaceDown
@@ -7766,10 +7768,18 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
             reads_player_of(StateKind::JournalCast)
         }
         TriggerCondition::DuringPlayersTurn { player } => rw_player_filter(player),
+        TriggerCondition::SourceIsAttacking { player } => {
+            let mut profile = frozen_source_read();
+            if let Some(player) = player {
+                profile.merge(reads_event_live());
+                profile.bind_per_member();
+                profile.merge(rw_player_filter(player));
+            }
+            profile
+        }
         TriggerCondition::SourceEnteredThisTurn
         | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
-        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
         | TriggerCondition::SourceIsFaceUp
         | TriggerCondition::SourceIsFaceDown
