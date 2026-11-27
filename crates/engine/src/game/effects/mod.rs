@@ -31039,15 +31039,15 @@ fn resolve_chain_body(
     // CR 608.2c + CR 701.23a: a later "if you search your library this way" gate of this chain
     // reads the actions its own earlier instruction performed from the chain's context, not
     // from the ledger a nested top-level chain clears.
-    let performed_actions_owned =
-        Some(performed_actions_in(&events[events_before..]).collect::<Vec<_>>())
-            .filter(|actions| !actions.is_empty())
-            .filter(|_| ability.has_performed_action_this_way_gate())
-            .map(|actions| {
-                rebound_ability(ability, |owned| {
-                    owned.record_performed_actions_this_way_recursive(&actions);
-                })
-            });
+    let performed_actions_owned = ability
+        .has_performed_action_this_way_gate()
+        .then(|| performed_actions_in(&events[events_before..]).collect::<Vec<_>>())
+        .filter(|actions| !actions.is_empty())
+        .map(|actions| {
+            rebound_ability(ability, |owned| {
+                owned.record_performed_actions_this_way_recursive(&actions);
+            })
+        });
     let ability = performed_actions_owned.as_deref().unwrap_or(ability);
 
     // CR 608.2c: Normalize the actual outcome before the printed tail is
