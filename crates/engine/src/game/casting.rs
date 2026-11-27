@@ -4565,7 +4565,16 @@ pub(super) fn cast_pays_nonexistent_printed_cost(
     obj: &crate::game::game_object::GameObject,
     casting_permission_index: Option<CastingPermissionIndex>,
     casting_variant: CastingVariant,
+    origin: Zone,
 ) -> bool {
+    if casting_permission_index.is_none()
+        && casting_variant == CastingVariant::Normal
+        && matches!(obj.mana_cost, ManaCost::NoCost)
+        && matches!(origin, Zone::Hand | Zone::Command)
+    {
+        return !unlimited_hand_cast_free_applies(state, player, obj, casting_variant)
+            && !next_spell_without_paying_applies(state, player, obj.id, casting_variant);
+    }
     casting_permission_index
         .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
         .is_some_and(|permission| match permission {
@@ -11139,23 +11148,54 @@ fn prepare_spell_cast_announced_inner(
         next_spell_without_paying_applies(state, player, object_id, casting_variant);
     // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
     // printed mana cost is refused, unless a payable alternative cost will be
-    // applied for it. `check_additional_cost_or_pay` (a `Normal` cast) and the
-    // skipped-election branch of `finish_pending_cast_cost_or_pay` apply it
-    // without a choice.
-    if cast_pays_nonexistent_printed_cost(
+    // applied for it. Price the first payable alternative for the preview.
+    // The declaration step elects the actual cost if there is more than one.
+    let required_alternative = if cast_pays_nonexistent_printed_cost(
         state,
         player,
         obj,
         casting_permission_index,
         casting_variant,
-    ) && !(casting_variant == CastingVariant::Normal
-        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
-            .is_some())
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
-        ));
-    }
+        obj.zone,
+    ) {
+        let alternative = (casting_variant == CastingVariant::Normal)
+            .then(|| {
+                casting_costs::payable_spell_alternative_cost_details_at_index(
+                    state,
+                    player,
+                    object_id,
+                    casting_permission_index,
+                )
+                .or_else(|| {
+                    if mode == CastingMode::Display {
+                        casting_costs::spell_alternative_costs_matching(
+                            state,
+                            player,
+                            object_id,
+                            casting_permission_index,
+                            |_| true,
+                        )
+                        .into_iter()
+                        .next()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .flatten()
+            .ok_or_else(|| {
+                EngineError::ActionNotAllowed(
+                    "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+                )
+            })?;
+        Some(
+            split_alt_cost_components(&alternative.cost)
+                .0
+                .unwrap_or_else(ManaCost::zero),
+        )
+    } else {
+        None
+    };
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from the origin scope carried by the static. Auto-application is
@@ -11427,6 +11467,7 @@ fn prepare_spell_cast_announced_inner(
             .or(prowl_cost)
             .or(surge_cost)
             .or(face_down_cost)
+            .or(required_alternative)
             .unwrap_or_else(|| obj.mana_cost.clone())
     };
     // CR 601.3b + CR 702.8a: A spell has effective flash from its own keywords
@@ -11520,28 +11561,7 @@ fn prepare_spell_cast_announced_inner(
     }
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
-    if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
-        if tax > 0 {
-            match &mut mana_cost {
-                crate::types::mana::ManaCost::Cost { generic, .. } => {
-                    *generic += tax;
-                }
-                crate::types::mana::ManaCost::NoCost => {
-                    mana_cost = crate::types::mana::ManaCost::Cost {
-                        shards: vec![],
-                        generic: tax,
-                    };
-                }
-                crate::types::mana::ManaCost::SelfManaCost
-                | crate::types::mana::ManaCost::SelfManaValue
-                | crate::types::mana::ManaCost::SelfManaCostReduced { .. } => {
-                    // Self-referential placeholders should have been resolved before
-                    // reaching here; treat as no-op for commander tax purposes.
-                }
-            }
-        }
-    }
+    add_commander_tax(state, object_id, obj.zone, &mut mana_cost);
 
     // CR 702.102c: The total cost of a fused split spell includes the mana cost
     // of each half. The front face's cost is already in `mana_cost`; add the
@@ -13488,6 +13508,28 @@ pub(super) fn apply_cost_modifiers_to_base_for_variant(
     )
 }
 
+/// CR 903.8: include the tax when building a cost from its printed or alternative base.
+pub(super) fn add_commander_tax(
+    state: &GameState,
+    object_id: ObjectId,
+    origin: Zone,
+    cost: &mut ManaCost,
+) {
+    if origin != Zone::Command {
+        return;
+    }
+    let tax = super::commander::commander_tax(state, object_id);
+    if tax == 0 {
+        return;
+    }
+    match cost {
+        ManaCost::Cost { generic, .. } => *generic += tax,
+        ManaCost::NoCost => *cost = ManaCost::generic(tax),
+        ManaCost::SelfManaCost | ManaCost::SelfManaValue | ManaCost::SelfManaCostReduced { .. } => {
+        }
+    }
+}
+
 /// CR 601.2f: as [`apply_cost_modifiers_to_base_for_variant`], with `ctx`'s
 /// reductions joining the ordered set ahead of the floor.
 fn apply_cost_modifiers_to_base_with(
@@ -13501,24 +13543,8 @@ fn apply_cost_modifiers_to_base_with(
 ) -> Option<ManaCost> {
     let obj = state.objects.get(&object_id)?;
     let mut mana_cost = base;
-    // CR 903.8: Commanders cast from the command zone incur a tax.
-    if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
-        if tax > 0 {
-            match &mut mana_cost {
-                ManaCost::Cost { generic, .. } => *generic += tax,
-                ManaCost::NoCost => {
-                    mana_cost = ManaCost::Cost {
-                        shards: vec![],
-                        generic: tax,
-                    };
-                }
-                ManaCost::SelfManaCost
-                | ManaCost::SelfManaValue
-                | ManaCost::SelfManaCostReduced { .. } => {}
-            }
-        }
-    }
+    let origin = pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone);
+    add_commander_tax(state, object_id, origin, &mut mana_cost);
     apply_all_cost_modifiers_with(
         state,
         player,
@@ -19993,6 +20019,11 @@ fn normal_cast_choice_cost_and_affordability(
         return (ManaCost::NoCost, true);
     }
 
+    // CR 118.6a: increasing an unpayable printed cost leaves it unpayable.
+    if matches!(obj.mana_cost, ManaCost::NoCost) {
+        return (ManaCost::NoCost, false);
+    }
+
     // CR 601.2f + CR 118.9d: normal-path affordability and displayed cost
     // reflect active cost modifiers before comparing against alternative costs.
     // A matching Defiler's optional reduction counts toward affordability
@@ -20000,16 +20031,8 @@ fn normal_cast_choice_cost_and_affordability(
     // it payable); the displayed cost is the plain total.
     let normal_cost = apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
         .unwrap_or_else(|| obj.mana_cost.clone());
-    // CR 118.6: a printed `NoCost` (no mana cost) is an UNPAYABLE cost; the normal
-    // (face-up) cast is not a legal play absent a free-cast permission (handled by
-    // the two short-circuits above). `can_pay_cost_after_auto_tap` returns true for
-    // `NoCost` unconditionally, so guard against reporting an unpayable normal cast
-    // as affordable — that would offer a free face-up cast instead of the {3}
-    // face-down alternative. A cost reduced to nothing is `{0}` (CR 601.2f), a
-    // distinct value from `ManaCost::NoCost`, so this never misfires on a
-    // cost-reduced-to-zero card.
-    let normal_affordable = !matches!(normal_cost, ManaCost::NoCost)
-        && alternative_cost_mana_affordable(state, player, object_id, &obj.mana_cost);
+    let normal_affordable =
+        alternative_cost_mana_affordable(state, player, object_id, &obj.mana_cost);
     (normal_cost, normal_affordable)
 }
 
@@ -20137,6 +20160,8 @@ pub fn handle_cast_spell_with_payment_mode(
             // rejection stands (nothing downstream re-guards NoCost).
             if matches!(obj.mana_cost, ManaCost::NoCost)
                 && !unlimited_hand_cast_free_applies(state, player, obj, CastingVariant::Normal)
+                && !next_spell_without_paying_applies(state, player, object_id, CastingVariant::Normal)
+                && casting_costs::payable_spell_alternative_cost_details(state, player, object_id).is_none()
                 // CR 715.3a + CR 118.6a: A land-front Adventure card has no
                 // payable normal-face cost, but its instant/sorcery Adventure
                 // face may be cast for its own mana cost.
@@ -23530,21 +23555,8 @@ fn can_cast_prepared_now_with_probe(
         return false;
     };
 
-    // CR 202.1b: A card with no mana cost (suspend-only cards like Inevitable
-    // Betrayal) has an unpayable cost.
-    // CR 118.6: it therefore can't be cast from hand by paying that cost. Its
-    // only legal plays are via an effect/keyword — Suspend's exile activation,
-    // the free-cast from exile, or an effect-granted `CastSpellForFree` — none
-    // of which take this normal-hand-cast path.
-    // CR 118.6a: the exception is an effect that lets you cast it WITHOUT paying
-    // its mana cost. The only such effect routed through this normal-CastSpell
-    // path is an `Unlimited` `CastFromHandFree` permission (Omniscience / Tamiyo
-    // emblem), which `prepare_spell_cast` recognizes via the same predicate and
-    // zeroes the cost. `OncePerTurn` sources (Zaffai) opt in via the dedicated
-    // `CastSpellForFree` action instead. Block the normal hand cast otherwise.
-    // Exile-zone copies (Prepare, Suspend, Discover, etc.) carry their own
-    // `ExileWithAltCost` permission and must not hit this hand/command guard.
-    //
+    // CR 118.6a: a hand or command-zone spell without a mana cost needs
+    // a free-cast permission, a payable alternative, or a variant with its own cost.
     // CR 118.6a + CR 702.37c / CR 702.168b: candidate/legal-action twin of the
     // dispatch-path exception at the `Zone::Hand` NoCost gate — a NoCost card with
     // an effective morph/megamorph/disguise keyword IS castable (face down for {3}),
@@ -23553,6 +23565,8 @@ fn can_cast_prepared_now_with_probe(
     if matches!(obj.zone, Zone::Hand | Zone::Command)
         && matches!(obj.mana_cost, ManaCost::NoCost)
         && !unlimited_hand_cast_free_applies(state, player, obj, prepared.casting_variant)
+        && !next_spell_without_paying_applies(state, player, obj.id, prepared.casting_variant)
+        && granted_alternative_cost(state, player, prepared).is_none()
         // CR 702.162a + CR 118.6a + CR 712.8c: a More Than Meets the Eye cast pays its
         // own cost rather than the mana cost, and `obj` here is the converted spell
         // (back face, whose mana cost is `NoCost`), not the printed front face whose

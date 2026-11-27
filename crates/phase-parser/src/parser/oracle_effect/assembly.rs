@@ -3951,6 +3951,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
             def.optional_player = None;
         }
         if let Some(ref qty) = clause_ir.repeat_for {
+            let has_delayed_copy_cleanup =
+                matches!(def.effect.as_ref(), Effect::CopyTokenOf { .. })
+                    && matches!(ir.clauses.as_slice(), [_, cleanup]
+                    if cleanup.prefix_delayed_condition.is_some()
+                        && cleanup.source.fragment().is_some_and(|fragment| {
+                            let lower = fragment.to_lowercase();
+                            super::imperative::starts_with_countless_plural_sacrifice(
+                                super::lower::strip_temporal_prefix(&lower).0,
+                            )
+                        }));
             if matches!(*def.effect, Effect::TargetOnly { .. }) {
                 if let Some(sub) = def.sub_ability.as_mut() {
                     sub.repeat_for = Some(qty.clone());
@@ -3959,20 +3969,20 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                     def.repeat_for = Some(qty.clone());
                     def.repeat_timing = clause_ir.repeat_timing;
                 }
-            } else if ir.clauses.len() == 1
+            } else if (ir.clauses.len() == 1 || has_delayed_copy_cleanup)
                 && clause_ir.parsed.sub_ability.is_none()
                 && try_fold_token_repeat_into_count(def.effect.as_mut(), qty)
             {
                 // CR 111.1 + CR 616.1: bare "for each X, create a token" folded
                 // into one batched CreateToken event — no loop. Conservatively
-                // restricted to a single-clause ability: a trailing sibling may
+                // restricted to a single-clause ability or a copy batch whose
+                // only sibling is its delayed plural sacrifice. Other siblings may
                 // reference the created tokens (a tracked set or "those tokens"
                 // anaphor — e.g. Ezuri's Predation's fight pairing depends on the
                 // per-iteration creation), and we do not yet distinguish such
                 // token-referencing siblings from independent ones (e.g. Moogles'
-                // Valor's "creatures you control gain indestructible"), so we keep
-                // the loop for all multi-clause cases. The chained-body guard
-                // reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
+                // Valor's "creatures you control gain indestructible"). The
+                // chained-body guard reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
                 // attaches it after this point via `clause_sub`, so
                 // `def.sub_ability` is not yet populated here).
             } else {

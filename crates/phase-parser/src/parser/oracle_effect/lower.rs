@@ -4384,8 +4384,24 @@ pub(super) fn bind_plural_token_sacrifice(
     let Some(producer) = nearest_producer else {
         return;
     };
-    // Populate is outside the admitted cleanup class. Copy batches routed
-    // through a tracked set are also deferred.
+    // CR 603.7c: a folded named copy batch publishes the entire committed
+    // cohort through LastCreated, which pins its incarnations at installation.
+    if *uses_tracked_set
+        && nested_creator.is_none()
+        && matches!(
+            producer,
+            Effect::CopyTokenOf {
+                attack_destination: crate::types::ability::TokenAttackDestination::EachPlayer { .. },
+                ..
+            }
+        )
+        && matches!(target, TargetFilter::TrackedSet { .. })
+    {
+        *target = TargetFilter::LastCreated;
+        *uses_tracked_set = false;
+    }
+    // Populate and other copy batches routed through a tracked set are outside
+    // the admitted cleanup class.
     if matches!(target, TargetFilter::TrackedSet { .. }) {
         if *uses_tracked_set
             && matches!(producer, Effect::Token { .. })

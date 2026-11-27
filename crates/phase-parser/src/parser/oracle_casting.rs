@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, separated_pair, terminated};
@@ -337,6 +337,25 @@ fn is_choose_behold_prefix(body_lower: &str) -> bool {
         Ok((i, ()))
     }
     parse(body_lower).is_ok()
+}
+
+/// A conditional payment to cast this spell replaces its mana cost (CR 118.9).
+/// Consume the entire line, including the condition and any final punctuation.
+pub(super) fn parse_conditional_self_payment(text: &str) -> Option<SpellCastingOption> {
+    let (_, (_, condition, _, cost, _, _)) = all_consuming((
+        tag_no_case::<_, _, OracleError<'_>>("as long as "),
+        take_until(", "),
+        tag_no_case(", you may pay "),
+        nom_primitives::parse_mana_cost,
+        tag_no_case(" to cast this spell"),
+        opt(tag(".")),
+    ))
+    .parse(text)
+    .ok()?;
+    Some(
+        SpellCastingOption::alternative_cost(AbilityCost::Mana { cost })
+            .condition(parse_restriction_condition(condition)?),
+    )
 }
 
 pub fn parse_spell_casting_option_line(text: &str, card_name: &str) -> Option<SpellCastingOption> {
@@ -1161,6 +1180,22 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn conditional_self_payment_reads_the_full_condition_price_and_sentence() {
+        assert!(parse_conditional_self_payment(
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell."
+        )
+        .is_some());
+        for line in [
+            "As long as you've discarded a card this turn and the moon is full, you may pay {B/R} to cast this spell.",
+            "As long as you've discarded a card this turn, you may pay {B/R}{unknown} to cast this spell.",
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell from exile.",
+            "As long as you've discarded a card this turn, you may pay {B/R} to cast this spell. Draw a card.",
+        ] {
+            assert!(parse_conditional_self_payment(line).is_none(), "{line}");
+        }
+    }
 
     #[test]
     fn cant_spend_mana_to_cast_this_spell_parses() {
