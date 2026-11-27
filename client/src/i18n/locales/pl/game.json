@@ -1347,6 +1347,8 @@
         "Ticket": "biletu"
       },
       "generic": "koszt",
+      "blight": "Blight {{count}}",
+      "blightBoundedX": "Blight X (do najwyższej wytrzymałości wśród stworów, które kontrolujesz)",
       "pay": "Zapłać {{cost}}",
       "draw": "dobierz kartę",
       "drawCount_one": "dobierz {{count}} kartę",
@@ -2803,6 +2805,8 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "blightCounters_one": "Połóż znacznik -1/-1 na stworze, którego kontrolujesz",
+      "blightCounters_other": "Połóż {{count}} znaczników -1/-1 na stworze, którego kontrolujesz",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

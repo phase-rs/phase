@@ -1347,6 +1347,8 @@
         "Ticket": "ticket"
       },
       "generic": "un costo",
+      "blight": "Putrefazione {{count}}",
+      "blightBoundedX": "Putrefazione X (fino alla costituzione più alta tra le creature che controlli)",
       "pay": "Paga {{cost}}",
       "draw": "pesca una carta",
       "drawCount_one": "pesca {{count}} carta",
@@ -2803,6 +2805,8 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "blightCounters_one": "Metti un segnalino -1/-1 su una creatura che controlli",
+      "blightCounters_other": "Metti {{count}} segnalini -1/-1 su una creatura che controlli",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

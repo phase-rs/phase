@@ -1347,6 +1347,8 @@
         "Ticket": "ticket"
       },
       "generic": "un coût",
+      "blight": "Flétrissure {{count}}",
+      "blightBoundedX": "Flétrissure X (jusqu’à la plus grande endurance parmi les créatures que vous contrôlez)",
       "pay": "Payer {{cost}}",
       "draw": "piochez une carte",
       "drawCount_one": "piochez {{count}} carte",
@@ -2803,6 +2805,8 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "blightCounters_one": "Mettez un marqueur -1/-1 sur une créature que vous contrôlez",
+      "blightCounters_other": "Mettez {{count}} marqueurs -1/-1 sur une créature que vous contrôlez",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",
