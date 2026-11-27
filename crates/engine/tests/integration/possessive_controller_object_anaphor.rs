@@ -1386,3 +1386,84 @@ fn inferno_hellion_end_step_shuffles_by_owner_after_its_own_combat() {
         assert!(!runner.state().players[0].library.contains(&hellion));
     }
 }
+
+#[test]
+fn inferno_hellion_end_step_shuffles_by_owner_after_becoming_a_land() {
+    const MOON_ORACLE: &str = "Enchant creature, land, or planeswalker\nEnchanted permanent is a colorless land with \"{T}: Add {C}\" and loses all other card types and abilities.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hellion = scenario
+        .add_creature_from_oracle(P1, "Inferno Hellion", 7, 3, INFERNO_HELLION)
+        .controlled_by(P0)
+        .id();
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Vedalken Orrery",
+        "You may cast spells as though they had flash.",
+    );
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let moon = scenario
+        .add_enchantment_to_hand_from_oracle(P0, "Imprisoned in the Moon", MOON_ORACLE)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+        .from_oracle_text_with_keywords(&["enchant"], MOON_ORACLE)
+        .id();
+    let forest = scenario.add_card_to_library_top(P1, "Forest");
+    let plains = scenario.add_card_to_library_top(P1, "Plains");
+    scenario.add_creature(P1, "Available Blocker", 0, 8);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(hellion, AttackTarget::Player(P1))])
+        .expect("declare Hellion as attacker");
+    drive_until(&mut runner, |state| {
+        matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. })
+    });
+    runner.declare_blockers(&[]).expect("declare no blockers");
+    drive_until(&mut runner, |state| state.phase == Phase::End);
+
+    // CR 603.4: The attack satisfies the intervening-if at trigger admission.
+    assert_eq!(runner.state().stack.len(), 1);
+    let trigger = &runner.state().stack[0];
+    assert_eq!(trigger.source_id, hellion);
+    assert_eq!(trigger.controller, P0);
+    assert!(matches!(
+        trigger.kind,
+        StackEntryKind::TriggeredAbility { .. }
+    ));
+    let trigger_id = trigger.id;
+    let incarnation = runner.state().objects[&hellion].incarnation;
+
+    // CR 702.8a: Orrery allows the Aura to be cast in response.
+    let mut cast = runner.cast(moon).target_object(hellion).commit();
+    assert_eq!(cast.state().stack.len(), 2);
+    assert_eq!(cast.state().stack[1].id, moon);
+    for _ in 0..8 {
+        if cast.state().stack.len() == 1 {
+            break;
+        }
+        cast.act(GameAction::PassPriority)
+            .expect("resolve the Aura");
+    }
+    // CR 113.7a + CR 613.1d: The queued trigger survives the type change.
+    assert_eq!(cast.state().stack.len(), 1);
+    assert_eq!(cast.state().stack[0].id, trigger_id);
+    assert_eq!(
+        cast.state().objects[&moon].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(hellion))
+    );
+    assert_eq!(
+        cast.state().objects[&hellion].card_types.core_types,
+        [engine::types::card_type::CoreType::Land]
+    );
+    assert_eq!(cast.state().objects[&hellion].incarnation, incarnation);
+
+    // CR 700.7 + CR 603.4: The recheck uses that permanent's combat history.
+    finish_owner_shuffle(&mut runner, hellion, P1);
+    assert!(runner.state().players[1].library.contains(&hellion));
+    assert!(runner.state().players[1].library.contains(&forest));
+    assert!(runner.state().players[1].library.contains(&plains));
+}

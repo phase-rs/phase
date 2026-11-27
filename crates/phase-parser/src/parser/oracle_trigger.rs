@@ -2315,10 +2315,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     && matches!(
                         &if_condition,
                         Some(TriggerCondition::SourceMatchesFilter { filter })
-                            if *filter == TargetFilter::Typed(
-                                TypedFilter::creature()
-                                    .properties(vec![FilterProp::AttackedOrBlockedThisTurn])
-                            )
+                            if *filter == source_attacked_or_blocked_this_turn_filter()
                     );
                 let source_owner_shuffle = if (source_departed || source_participated)
                     && !leading_guard_refused
@@ -8190,6 +8187,14 @@ fn parse_chose_other_ring_bearer_intervening_if(input: &str) -> OracleResult<'_,
     .parse(input)
 }
 
+fn source_attacked_or_blocked_this_turn_filter() -> TargetFilter {
+    // CR 700.7 + CR 603.4: "This creature" identifies the source even if its
+    // types change before the intervening-if is checked again.
+    TargetFilter::Typed(
+        TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+    )
+}
+
 fn parse_graveyard_origin_intervening_if(input: &str) -> OracleResult<'_, TriggerCondition> {
     // The zone phrases shared by the passive split's two legs: each scopes its
     // own origin-zone owner ("your graveyard" → owner You; "a graveyard" /
@@ -9272,7 +9277,7 @@ fn extract_if_condition_with_card_name(
             ),
             // CR 508.1 + CR 509.1 + CR 603.4: source-scoped "if ~ attacked or
             // blocked this turn" — the sibling of the attacked-only arm above,
-            // gating on the source creature having attacked OR blocked this turn
+            // gating on the source having attacked OR blocked this turn
             // (Inferno Hellion). Reuses the existing, already-evaluated
             // `FilterProp::AttackedOrBlockedThisTurn` (checked against
             // `state.creatures_attacked_this_turn` / `creatures_blocked_this_turn`)
@@ -9283,10 +9288,7 @@ fn extract_if_condition_with_card_name(
             (
                 "if ~ attacked or blocked this turn",
                 TriggerCondition::SourceMatchesFilter {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::creature()
-                            .properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
-                    ),
+                    filter: source_attacked_or_blocked_this_turn_filter(),
                 },
             ),
             // CR 603.4: past-turn life loss.

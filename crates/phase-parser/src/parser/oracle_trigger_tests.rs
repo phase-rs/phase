@@ -2928,14 +2928,10 @@ fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
 
 #[test]
 fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
-    // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
-    // attacked-only intervening-if. Gates on the source creature having attacked
-    // OR blocked this turn, composed from the existing, already-evaluated
-    // `FilterProp::AttackedOrBlockedThisTurn` via `SourceMatchesFilter` — no new
-    // `TriggerCondition` variant.
+    // SHAPE — CR 700.7: The filter describes the source's combat history.
     let expected = Some(TriggerCondition::SourceMatchesFilter {
         filter: TargetFilter::Typed(
-            TypedFilter::creature().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
+            TypedFilter::default().properties(vec![FilterProp::AttackedOrBlockedThisTurn]),
         ),
     });
 
