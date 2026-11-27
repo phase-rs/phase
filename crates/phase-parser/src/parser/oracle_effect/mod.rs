@@ -9122,10 +9122,7 @@ fn try_parse_create_token_choice(
     }))
 }
 
-/// CR 111.2 + CR 608.2c: Shared-verb token sequences such as "create a ...
-/// token with deathtouch and a ... token with lifelink" carry two token noun
-/// phrases in written order, not one token with a long keyword suffix. Parse
-/// both noun phrases through the normal token grammar and chain the second.
+/// CR 701.7a + CR 608.2c: One creation verb governs all of the noun phrases.
 fn try_parse_create_token_sequence(
     tp: TextPair<'_>,
     ctx: &mut ParseContext,
@@ -9138,44 +9135,23 @@ fn try_parse_create_token_sequence(
 
     let items = split_create_token_sequence(after_create)?;
 
-    // Parse every list item as a predefined/created token in written order
-    // (CR 608.2c). If the conjunctive "and"-gate fired and produced >= 2 items
-    // but some item is not an `Effect::Token`, do NOT fall through to the silent
-    // single-leading-token path — that is exactly the middle-drop bug this fix
-    // removes. Surface an honest `Effect::unimplemented` for the whole clause so
-    // coverage stays red rather than claiming partial support.
-    let mut effects: Vec<(&str, Effect)> = Vec::with_capacity(items.len());
-    for (orig, lower) in items {
-        match token::try_parse_token(lower, orig.trim(), ctx) {
-            Some(effect @ Effect::Token { .. }) => effects.push((orig, effect)),
-            _ => {
-                return Some(parsed_clause(Effect::unimplemented(
-                    "create_token_sequence_non_token_item",
-                    tp.original,
-                )));
-            }
-        }
-    }
-
-    // Chain every token via `sub_ability` in written order, reproducing the
-    // former binary builder shape (head clause + trailing sub-abilities). Both
-    // `AbilityDefinition::new` and `parsed_clause` take `Effect` by value, so the
-    // owned effects are consumed here (`into_iter`, not `iter`).
-    let mut iter = effects.into_iter();
-    let (_, head_effect) = iter.next()?;
-    let tail: Vec<(&str, Effect)> = iter.collect();
-
-    let mut chain: Option<Box<AbilityDefinition>> = None;
-    for (orig, effect) in tail.into_iter().rev() {
-        let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
-        def.description = Some(format!("create {}", orig.trim()));
-        def.sub_ability = chain.take();
-        chain = Some(Box::new(def));
-    }
-
-    let mut clause = parsed_clause(head_effect);
-    clause.sub_ability = chain;
-    Some(clause)
+    let mut items = items.into_iter();
+    let list = items.next().and_then(|(original, lower)| {
+        let mut head = token::try_parse_token(lower, original.trim(), ctx)?;
+        let Effect::Token {
+            additional_members, ..
+        } = &mut head
+        else {
+            return None;
+        };
+        *additional_members = items
+            .map(|(original, lower)| token::parse_token_creation_member(original, lower, ctx))
+            .collect::<Option<Vec<_>>>()?;
+        Some(head)
+    });
+    Some(parsed_clause(list.unwrap_or_else(|| {
+        Effect::unimplemented("create_token_sequence_non_token_item", tp.original)
+    })))
 }
 
 fn token_source_pt_followup_can_apply_to_chunk(text: &str) -> bool {
@@ -22863,6 +22839,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 static_abilities,
                 enter_with_counters,
                 count: base_count,
+                additional_members: _,
             } => {
                 // CR 109.4: a "their <zone>" possessive in the for-each clause
                 // binds to the player creating the token. Stamp ScopedPlayer
@@ -22916,6 +22893,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     static_abilities,
                     enter_with_counters,
                     count: replace_fixed_quantity(base_count, count),
+                    additional_members: Vec::new(),
                 }
             }
             other => other,
@@ -35913,7 +35891,7 @@ fn lower_subject_predicate_ast_body(
                     &player,
                 );
             }
-            inject_subject_into_shared_token_sequence(&mut clause, &subject, original_clause);
+            inject_subject_into_token_tail(&mut clause, &subject, original_clause);
             if let Some(subject_filter) = subject.target.as_ref().or(subject.affected.as_ref()) {
                 sync_player_into_nested_shuffle_sub(&mut clause, subject_filter);
             }
@@ -38528,12 +38506,9 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     }
 }
 
-/// CR 111.2 + CR 608.2c: A subject preceding a shared-verb token list applies
-/// to every token creation in that list. `try_parse_create_token_sequence`
-/// lowers each noun phrase as a linked `Effect::Token`, so thread the same
-/// already-bound subject through the contiguous token tail rather than leaving
-/// later tokens at their `Controller` default.
-fn inject_subject_into_shared_token_sequence(
+/// Bind the subject on token instructions already lowered into a tail. The
+/// members of one shared verb use the owner stored on that instruction.
+fn inject_subject_into_token_tail(
     clause: &mut ParsedEffectClause,
     subject: &SubjectPhraseAst,
     original_clause: &str,
@@ -65499,6 +65474,7 @@ mod iteration_destination_rebinding_tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 

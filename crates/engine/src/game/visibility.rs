@@ -8561,6 +8561,7 @@ mod tests {
                     source_id: paid,
                     legal_targets: Vec::new(),
                     pending_ability: effect(),
+                    chosen_hosts: Vec::new(),
                 }),
             ),
             (

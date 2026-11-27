@@ -566,6 +566,7 @@ fn count_gate_rebind_reaches_token_entry_counters_but_not_granted_statics() {
                 StaticDefinition::continuous().condition(granted_condition.clone())
             ],
             enter_with_counters: vec![(CounterType::Plus1Plus1, placeholder.clone())],
+            additional_members: Vec::new(),
         },
     );
     match execute.effect.as_ref() {

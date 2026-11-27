@@ -670,11 +670,18 @@ fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
             count,
             power,
             toughness,
+            additional_members,
             ..
         } => {
             rewrite_variable_x_to_cost_x_paid(count);
             rewrite_trigger_pt_variable_x(power);
             rewrite_trigger_pt_variable_x(toughness);
+            for member in additional_members {
+                let (count, power, toughness) = member.count_and_pt_mut();
+                rewrite_variable_x_to_cost_x_paid(count);
+                rewrite_trigger_pt_variable_x(power);
+                rewrite_trigger_pt_variable_x(toughness);
+            }
         }
         Effect::Pump {
             power, toughness, ..

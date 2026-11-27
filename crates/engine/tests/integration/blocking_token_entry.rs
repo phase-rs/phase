@@ -129,8 +129,10 @@ fn brimaz_uses_each_declared_block_pair_and_preserves_vigilance() {
 }
 
 #[test]
-fn flash_foliage_cast_creates_a_blocker_and_draws_with_multiplication() {
-    for token_count in [1, 2] {
+fn flash_foliage_cast_creates_blockers_with_token_replacements_and_draws() {
+    for (parallel_lives, chatterfang, token_count) in
+        [(false, false, 1), (true, false, 2), (false, true, 2)]
+    {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::BeginCombat);
         scenario.add_creature(P1, "Available blocker", 2, 2);
@@ -140,8 +142,17 @@ fn flash_foliage_cast_creates_a_blocker_and_draws_with_multiplication() {
         let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
         scenario.add_creature(P0, "Bystander", 2, 2);
         scenario.with_library_top(P1, &["Drawn card"]);
-        if token_count == 2 {
+        if parallel_lives {
             scenario.add_enchantment_from_oracle(P1, "Parallel Lives", PARALLEL_LIVES);
+        }
+        if chatterfang {
+            let db = crate::support::shared_card_db().expect("integration card fixture");
+            scenario.add_real_card(
+                P1,
+                "Chatterfang, Squirrel General",
+                engine::types::zones::Zone::Battlefield,
+                db,
+            );
         }
         let mut runner = scenario.build();
         declare(
@@ -166,6 +177,15 @@ fn flash_foliage_cast_creates_a_blocker_and_draws_with_multiplication() {
         assert!(blockers
             .iter()
             .all(|id| outcome.state().objects[id].is_token));
+        if chatterfang {
+            assert!(blockers.iter().any(|id| {
+                outcome.state().objects[id]
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == "Squirrel")
+            }));
+        }
         // CR 509.3a-d: one first-blocked occurrence and one per entering blocker.
         assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::AttackerBecameBlocked { attacker: id, .. } if *id == attacker)).count(), 1);
         let entries: Vec<_> = outcome

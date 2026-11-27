@@ -20134,8 +20134,9 @@ fn effect_chain_create_distinct_token_sequence_preserves_second_token() {
         other => panic!("expected first Token effect, got {other:?}"),
     }
 
-    let sub = def.sub_ability.as_ref().expect("second token sub-ability");
-    match &*sub.effect {
+    let members = token_sequence_members(&def);
+    assert_eq!(members.len(), 2);
+    match members[1] {
         Effect::Token { name, keywords, .. } => {
             assert_eq!(name, "Phyrexian Wurm");
             assert_eq!(keywords, &vec![Keyword::Lifelink]);
@@ -20156,8 +20157,9 @@ fn effect_chain_create_generic_token_sequence() {
         other => panic!("expected first Token effect, got {other:?}"),
     }
 
-    let sub = def.sub_ability.as_ref().expect("second token sub-ability");
-    match &*sub.effect {
+    let members = token_sequence_members(&def);
+    assert_eq!(members.len(), 2);
+    match members[1] {
         Effect::Token { name, .. } => assert_eq!(name, "Treasure"),
         other => panic!("expected second Token effect, got {other:?}"),
     }
@@ -20180,16 +20182,21 @@ fn effect_chain_create_single_token_with_keyword_conjunction_does_not_split() {
     }
 }
 
-/// Walk a `create A, B, and C` chain: head `def.effect` plus every `sub_ability`
-/// node, in written order.
-fn token_sequence_chain(def: &AbilityDefinition) -> Vec<&Effect> {
-    let mut out = vec![&*def.effect];
-    let mut cur = def.sub_ability.as_deref();
-    while let Some(node) = cur {
-        out.push(&*node.effect);
-        cur = node.sub_ability.as_deref();
-    }
-    out
+/// Inspect all members of one compound creation instruction in written order.
+fn token_sequence_members(def: &AbilityDefinition) -> Vec<&Effect> {
+    assert!(
+        def.sub_ability.is_none(),
+        "shared creation cannot be a chain"
+    );
+    let Effect::Token {
+        additional_members, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected token creation, got {:?}", def.effect);
+    };
+    std::iter::once(def.effect.as_ref())
+        .chain(additional_members.iter().map(|member| member.effect()))
+        .collect()
 }
 
 // CR 608.2c: "create A, a B, and a C token" is a do-ALL list in written order;
@@ -20202,8 +20209,12 @@ fn effect_chain_bestial_menace_preserves_middle_token() {
         "Create a 1/1 green Snake creature token, a 2/2 green Wolf creature token, and a 3/3 green Elephant creature token.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
-    assert_eq!(nodes.len(), 3, "expected 3 chained tokens, got {nodes:?}");
+    let nodes = token_sequence_members(&def);
+    assert_eq!(
+        nodes.len(),
+        3,
+        "expected 3 members of the same creation, got {nodes:?}"
+    );
     // node[1] = the middle token the old binary split silently dropped.
     match nodes[1] {
         Effect::Token {
@@ -20226,8 +20237,12 @@ fn effect_chain_fae_offering_preserves_middle_token() {
         "Create a Clue token, a Food token, and a Treasure token.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
-    assert_eq!(nodes.len(), 3, "expected 3 chained tokens, got {nodes:?}");
+    let nodes = token_sequence_members(&def);
+    assert_eq!(
+        nodes.len(),
+        3,
+        "expected 3 members of the same creation, got {nodes:?}"
+    );
     match nodes[1] {
         Effect::Token { name, .. } => assert_eq!(name, "Food"),
         other => panic!("expected Food at node[1], got {other:?}"),
@@ -20243,7 +20258,7 @@ fn effect_chain_triplicate_titan_middle_keyword_no_oversplit() {
         "Create a 3/3 colorless Golem artifact creature token with flying, a 3/3 colorless Golem artifact creature token with vigilance, and a 3/3 colorless Golem artifact creature token with trample.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
+    let nodes = token_sequence_members(&def);
     assert_eq!(nodes.len(), 3, "expected exactly 3 tokens, got {nodes:?}");
     match nodes[1] {
         Effect::Token { keywords, .. } => {
@@ -20259,7 +20274,7 @@ fn effect_chain_trostanis_summoner_mixed_keywords() {
         "Create a 2/2 white Knight creature token with vigilance, a 3/3 green Centaur creature token, and a 4/4 green Rhino creature token with trample.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
+    let nodes = token_sequence_members(&def);
     assert_eq!(nodes.len(), 3, "expected 3 tokens, got {nodes:?}");
     match nodes[0] {
         Effect::Token { name, keywords, .. } => {
@@ -20303,7 +20318,7 @@ fn effect_chain_companion_of_the_wilds_cant_block_on_rat_not_food() {
         "Create a Food token, a 1/1 black Rat creature token with \"This creature can't block,\" and a Royal role token attached to a creature you control.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
+    let nodes = token_sequence_members(&def);
     assert_eq!(nodes.len(), 3, "expected 3 tokens, got {nodes:?}");
     // node[0] = Food, and it must NOT carry the can't-block static.
     match nodes[0] {
@@ -20347,6 +20362,53 @@ fn effect_chain_companion_of_the_wilds_cant_block_on_rat_not_food() {
     }
 }
 
+/// CR 608.2d + CR 115.10a: a later member's described host ("attached to a
+/// creature you control", The Companion of the Wilds) is chosen at resolution.
+/// A later member whose host uses the word "target", even quantified ("up to
+/// one target creature you control"), would need a stack target slot that only
+/// the instruction's own token has, so the list stays unparsed.
+#[test]
+fn token_list_member_host_timing_follows_the_word_target() {
+    let def = parse_effect_chain(
+        "Create a Food token, a 1/1 black Rat creature token with \"This creature can't block,\" and a Royal role token attached to a creature you control.",
+        AbilityKind::Spell,
+    );
+    let Effect::Token {
+        additional_members, ..
+    } = def.effect.as_ref()
+    else {
+        panic!("expected one token instruction, got {:?}", def.effect);
+    };
+    let role = additional_members.last().expect("the Royal Role member");
+    assert!(
+        role.resolution_host_filter().is_some(),
+        "the described host is chosen at resolution: {role:?}"
+    );
+    assert_eq!(
+        additional_members
+            .iter()
+            .filter(|member| member.resolution_host_filter().is_some())
+            .count(),
+        1
+    );
+
+    for host in [
+        "target creature you control",
+        "another target creature you control",
+        "up to one target creature you control",
+    ] {
+        let def = parse_effect_chain(
+            &format!("Create a Food token and a Royal role token attached to {host}."),
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
+            "{host}: a later member's announced target fails closed, got {:?}",
+            def.effect
+        );
+    }
+}
+
 /// [REVIEW A2] The only test that exercises the new step-2 `peek` guard. The
 /// gate-PASSING "…, and a 1/1 Bird…" coordinator lets the splitter run, but the
 /// intra-item "with menace, vigilance," keyword comma must NOT split off a bare
@@ -20359,7 +20421,7 @@ fn effect_chain_intra_item_keyword_comma_does_not_oversplit() {
         "Create a 2/2 black Zombie creature token with menace, vigilance, and a 1/1 white Bird creature token with flying.",
         AbilityKind::Spell,
     );
-    let nodes = token_sequence_chain(&def);
+    let nodes = token_sequence_members(&def);
     assert_eq!(nodes.len(), 2, "expected exactly 2 tokens, got {nodes:?}");
     match nodes[0] {
         Effect::Token { name, keywords, .. } => {
