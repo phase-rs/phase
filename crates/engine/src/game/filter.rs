@@ -13688,6 +13688,29 @@ pub(crate) fn lki_shared_quality_values(
     )
 }
 
+/// CR 115.7d + CR 400.7 + CR 608.2h: A retained target contributes its current
+/// characteristics while the announced incarnation remains in its zone, or
+/// that incarnation's exit snapshot once it leaves.
+pub(super) fn incarnation_shared_quality_values(
+    state: &GameState,
+    pin: ObjectIncarnationRef,
+    quality: &SharedQuality,
+) -> Option<HashSet<String>> {
+    if let Some(object) = state
+        .objects
+        .get(&pin.object_id)
+        .filter(|object| object.incarnation == pin.incarnation)
+    {
+        return Some(object_shared_quality_values(
+            object,
+            quality,
+            &state.all_creature_types,
+        ));
+    }
+    exit_lki_for_incarnation(state, pin.object_id, pin.incarnation)
+        .map(|lki| lki_shared_quality_values(lki, quality, &state.all_creature_types))
+}
+
 /// CR 608.2h: the values of `quality` read from a zone-change event
 /// snapshot. Mirrors `lki_shared_quality_values` — both are snapshots, so
 /// both read plain (already-effective) colors and mana value rather than
@@ -14219,6 +14242,13 @@ pub fn objects_have_common_quality_value(
         ));
     }
 
+    quality_sets_have_common_value(&sets)
+}
+
+pub(super) fn quality_sets_have_common_value(sets: &[HashSet<String>]) -> bool {
+    if sets.len() < 2 {
+        return true;
+    }
     let mut shared = sets[0].clone();
     for set in &sets[1..] {
         shared = shared.intersection(set).cloned().collect();

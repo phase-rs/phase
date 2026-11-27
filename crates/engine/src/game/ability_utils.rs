@@ -10676,7 +10676,8 @@ fn validate_selected_slots_with_specs(
                             .zip(&selected_slots[..index])
                             .filter(|(prior, _)| prior.instance == spec.instance)
                             .filter_map(|(_, selection)| selection.as_ref())
-                            .chain(std::iter::once(target)),
+                            .chain(std::iter::once(target))
+                            .map(|target| live_target_pin(state, target)),
                     )
                 }) {
                     return Err(EngineError::InvalidAction(
@@ -10722,31 +10723,31 @@ pub(super) fn per_object_target_filter<'a>(
 fn matches_declared_shared_qualities<'a>(
     state: &GameState,
     qualities: impl IntoIterator<Item = (&'a SharedQuality, SharedQualityRelation)>,
-    targets: impl IntoIterator<Item = &'a TargetRef>,
+    targets: impl IntoIterator<Item = Option<ObjectIncarnationRef>>,
 ) -> bool {
     let mut qualities = qualities.into_iter().peekable();
     if qualities.peek().is_none() {
         return true;
     }
-    let Some(objects) = targets
-        .into_iter()
-        .map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()
-    else {
+    let Some(pins) = targets.into_iter().collect::<Option<Vec<_>>>() else {
         return false;
     };
-    qualities.all(|(quality, relation)| match relation {
-        SharedQualityRelation::Shares => {
-            super::filter::objects_have_common_quality_value(state, &objects, quality)
+    qualities.all(|(quality, relation)| {
+        let Some(sets) = pins
+            .iter()
+            .map(|pin| super::filter::incarnation_shared_quality_values(state, *pin, quality))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        match relation {
+            SharedQualityRelation::Shares => super::filter::quality_sets_have_common_value(&sets),
+            SharedQualityRelation::DoesNotShare => sets.iter().enumerate().all(|(index, set)| {
+                sets[..index]
+                    .iter()
+                    .all(|other| !super::filter::quality_sets_overlap(other, set))
+            }),
         }
-        SharedQualityRelation::DoesNotShare => objects.iter().enumerate().all(|(index, id)| {
-            objects[..index].iter().all(|other| {
-                !super::filter::objects_have_common_quality_value(state, &[*other, *id], quality)
-            })
-        }),
     })
 }
 
@@ -10775,13 +10776,14 @@ pub(super) fn changed_target_runs_satisfy_shared_qualities(
             let Some(node) = node_at(post, &binding.address.path) else {
                 return false;
             };
-            let targets = bindings
-                .iter()
-                .filter(|other| other.run == Some(run))
-                .map(|other| node.targets.get(other.address.slot))
-                .collect::<Option<Vec<_>>>();
-            targets
-                .is_some_and(|targets| matches_declared_shared_qualities(state, qualities, targets))
+            matches_declared_shared_qualities(
+                state,
+                qualities,
+                bindings
+                    .iter()
+                    .filter(|other| other.run == Some(run))
+                    .map(|other| node.target_pin_at(other.address.slot)),
+            )
         })
 }
 

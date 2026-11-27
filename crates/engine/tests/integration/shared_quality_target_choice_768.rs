@@ -414,3 +414,113 @@ fn deflecting_swat_checks_the_final_rivals_duel_pair() {
     assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&elf].zone, Zone::Graveyard);
 }
+
+#[test]
+fn deflecting_swat_checks_secret_tunnel_against_departed_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tunnel = scenario
+        .add_land_from_oracle(P0, "Secret Tunnel", SECRET_TUNNEL)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let swat = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deflecting Swat", true, DEFLECTING_SWAT)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let departed = scenario
+        .add_creature(P0, "Goblin", 1, 1)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let survivor = scenario
+        .add_creature(P0, "Goblin", 1, 1)
+        .with_subtypes(vec!["Goblin"])
+        .id();
+    let [replacement, _, elf, _] = battlefield(&mut scenario);
+    let mut runner = build(
+        scenario,
+        &[
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Red,
+        ],
+    );
+    for token in [departed, survivor] {
+        runner.state_mut().objects.get_mut(&token).unwrap().is_token = true;
+    }
+    let ability_index = runner.state().objects[&tunnel]
+        .abilities
+        .iter()
+        .position(|ability| ability.multi_target.is_some())
+        .expect("Secret Tunnel's two-target activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: tunnel,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    choose(&mut runner, departed);
+    choose(&mut runner, survivor);
+    let tunnel_entry = runner.state().stack[0].id;
+
+    runner.cast(shock).target_object(departed).commit();
+    runner.pass_both_players();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(!runner.state().objects.contains_key(&departed));
+
+    runner.cast(swat).target_object(tunnel_entry).commit();
+    runner.pass_both_players();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    let WaitingFor::RetargetChoice {
+        player: P0,
+        current_targets,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("expected Swat's target-change prompt");
+    };
+    assert_eq!(
+        current_targets,
+        &[TargetRef::Object(departed), TargetRef::Object(survivor)]
+    );
+
+    // CR 115.7d + CR 608.2h: Keep the departed target and compare its
+    // last known creature types with the proposed replacement's current types.
+    let retarget = |candidate| GameAction::RetargetSpell {
+        new_targets: vec![None, Some(TargetRef::Object(candidate))],
+    };
+    assert!(runner.act(retarget(elf)).is_err(), "Elf replacement");
+    runner
+        .act(retarget(replacement))
+        .expect("Goblin replacement against departed Goblin");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].id, tunnel_entry);
+    assert_eq!(
+        runner.state().stack[0].ability().unwrap().targets,
+        [TargetRef::Object(departed), TargetRef::Object(replacement)]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
