@@ -2161,7 +2161,7 @@ async function openNativeOwner(
   } finally {
     settleProvisional(provisional);
   }
-  // A successor or a reset has published its own session.
+  // A successor, a leave or a reset owns the session published now or next.
   if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
   if (!isCurrentProvisional(provisional) || signal?.aborted) {
     // A recovery, a leave or its route ended this start after it retired its
@@ -2447,9 +2447,14 @@ export const useMultiplayerDraftStore = create<
 
       // After the handover the retired owner is not reinstated. A restore that
       // fails ends B as well, with its saved session kept. That ends B with no
-      // successor, so a leave still waiting for B keeps waiting.
+      // successor, so a leave still waiting for B keeps waiting. A reset that
+      // ended B's lifecycle has published its own state, so B is only disposed.
       const endCommittedRecovery = async () => {
-        if (installedHost() === provisional && committedEpoch === draftAdapterEpoch) {
+        if (
+          installedHost() === provisional &&
+          committedEpoch === draftAdapterEpoch &&
+          committedGeneration === lifecycleGeneration
+        ) {
           advanceDraftAdapterEpoch("ended");
           const detached = detachInstalledDraftOwner();
           set(initialState);
@@ -2485,12 +2490,15 @@ export const useMultiplayerDraftStore = create<
             : undefined,
         });
       } catch (error) {
+        // Read as the failure lands: a reset, a leave or a successor that has
+        // ended B's lifecycle owns what the store shows.
+        const lifecycleEnded = committedGeneration !== null && committedGeneration !== lifecycleGeneration;
         if (committedEpoch === null) await disposeProvisional();
         else await endCommittedRecovery();
         if (error instanceof Draft27IncompatibilityError) return "incompatible";
         if (error instanceof UnreadableSavedDraftError) return "unreadable";
         if (attempt.config.signal?.aborted) return "aborted";
-        if (!isCurrentRecovery()) return "superseded";
+        if (lifecycleEnded || !isCurrentRecovery()) return "superseded";
         if (getEffectiveOffline()) return "offline";
         return "initializationFailure";
       }
@@ -2549,7 +2557,7 @@ export const useMultiplayerDraftStore = create<
     } finally {
       settleProvisional(provisional);
     }
-    // A successor or a reset has published its own session.
+    // A successor, a leave or a reset owns the session published now or next.
     if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
     if (!isCurrentProvisional(provisional)) {
       // A recovery superseded this start after it retired its predecessor, so

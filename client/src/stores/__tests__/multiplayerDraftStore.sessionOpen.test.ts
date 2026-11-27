@@ -949,30 +949,41 @@ describe("session-open outcome of a superseded attempt", () => {
     },
   );
 
-  it("a reset while a recovered host restores its saved session ends the recovery", async () => {
-    const restore = held();
-    let committed = false;
-    hosts.nextInitialize.push(async (config) => {
-      await config.recovery!.handover!();
-      committed = true;
-      await restore.promise;
-    });
-    const recovering = useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD"));
-    const recovery = track(recovering);
-    try {
-      // Reach: the handover installed the recovered host, which is still restoring.
-      await vi.waitFor(() => expect(committed).toBe(true));
-      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "R-POD" });
+  it.each(["succeeds", "fails"] as const)(
+    "a reset while a recovered host restores its saved session ends the recovery when that restore %s",
+    async (restoreOutcome) => {
+      const restore = held();
+      let committed = false;
+      hosts.nextInitialize.push(async (config) => {
+        await config.recovery!.handover!();
+        committed = true;
+        await restore.promise;
+        if (restoreOutcome === "fails") throw new Error("Invalid draft snapshot: restore refused");
+      });
+      const recovering = useMultiplayerDraftStore.getState().resumeHostedDraft(recoveryOf("R-POD"));
+      const recovery = track(recovering);
+      let published: ReturnType<typeof useMultiplayerDraftStore.getState>;
+      try {
+        // Reach: the handover installed the recovered host, which is still restoring.
+        await vi.waitFor(() => expect(committed).toBe(true));
+        expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: "host", hostPersistenceId: "R-POD" });
 
-      useMultiplayerDraftStore.getState().reset();
-      await flush();
-      expect(recovery.state()).toBe("pending");
-    } finally {
-      restore.resolve();
-    }
+        useMultiplayerDraftStore.getState().reset();
+        await flush();
+        expect(recovery.state()).toBe("pending");
+        published = useMultiplayerDraftStore.getState();
+        // The reset's own generation, which the initial state's would not match.
+        expect(published.interactionGeneration).toBeGreaterThan(0);
+      } finally {
+        restore.resolve();
+      }
 
-    await expect(recovering).resolves.toBe("superseded");
-    expect(hosts.instances).toHaveLength(1);
-    expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
-  });
+      await expect(recovering).resolves.toBe("superseded");
+      expect(hosts.instances).toHaveLength(1);
+      if (restoreOutcome === "fails") expect(hosts.instances[0]!.dispose).toHaveBeenCalledTimes(1);
+      // Nothing is written over the state the reset published.
+      expect(useMultiplayerDraftStore.getState()).toBe(published);
+      expect(useMultiplayerDraftStore.getState()).toMatchObject({ role: null, phase: "idle" });
+    },
+  );
 });
