@@ -5325,6 +5325,17 @@ fn collect_target_slots_inner(
         return Err(TargetSlotBuildError::RequiresChosenX);
     }
 
+    // CR 608.2c + CR 115.10a: a reader of a previously chosen target group
+    // does not declare a new target. Its effect filter may refine the bound
+    // group (for example, "the chosen permanents you control"), but the
+    // objects are already carried in `ability.targets` by the chosen-group
+    // binder. Treating that refinement as a fresh slot asks the player to
+    // choose an object a second time and can make the whole ability
+    // uncastable when the refinement is not independently satisfiable.
+    if ability.reads_chosen_group.is_some() {
+        return collect_sub_chain_slots(state, ability, acc);
+    }
+
     // CR 609.7 + CR 601.2c: A source-scoped `PreventDamage` ("prevent all damage
     // target instant or sorcery spell would deal this turn") surfaces the
     // choosable source spell as a target slot. Declared FIRST (CR 601.2c
@@ -7623,6 +7634,14 @@ fn collect_target_slot_specs(
         for spec in &mut specs[start..] {
             spec.path.insert(0, ChainStep::SubAbility);
         }
+        return;
+    }
+
+    // Keep the slot-spec mirror aligned with `collect_target_slots_inner`:
+    // chosen-group readers reuse the declaration's target occurrences and do
+    // not introduce another announcement-time slot.
+    if ability.reads_chosen_group.is_some() {
+        collect_sub_chain_slot_specs(state, ability, specs, next_instance, pools);
         return;
     }
 
@@ -10677,6 +10696,15 @@ fn assign_targets_recursive(
         return Ok(());
     }
 
+    // CR 608.2c + CR 115.10a: chosen-group readers reuse the declaration's
+    // target occurrences. Their refined effect filter is evaluated against
+    // that bound group during resolution, so it consumes no new announcement
+    // target in either the bulk or slot-wise assignment path.
+    if ability.reads_chosen_group.is_some() {
+        assign_sub_chain_targets(state, ability, targets, next_target)?;
+        return Ok(());
+    }
+
     if let Effect::MoveCounters {
         source,
         target,
@@ -11080,6 +11108,14 @@ fn assign_selected_slots_recursive(
             ability.replace_target_occurrences(mirrored);
             ability.context.attach_target_bindings = bindings;
         }
+        return Ok(());
+    }
+
+    // Keep the slot-wise assignment mirror aligned with the bulk assigner and
+    // with `collect_target_slots_inner`: a chosen-group reader has no new
+    // announcement-time target slot.
+    if ability.reads_chosen_group.is_some() {
+        assign_sub_chain_selected_slots(state, ability, selected_slots, next_slot, announced)?;
         return Ok(());
     }
 
@@ -13182,6 +13218,23 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
 
     type GroupTargets = Vec<(TargetRef, Option<ObjectIncarnationRef>)>;
 
+    /// CR 601.2c + CR 608.2c: a `choose` declaration whose target slots are
+    /// lowered as `ListSlot` siblings publishes every announced occurrence as
+    /// one chosen group. The declaration node owns the first slot; collecting
+    /// only its local targets would make a later "the chosen permanents"
+    /// reader see the first slot and silently lose the rest.
+    fn declared_group_targets(node: &ResolvedAbility) -> GroupTargets {
+        let mut targets = node.target_occurrences();
+        let mut child = node.sub_ability.as_deref();
+        while let Some(list_slot) = child.filter(|child| {
+            child.instruction_join == crate::types::ability::InstructionJoin::ListSlot
+        }) {
+            targets.extend(list_slot.target_occurrences());
+            child = list_slot.sub_ability.as_deref();
+        }
+        targets
+    }
+
     fn collect(
         node: &ResolvedAbility,
         groups: &mut HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
@@ -13191,7 +13244,8 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
             return;
         }
         if let Some(id) = node.declares_chosen_group {
-            groups.insert(id, node.target_occurrences());
+            let targets = declared_group_targets(node);
+            groups.insert(id, targets);
         }
         if let Some(sub) = node.sub_ability.as_deref() {
             // An unpaid "instead" sub declares nothing; only its sequential
@@ -13219,7 +13273,13 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
         groups: &HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
     ) {
         if let Some(id) = node.reads_chosen_group {
-            node.replace_target_occurrences(groups.get(&id).cloned().unwrap_or_default());
+            // A resolver may restamp an isolated child after the enclosing
+            // declaration has already supplied its occurrences. Preserve that
+            // snapshot when the declaration is outside this subtree; an
+            // explicitly collected empty group still replaces it with empty.
+            if let Some(targets) = groups.get(&id) {
+                node.replace_target_occurrences(targets.clone());
+            }
         }
         for (edge, child) in node.child_links_mut() {
             match edge {

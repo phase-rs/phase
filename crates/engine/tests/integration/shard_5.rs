@@ -285,6 +285,7 @@ mod teamwork_keyword;
 mod teamwork_origin_composition;
 mod teferi_master_of_time;
 mod teferi_time_raveler_sorcery_speed_lock;
+mod teferi_who_slows_the_sunset;
 mod teferis_puzzle_box_4241;
 mod telling_time_rest_split;
 mod temporal_anchor;

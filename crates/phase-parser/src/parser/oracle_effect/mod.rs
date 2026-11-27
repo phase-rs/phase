@@ -33960,6 +33960,47 @@ fn bind_anaphors_across_resolution_choices(clauses: &mut [ClauseIr], body_scope:
     }
 }
 
+/// CR 608.2c: a plural "the chosen <objects>" reader names the complete
+/// target group announced by an earlier `choose target` instruction. The
+/// ordinary `ParentTarget` lowering is sufficient for a single target, but it
+/// would otherwise inherit only the nearest list slot when the declaration is
+/// a chain of independent target slots.
+fn bind_chosen_target_list_readers(clauses: &mut [ClauseIr]) {
+    fn reads_plural_chosen_object(text: &str) -> bool {
+        let lower = text.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&lower, |input| {
+            let (input, _) = tag("the chosen ").parse(input)?;
+            let (input, _) = alt((
+                tag("artifacts"),
+                tag("creatures"),
+                tag("lands"),
+                tag("permanents"),
+            ))
+            .parse(input)?;
+            Ok((input, ()))
+        })
+        .is_some()
+    }
+
+    for index in 0..clauses.len() {
+        let reader = &clauses[index];
+        if reader.reads_chosen_clause.is_some()
+            || !clause_refs_parent_target(reader)
+            || !reads_plural_chosen_object(reader.source.fragment().unwrap_or_default())
+        {
+            continue;
+        }
+        let Some(group) = clauses[..index]
+            .iter()
+            .rev()
+            .find_map(|clause| clause.declares_chosen_clause)
+        else {
+            continue;
+        };
+        clauses[index].reads_chosen_clause = Some(group);
+    }
+}
+
 #[cfg(test)]
 mod cross_choice_compound_reader_tests {
     use super::{bind_anaphors_across_resolution_choices, parse_effect_chain_ir};
@@ -58241,6 +58282,7 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: after player tagging, so a producer's player group is final and
     // the object-group stamp cannot suppress it.
     bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
+    bind_chosen_target_list_readers(builder.clauses_mut());
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
     // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the

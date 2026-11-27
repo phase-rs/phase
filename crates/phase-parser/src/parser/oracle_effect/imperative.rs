@@ -2281,6 +2281,52 @@ fn parse_tap_total_power_floor(rem_lower: &str) -> Option<i32> {
     .and_then(|(_, floor)| i32::try_from(floor).ok())
 }
 
+/// CR 608.2c + CR 109.4: qualify a chosen-target reader by the controller
+/// phrase that follows it. ParentTarget supplies the announced chosen group;
+/// the typed controller leg selects the subset the instruction names.
+fn parse_chosen_controller_target(lower: &str) -> Option<TargetFilter> {
+    let input = lower.trim_end_matches('.');
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        alt((
+            tag("artifacts"),
+            tag("artifact"),
+            tag("cards"),
+            tag("card"),
+            tag("creatures"),
+            tag("creature"),
+            tag("enchantments"),
+            tag("enchantment"),
+            tag("lands"),
+            tag("land"),
+            tag("permanents"),
+            tag("permanent"),
+            tag("players"),
+            tag("player"),
+        )),
+    )
+    .parse(input)
+    .ok()?;
+    let (rest, controller) = alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>(" you control"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>(" you don't control"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    rest.is_empty().then_some(TargetFilter::And {
+        filters: vec![
+            TargetFilter::ParentTarget,
+            TargetFilter::Typed(TypedFilter::default().controller(controller)),
+        ],
+    })
+}
+
 /// CR 118.12: does a tap/untap target remainder carry a total-power
 /// restriction in ANY wording? The fail-closed companion of
 /// `parse_tap_total_power_floor`: a remainder it cannot parse must decline
@@ -2602,7 +2648,11 @@ pub(super) fn parse_targeted_action_ast(
         // Vigor) bind to `TriggeringSource` (the entering permanent). Without a
         // subject (a true parent-target chain, "tap target creature. untap it")
         // the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
-        let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
+        let target = if let Some(target) =
+            parse_chosen_controller_target(&target_text.to_ascii_lowercase())
+        {
+            target
+        } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
             let (target, rem) = parse_target_with_ctx(target_text, ctx);

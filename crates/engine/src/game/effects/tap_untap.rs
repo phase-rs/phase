@@ -13,6 +13,34 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolved_commands::ResolvedObjectStatus;
 use crate::types::zones::Zone;
 
+/// CR 608.2c: evaluate a chosen-group reader against one already-bound group
+/// member. The member is supplied by the group binding, so a `ParentTarget`
+/// leg is true by construction; the remaining filter legs still read the
+/// member's live characteristics and controller.
+fn chosen_group_member_matches(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+) -> bool {
+    match filter {
+        TargetFilter::ParentTarget => true,
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|filter| chosen_group_member_matches(state, ability, object_id, filter)),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|filter| chosen_group_member_matches(state, ability, object_id, filter)),
+        TargetFilter::Not { filter } => {
+            !chosen_group_member_matches(state, ability, object_id, filter)
+        }
+        other => {
+            let ctx = crate::game::filter::FilterContext::from_ability(ability);
+            crate::game::filter::matches_target_filter(state, object_id, other, &ctx)
+        }
+    }
+}
+
 /// CR 603.7e + CR 608.2c: Resolve the objects a `Tap`/`Untap` effect acts on.
 ///
 /// - `SelfRef` → the source object — the printed-name "tap ~"/"untap ~"
@@ -79,6 +107,23 @@ pub(super) fn tap_untap_target_ids(
         filter if ability.targets.is_empty() && super::EVENT_SUBJECT_ANAPHORS.contains(filter) => {
             crate::game::targeting::resolve_event_referent_permanents_for(state, ability, filter)
         }
+        // CR 608.2c + CR 115.10a: a chosen-group reader can narrow the
+        // previously announced group ("the chosen permanents you control").
+        // Resolve the filter against the full bound occurrence list so its
+        // controller/type predicate selects the appropriate subset instead of
+        // applying the tap state to every member of the group.
+        filter if ability.reads_chosen_group.is_some() => ability
+            .live_object_targets(state)
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id)
+                    if chosen_group_member_matches(state, ability, *id, filter) =>
+                {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect(),
         // CR 400.7 + CR 603.7c: a delayed tap/untap whose pinned referent became
         // a new object taps nothing. This arm is a RAW read that never reaches
         // `resolved_targets`, so the targeting chokepoint cannot see this pin.

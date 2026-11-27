@@ -3901,6 +3901,53 @@ fn parse_subject_application_for(
     if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
+    if let Ok((rest, _noun)) = preceded(
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        alt((
+            tag("artifacts"),
+            tag("artifact"),
+            tag("cards"),
+            tag("card"),
+            tag("creatures"),
+            tag("creature"),
+            tag("enchantments"),
+            tag("enchantment"),
+            tag("lands"),
+            tag("land"),
+            tag("permanents"),
+            tag("permanent"),
+            tag("players"),
+            tag("player"),
+        )),
+    )
+    .parse(lower.as_str())
+    {
+        let controller = alt((
+            value(
+                ControllerRef::You,
+                tag::<_, _, OracleError<'_>>(" you control"),
+            ),
+            value(
+                ControllerRef::Opponent,
+                tag::<_, _, OracleError<'_>>(" you don't control"),
+            ),
+        ))
+        .parse(rest)
+        .ok();
+        if let Some((remaining, controller)) = controller {
+            if remaining.is_empty() {
+                return subject_filter_application(
+                    TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ParentTarget,
+                            TargetFilter::Typed(TypedFilter::default().controller(controller)),
+                        ],
+                    },
+                    false,
+                );
+            }
+        }
+    }
     if all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("the chosen "),
         alt((
