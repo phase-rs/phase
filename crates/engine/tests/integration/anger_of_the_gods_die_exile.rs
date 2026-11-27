@@ -20,6 +20,8 @@
 //! even when no damage was dealt: that is the separate phase-rs/phase#10965 and is
 //! not covered here. Only its creature-noun gate is (Touch of the Void on a
 //! planeswalker).
+//!
+//! Flame Sweep covers mass damage that spares the caster's flyers.
 
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -439,6 +441,63 @@ fn underworld_fires_exiles_creature_and_planeswalker() {
         outcome.final_waiting_for(),
         WaitingFor::Priority { .. }
     ));
+}
+
+#[test]
+fn flame_sweep_spares_only_flyers_controlled_by_the_caster() {
+    const FLAME_SWEEP: &str =
+        "Flame Sweep deals 2 damage to each creature except for creatures you control with flying.";
+
+    // The spell also resolves when every creature is exempt (CR 608.2b and CR 115.10a).
+    for mixed_board in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let friendly_flyer = scenario
+            .add_creature(P0, "Friendly Flyer", 1, 3)
+            .flying()
+            .id();
+        let mut damaged = Vec::new();
+        if mixed_board {
+            damaged.push(scenario.add_creature(P0, "Friendly Ground", 1, 3).id());
+            damaged.push(scenario.add_creature(P1, "Opposing Ground", 1, 3).id());
+            damaged.push(
+                scenario
+                    .add_creature(P1, "Opposing Flyer", 1, 3)
+                    .flying()
+                    .id(),
+            );
+        }
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Flame Sweep", true, FLAME_SWEEP)
+            .with_mana_cost(cost(2, &[ManaCostShard::Red]))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            pool(&[ManaType::Colorless, ManaType::Colorless, ManaType::Red]),
+        );
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).resolve();
+
+        // CR 608.2n: The resolving instant finishes in the graveyard.
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        // CR 109.5 + CR 120.3e: Only the caster's flyer escapes marked damage.
+        outcome.assert_zone(&[friendly_flyer], Zone::Battlefield);
+        assert_eq!(outcome.damage_marked(friendly_flyer), 0);
+        outcome.assert_zone(&damaged, Zone::Battlefield);
+        for creature in damaged {
+            assert_eq!(
+                outcome.damage_marked(creature),
+                2,
+                "{}",
+                outcome.state().objects[&creature].name
+            );
+        }
+    }
 }
 
 /// CR 514.2: the replacement ends at cleanup. A survivor destroyed the same turn

@@ -58365,17 +58365,42 @@ fn try_fold_loses_other_sibling(clauses: &mut Vec<ClauseIr>) {
 /// would need a product expression that no bare-token card uses, so it falls
 /// through to the existing `repeat_for` loop.
 fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> bool {
-    if let Effect::Token {
-        count, attach_to, ..
-    } = effect
-    {
-        if attach_to.is_none() && matches!(count, QuantityExpr::Fixed { value: 1 }) {
-            *count = qty.clone();
-            rebind_iteration_destination(effect, qty);
-            return true;
+    let count = match effect {
+        Effect::Token {
+            count,
+            attach_to: None,
+            ..
+        } => count,
+        // CR 608.2c + CR 508.4: the donor is the same linked card for
+        // every opponent and the destination names the iterated player.
+        Effect::CopyTokenOf {
+            target: TargetFilter::ExiledBySource,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            attack_destination:
+                TokenAttackDestination::Player {
+                    player: ControllerRef::DefendingPlayer,
+                    ..
+                },
+            count,
+            ..
+        } if matches!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { .. }
+            }
+        ) =>
+        {
+            count
         }
+        _ => return false,
+    };
+    if !matches!(count, QuantityExpr::Fixed { value: 1 }) {
+        return false;
     }
-    false
+    *count = qty.clone();
+    rebind_iteration_destination(effect, qty);
+    true
 }
 
 /// CR 608.2c: a "for each <players>" iteration folded into one token batch
@@ -58389,6 +58414,9 @@ fn rebind_iteration_destination(effect: &mut Effect, qty: &QuantityExpr) {
         return;
     };
     if let Effect::Token {
+        attack_destination, ..
+    }
+    | Effect::CopyTokenOf {
         attack_destination, ..
     } = effect
     {

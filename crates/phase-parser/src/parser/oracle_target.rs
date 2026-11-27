@@ -11197,6 +11197,14 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
     nom_primitives::parse_color(rest)
 }
 
+fn parse_except_for_head(input: &str) -> OracleResult<'_, ()> {
+    value((), tag("except for")).parse(input)
+}
+
+fn parse_except_for_type_list_head(input: &str) -> OracleResult<'_, ()> {
+    terminated(parse_except_for_head, tag(" ")).parse(input)
+}
+
 /// CR 608.2c + CR 205.2b: "<type> except for <type-1>[, <type-2>]* and <type-N>"
 /// — a plain type-list exclusion suffix (Scourglass: "Destroy all permanents
 /// except for artifacts and lands"; Elspeth Tirel: "except for lands and
@@ -11247,9 +11255,7 @@ fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResu
 fn parse_except_for_type_list_suffix(
     text: &str,
 ) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, usize)> {
-    let (mut rest, _) = tag::<_, _, OracleError<'_>>("except for ")
-        .parse(text)
-        .ok()?;
+    let (mut rest, ()) = parse_except_for_type_list_head(text).ok()?;
     let mut consumed = text.len() - rest.len();
     let mut neg_types = Vec::new();
     let mut props = Vec::new();
@@ -11342,6 +11348,57 @@ fn parse_except_for_type_list_suffix(
     Some((neg_types, props, consumed))
 }
 
+/// Parse a controller-qualified exclusion and return its positive subset and
+/// original-case remainder. The caller applies the exclusion to its population.
+pub(crate) fn parse_except_for_qualified_subset<'a>(
+    remainder: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let lower = remainder.to_ascii_lowercase();
+    let ((), operand) = nom_on_lower(remainder, &lower, |input| {
+        preceded(space0, terminated(parse_except_for_head, space1)).parse(input)
+    })?;
+
+    // Check the first controller phrase before the type reader binds it, since
+    // a past or anaphoric phrase can also produce ControllerRef::You there.
+    let operand_lower = &lower[lower.len() - operand.len()..];
+    let (controller_text, phrase) =
+        nom_primitives::scan_at_word_boundaries(operand_lower, |input| {
+            let (rest, phrase) = nom_target::parse_controller_phrase(input)?;
+            Ok((rest, (input, phrase)))
+        })?;
+    if phrase != ControllerPhrase::YOU_CONTROL {
+        return None;
+    }
+    let noun = operand[..operand.len() - controller_text.len()].trim_end();
+    let (prefix, noun_remainder) =
+        parse_type_phrase_folding_with_ctx(noun, &mut ctx.clone_throwaway());
+    if !noun_remainder.is_empty()
+        || !matches!(prefix, TargetFilter::Typed(typed) if typed.controller.is_none() && typed.has_meaningful_type_constraint())
+    {
+        return None;
+    }
+
+    let mut trial = ctx.clone();
+    let (subset, after) = parse_type_phrase_folding_with_ctx(operand, &mut trial);
+    if !matches!(&subset, TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+        && typed.has_meaningful_type_constraint())
+    {
+        return None;
+    }
+    preceded(
+        space0,
+        peek(alt((
+            value((), eof),
+            value((), tag::<_, _, OracleError<'_>>(".")),
+        ))),
+    )
+    .parse(after)
+    .ok()?;
+    *ctx = trial;
+    Some((subset, after))
+}
+
 /// CR 205.3a + CR 608.2c: AND an "except for `<type-list>`" exclusion
 /// onto an already-parsed mass population, for callers whose exclusion is
 /// separated from the type phrase by an intervening destination clause ("return
@@ -11361,12 +11418,10 @@ fn parse_except_for_type_list_suffix(
 /// WHERE the decline happens decides whether it is honest, and the two sites
 /// differ. Declining HERE returns `None`, which propagates through `?` at the
 /// mass-return call sites, so no effect is built and the card is unsupported.
-/// Declining at the SUFFIX-POSITION site in `parse_type_phrase_folding_with_ctx` only
-/// drops the clause — that caller still builds its effect, and because
-/// `swallow_check` has no "except for" detector the card keeps reporting
-/// supported (measured: "mageta the lion", "flame sweep", both of which decline
-/// there and never reach this function). Making the suffix-position residue red
-/// is a separate issue and is NOT claimed here.
+/// The inline type reader leaves a declined suffix in its remainder.
+/// Damage lowering can consume that remainder with
+/// [`parse_except_for_qualified_subset`]. A caller that ignores it can still
+/// build a wider effect.
 ///
 /// The application is the `TargetFilter`-level form of the two lines the
 /// suffix-position call site in `parse_type_phrase_folding_with_ctx` already runs
@@ -11448,12 +11503,11 @@ pub(crate) fn apply_except_for_type_list_exclusion(
     // strictly wider than the parser, which is the safe direction — every tail the
     // parser could attempt is seen, plus the ones it structurally cannot.
     //
-    // `scan_contains` matches at word starts only, so it cannot fire on "except
-    // for" embedded inside another word. Measured: the corpus has three mass
-    // returns carrying an exclusion (Whelming Wave, Slinn Voda, Cyclone Summoner)
-    // and all three sit at offset 0, so no currently-supported card is declined by
-    // the widening.
-    if nom_primitives::scan_contains(&lowered, "except for ") {
+    // `scan_at_word_boundaries` matches at word starts only. The corpus has
+    // three mass returns carrying an exclusion (Whelming Wave, Slinn Voda,
+    // Cyclone Summoner), and all three place it at offset 0.
+    if nom_primitives::scan_at_word_boundaries(&lowered, parse_except_for_type_list_head).is_some()
+    {
         return None;
     }
     Some(filter)

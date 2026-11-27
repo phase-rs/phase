@@ -1246,24 +1246,26 @@ pub fn enter_attacking_at_destination(
 ) {
     use crate::types::ability::EntryAttackDestination;
 
+    // CR 506.3a: use the entrant's effective type after copy and entry
+    // modifications. A noncreature still enters, but never attacks.
+    crate::game::layers::flush_layers(state);
+    let Some(entrant) = state.objects.get(&object_id) else {
+        return;
+    };
+    if !entrant.card_types.core_types.contains(&CoreType::Creature) {
+        return;
+    }
     match destination {
         EntryAttackDestination::AnyDefender | EntryAttackDestination::PlayerOrPlaneswalker => {
             // CR 508.4: no single destination named; `enter_attacking` derives one.
             enter_attacking(state, object_id, source_id, controller);
         }
         EntryAttackDestination::Exact { target } => {
-            let Some(entrant_controller) = state
-                .objects
-                .get(&object_id)
-                .map(|object| object.controller)
-            else {
-                return;
-            };
             // CR 508.4a + CR 506.3b + CR 506.3c: a named destination that is not a
             // legal one for the token's controller leaves the token on the
             // battlefield, never attacking.
             if let Some(defending_player) =
-                entry_attack_target_defender(state, entrant_controller, *target)
+                entry_attack_target_defender(state, entrant.controller, *target)
             {
                 enter_attacking_at_target(state, object_id, defending_player, *target);
             }
@@ -8957,6 +8959,18 @@ fn single_event_defender(
     defenders.all(|defender| defender == first).then_some(first)
 }
 
+/// CR 508.5 + CR 508.5a: Resolve the defender identified by an already-bound
+/// attack event, including an observer firing whose source attacked elsewhere.
+pub(crate) fn defending_player_in_attack_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+) -> Option<PlayerId> {
+    let (entries, global) = attack_entries(event)?;
+    entry_defender(state, entries, global, source_id)
+        .or_else(|| single_event_defender(state, entries, global))
+}
+
 /// CR 508.5 (+ CR 508.5a / CR 802.2a in multiplayer): THE authority that decides
 /// which attack answers a "defending player" reference.
 ///
@@ -9060,14 +9074,11 @@ pub(crate) fn defending_player_cr508_5(
     let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
 
     // The ONE binding rule, evaluated in the ONE place it may be evaluated.
-    with_bound_attack_event(state, trigger_source, |event| {
-        match event.and_then(attack_entries) {
-            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
-                .or_else(|| single_event_defender(state, entries, global))
-                .or(latch)
-                .or(Some(global)),
-            None => latch,
-        }
+    with_bound_attack_event(state, trigger_source, |event| match event {
+        Some(event) => defending_player_in_attack_event(state, event, entry_id)
+            .or(latch)
+            .or_else(|| attack_entries(event).map(|(_, global)| global)),
+        None => latch,
     })
     .or_else(|| resolve_defending_player(state, asker_id))
 }
@@ -9183,6 +9194,8 @@ pub(crate) fn attacked_referent_departure_row<'a>(
     }
 }
 
+pub(crate) type AttackDestination = (AttackTarget, Option<ObjectIncarnationRef>);
+
 /// CR 506.3: the attack target of the attacking creature `referent`, or none.
 ///
 /// * (a) Still the live creature (`live`) and attacking (an `AttackerInfo` that
@@ -9201,21 +9214,53 @@ fn attack_target_referent(
     is_asker: bool,
     live: bool,
     event: Option<&GameEvent>,
-) -> Option<(AttackTarget, Option<ObjectIncarnationRef>)> {
+) -> Option<AttackDestination> {
     if live {
-        return state.combat.as_ref().and_then(|combat| {
-            combat
-                .attackers
-                .iter()
-                .find(|info| info.object_id == referent)
-                .filter(|info| is_attacker_in_play(state, info.object_id))
-                .and_then(|info| active_attack_target(state, info))
-        });
+        return live_attack_destination(state, referent);
     }
-    let status = departed_attack_row(state, referent, asker, is_asker, event)?.combat_status;
+    departure_attack_destination(departed_attack_row(
+        state, referent, asker, is_asker, event,
+    )?)
+}
+
+fn live_attack_destination(state: &GameState, attacker: ObjectId) -> Option<AttackDestination> {
+    state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == attacker)
+        .filter(|info| is_attacker_in_play(state, info.object_id))
+        .and_then(|info| active_attack_target(state, info))
+}
+
+fn departure_attack_destination(
+    row: &crate::types::game_state::ZoneChangeRecord,
+) -> Option<AttackDestination> {
+    let status = row.combat_status;
     status
         .attack_target
         .map(|target| (target, status.attack_target_identity))
+}
+
+/// CR 400.7 + CR 506.4 + CR 608.2h: distinguish an absent combat destination
+/// from missing evidence for the original creature.
+pub(crate) fn attack_destination_of_incarnation(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<Option<AttackDestination>> {
+    if state
+        .objects
+        .get(&identity.object_id)
+        .is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && ObjectIncarnationRef::from_object(object) == identity
+        })
+    {
+        return Some(live_attack_destination(state, identity.object_id));
+    }
+    let row = crate::types::game_state::exact_battlefield_departure_row(state, identity)?;
+    Some(departure_attack_destination(row))
 }
 
 /// CR 506.3 + CR 115.10a: THE authority for "the player or planeswalker it's

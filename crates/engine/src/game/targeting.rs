@@ -3337,23 +3337,20 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             // the trigger, not an intervening triggered ability above it.
             extract_source_from_event(event).map(TargetRef::Object)
         }
-        // CR 508.5 + CR 508.5a: "defending player" is the player the *attacking creature*
-        // is attacking, determined individually per attacker. resolve_defending_player
-        // tries the source as the attacker first (a creature's own attack trigger), then
-        // falls back to the attacker carried by the current triggering event (a separate
-        // permanent's attack trigger — Leeching Sliver watching another Sliver, or an
-        // Equipment). When combat state is no longer available, the triggering event's
-        // captured defender remains the resolution-time authority.
-        TargetFilter::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-                .or_else(|| match event? {
-                    GameEvent::AttackersDeclared {
-                        defending_player, ..
-                    } => Some(*defending_player),
-                    _ => None,
-                })
-                .map(TargetRef::Player)
-        }
+        // CR 508.5 + CR 508.5a: The attack named by the firing determines its
+        // defender, even when the ability's source attacked a different player.
+        TargetFilter::DefendingPlayer => event
+            .and_then(|event| {
+                crate::game::combat::defending_player_in_attack_event(state, event, source_id)
+            })
+            .or_else(|| crate::game::combat::resolve_defending_player(state, source_id))
+            .or_else(|| match event? {
+                GameEvent::AttackersDeclared {
+                    defending_player, ..
+                } => Some(*defending_player),
+                _ => None,
+            })
+            .map(TargetRef::Player),
         // CR 506.3 + CR 115.10a: "the player or planeswalker it's attacking" is read by
         // `combat::resolve_attacked_player_or_planeswalker`, which needs the ability's
         // trigger source (the latch) as well as the bound event. This event-and-state
@@ -4174,6 +4171,20 @@ pub(crate) fn extract_target_object_from_event(
     }
 }
 
+/// CR 508.3d: The declaring controller is fixed by the declaration snapshot.
+/// Older events without snapshots can still read the live attacker.
+pub(super) fn attack_declaration_controller(
+    state: &GameState,
+    records: &[crate::types::game_state::AttackDeclarationRecord],
+    attacker: ObjectId,
+) -> Option<PlayerId> {
+    records
+        .iter()
+        .find(|record| record.object_id == attacker)
+        .map(|record| record.lki.controller)
+        .or_else(|| state.objects.get(&attacker).map(|object| object.controller))
+}
+
 /// Extract the relevant player from a trigger event.
 pub(crate) fn extract_player_from_event(
     event: &crate::types::events::GameEvent,
@@ -4224,12 +4235,15 @@ pub(crate) fn extract_player_from_event(
         // Un-card touch: "that player" is the player who touched the object.
         GameEvent::ObjectTouched { player, .. } => Some(*player),
         GameEvent::PlayerEliminated { player_id, .. } => Some(*player_id),
-        // CR 506.2 + CR 508.1: The attacking player is the common controller of the
-        // declared attackers in this batch. All attackers in one AttackersDeclared
-        // batch share the active player as their controller.
-        GameEvent::AttackersDeclared { attacker_ids, .. } => attacker_ids
+        // CR 508.3d + CR 805.10b: A player-led occurrence carries that
+        // player's declared attackers. Read the actor at declaration time.
+        GameEvent::AttackersDeclared {
+            attacker_ids,
+            declaration_records,
+            ..
+        } => attacker_ids
             .iter()
-            .find_map(|id| state.objects.get(id).map(|obj| obj.controller)),
+            .find_map(|&id| attack_declaration_controller(state, declaration_records, id)),
         GameEvent::BecomesTarget {
             target,
             source_controller,
