@@ -167,6 +167,119 @@ fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery()
     }
 }
 
+#[test]
+fn inherited_battlefield_search_declines_a_finalized_put_shell() {
+    // SHAPE: Magmatic Hellkite supplies the verbatim search, put, and shuffle.
+    // Leading-duration expansion declines subject-inheriting conjuncts, so
+    // supply its typed output at the existing parser seam. The put text still
+    // provides the same delivery evidence, and ClauseDraft::push stamps the shell.
+    let ir = parse_effect_chain_ir_body(
+        HELLKITE_BODY,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+        0,
+        None,
+        |chunks, ctx| {
+            let mut chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
+            let [_, _, put, _] = chunks.as_mut_slice() else {
+                panic!("expected destroy, search, put, and shuffle");
+            };
+            put.leading_duration = Some(Duration::UntilEndOfTurn);
+            chunks
+        },
+    );
+    let [_, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!(
+            "expected destroy, search, put, and shuffle: {:?}",
+            ir.clauses
+        );
+    };
+    assert_eq!(put.parsed.duration, Some(Duration::UntilEndOfTurn));
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+}
+
+#[test]
+fn inherited_battlefield_search_stays_uncommitted_in_a_reminted_guarded_body() {
+    // SHAPE: Magmatic Hellkite is the nearest printed search. Use an outer
+    // conditional to exercise the flattening path with its same delivery rider.
+    let body = "Draw a card. If it's your turn, destroy target nonbasic land an opponent controls, then its controller searches their library for a basic land card, puts it onto the battlefield tapped with a stun counter on it, then shuffles.";
+    let ir =
+        parse_effect_chain_ir_ability_root(body, AbilityKind::Spell, &mut ParseContext::default());
+    let [draw, destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!("expected draw and four guarded clauses: {:?}", ir.clauses);
+    };
+    assert!(matches!(draw.parsed.effect, Effect::Draw { .. }));
+    assert!(matches!(destroy.parsed.effect, Effect::Destroy { .. }));
+    assert!(destroy.condition.is_some());
+    for (offset, clause) in [destroy, search, put, shuffle].into_iter().enumerate() {
+        assert_eq!(clause.condition, destroy.condition);
+        assert_eq!(clause.id, ClauseId(draw.id.0 + 1 + offset as u32));
+        let span = clause.source.span();
+        assert_eq!(
+            clause.source.fragment(),
+            Some(&body[span.start_byte..span.end_byte])
+        );
+    }
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+    assert_eq!(
+        search.incoming_link(destroy.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+}
+
+fn assert_uncommitted_battlefield_search(search: &ClauseIr, put: &ClauseIr, shuffle: &ClauseIr) {
+    use crate::types::ability::LibraryInstructionActor;
+
+    assert!(matches!(
+        search.disposition,
+        ClauseDisposition::Emit {
+            followup: None,
+            intrinsic: Some(ContinuationAst::SearchDestination {
+                destination: Zone::Battlefield,
+                enters_under: EntersUnderSpec::Default,
+                enter_tapped: true,
+                reveal: false,
+                attach_host: None,
+                actor: LibraryInstructionActor::Controller,
+                entry_counter: None,
+            }),
+        }
+    ));
+    assert!(matches!(
+        put.parsed.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert_eq!(
+        shuffle.parsed.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    for follower in [put, shuffle] {
+        assert!(matches!(
+            follower.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        ));
+    }
+    for clause in [search, put, shuffle] {
+        assert_eq!(clause.incoming_link, None);
+    }
+    assert_eq!(
+        put.incoming_link(search.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+    assert_eq!(
+        shuffle.incoming_link(put.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+}
+
 // Chapter IV of The Hunger Tide Rises reads “Sacrifice any number of creatures.
 // Search your library and/or graveyard for a creature card with mana value
 // less than or equal to the number of creatures sacrificed this way and put

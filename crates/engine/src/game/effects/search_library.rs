@@ -29,7 +29,7 @@ use crate::types::zones::Zone;
 /// target object's controller at resolution time).
 ///
 /// Returns the caster as a safe fallback if neither resolves.
-fn resolve_library_owner(
+pub(super) fn resolve_library_owner(
     state: &GameState,
     ability: &ResolvedAbility,
     target_player: &TargetFilter,

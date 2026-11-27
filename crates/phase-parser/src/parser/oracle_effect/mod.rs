@@ -58318,6 +58318,8 @@ fn parse_effect_chain_ir_body(
             // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
             // per-chunk selection mode. Set to `Random` by `parse_target_with_ctx`
             // when "random " was stripped from this chunk's target phrase.
+            // The chunk's inherited duration is stamped by ClauseDraft::push.
+            // Admission checks it on the finalized shell.
             let original_plain = !is_optional
                 && !clause.optional
                 && condition.is_none()
@@ -58325,7 +58327,6 @@ fn parse_effect_chain_ir_body(
                 && clause.unlowered_guard.is_none()
                 && unless_pay.is_none()
                 && clause.unless_pay.is_none()
-                && chunk.leading_duration.is_none()
                 && !is_distributed_chunk
                 && delayed_condition.is_none()
                 && player_scope.is_none()

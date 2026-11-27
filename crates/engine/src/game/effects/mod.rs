@@ -28145,15 +28145,11 @@ fn synchronous_search_delivery_player(
     {
         return None;
     }
-    ability
-        .targets
-        .iter()
-        .find_map(|target| match target {
-            TargetRef::Player(player) => Some(*player),
-            TargetRef::Object(_) => None,
-        })
-        .or_else(|| crate::game::ability_utils::parent_target_controller(ability, state))
-        .or(Some(ability.controller))
+    Some(search_library::resolve_library_owner(
+        state,
+        ability,
+        &TargetFilter::ParentTargetController,
+    ))
 }
 
 /// One full pass of an ability's resolution chain — the parent effect (with its
