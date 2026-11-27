@@ -2742,17 +2742,40 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 701.68a: AI selects exactly one creature to put N -1/-1 counters on as cost.
         WaitingFor::BlightChoice {
-            player, creatures, ..
-        } => creatures
-            .iter()
-            .map(|id| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![*id] },
-                    TacticalClass::Selection,
-                    Some(*player),
+            player,
+            counters,
+            creatures,
+            ..
+        }
+        | WaitingFor::UnlessBlightChoice {
+            player,
+            counters,
+            creatures,
+            ..
+        } => {
+            let eligible =
+                crate::game::effects::blight::eligible_blight_creatures(state, *player, *counters);
+            creatures
+                .iter()
+                .filter(|id| eligible.contains(id))
+                .map(|id| {
+                    candidate(
+                        GameAction::SelectCards { cards: vec![*id] },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .chain(
+                    matches!(state.waiting_for, WaitingFor::UnlessBlightChoice { .. }).then(|| {
+                        candidate(
+                            GameAction::PayUnlessCost { pay: false },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    }),
                 )
-            })
-            .collect(),
+                .collect()
+        }
         WaitingFor::CollectEvidenceChoice {
             player,
             minimum_mana_value,

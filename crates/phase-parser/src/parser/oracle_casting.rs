@@ -2,25 +2,28 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, map, opt, rest, value};
+use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, separated_pair, terminated};
 use nom::Parser;
 
 use super::oracle_classifier::lower_starts_with;
-use super::oracle_cost::{parse_gerund_cost, parse_oracle_cost};
+use super::oracle_cost::{
+    parse_blight_operand, parse_gerund_cost, parse_oracle_cost, BlightOperand,
+};
 use super::oracle_modal::{
     label_names_rules_term, split_short_label_prefix, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
 use super::oracle_nom::condition::parse_you_cast_another_spell_filter_this_turn;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_quantity::parse_toughness_cap;
 use super::oracle_saga::is_saga_chapter;
 use super::oracle_util::{parse_mana_symbols, parse_ordinal, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::TurnWindow;
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, CastingRestriction, Comparator, CountScope, ParsedCondition,
-    QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
+    AbilityCost, AdditionalCost, BlightCount, CastingRestriction, Comparator, CountScope,
+    ParsedCondition, QuantityExpr, QuantityRef, SpellCastingOption, TargetFilter,
 };
 use crate::types::mana::ManaColor;
 
@@ -96,6 +99,29 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let tp = tp.trim_end_matches('.');
     let body_lower = tp.lower;
     let body_raw = tp.original;
+
+    // CR 601.2b: Soul Immolation announces the bounded X while casting.
+    if names_this_spell && peek(parse_blight_x).parse(after_prefix).is_ok() {
+        let parsed = all_consuming(terminated(
+            separated_pair(
+                parse_blight_x,
+                tag(". "),
+                preceded(tag("x can't be greater than "), parse_toughness_cap),
+            ),
+            opt(tag(".")),
+        ))
+        .parse(after_prefix);
+        return Some(AdditionalCost::Required(match parsed {
+            Ok((_, (_, maximum))) => AbilityCost::Blight {
+                count: BlightCount::AnnouncedX {
+                    maximum: Box::new(maximum),
+                },
+            },
+            Err(_) => AbilityCost::Unimplemented {
+                description: body_raw.to_string(),
+            },
+        }));
+    }
 
     // CR 701.4a: A spelled-out "choose … you control or reveal … from your hand"
     // behold cost (Monstrous Emergence) is a single cohesive cost whose internal
@@ -217,6 +243,13 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     }
 
     None
+}
+
+fn parse_blight_x(input: &str) -> OracleResult<'_, BlightOperand> {
+    verify(parse_blight_operand, |operand| {
+        *operand == BlightOperand::AnnouncedX
+    })
+    .parse(input)
 }
 
 /// CR 601.2b + CR 601.2h: Parse an additional-cost body that names alternative
@@ -1592,7 +1625,9 @@ Trample";
             assert_eq!(
                 result,
                 Some(AdditionalCost::Optional {
-                    cost: AbilityCost::Blight { count },
+                    cost: AbilityCost::Blight {
+                        count: BlightCount::Fixed(count),
+                    },
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 }),
                 "blight {count}"
@@ -1777,7 +1812,9 @@ Trample";
                 Some(AdditionalCost::Choice(costs)) => {
                     assert_eq!(costs.len(), 2);
                     match &costs[0] {
-                        AbilityCost::Blight { count } => {
+                        AbilityCost::Blight {
+                            count: BlightCount::Fixed(count),
+                        } => {
                             assert_eq!(*count, blight);
                         }
                         _ => panic!("Expected Blight as first choice"),
@@ -1809,7 +1846,9 @@ Trample";
         let result = parse_additional_cost_line(lower, raw);
         assert_eq!(
             result,
-            Some(AdditionalCost::Required(AbilityCost::Blight { count: 2 }))
+            Some(AdditionalCost::Required(AbilityCost::Blight {
+                count: BlightCount::Fixed(2),
+            }))
         );
     }
 

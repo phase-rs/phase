@@ -958,6 +958,9 @@ function boardChoicePrompt(
   objects: Record<number, GameObject> | undefined,
   t: TFunction<"game">,
 ): string {
+  if (choice.blightCounters !== undefined) {
+    return t("boardChoice.prompt.blightCounters", { count: choice.blightCounters });
+  }
   const action = t(`boardChoice.actions.${choice.intent}`);
   switch (choice.selection.type) {
     case "single":
@@ -1072,6 +1075,8 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
 
 function boardChoiceSkipLabel(choice: BoardChoiceView, t: TFunction<"game">): string {
   switch (choice.skipLabel) {
+    case "decline":
+      return t("gamePage.unlessPayment.dontPay");
     case "keepTapped":
       return t("gamePage.untap.keepTapped");
     case undefined:

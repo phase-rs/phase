@@ -7936,6 +7936,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         AbilityCost::PayLife { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PayEnergy { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PaySpeed { amount } => scan_quantity_expr(amount, mode),
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { maximum },
+        } => scan_quantity_expr(maximum, mode),
         AbilityCost::Discard {
             count,
             filter: _,
@@ -7977,7 +7980,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
+        | AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
@@ -8325,6 +8330,7 @@ fn scan_ward_cost(cost: &WardCost, mode: ScanMode) -> Axes<'_> {
         | WardCost::PayLifeEqualToPower
         | WardCost::Discard { filter: None, .. }
         | WardCost::Waterbend(_)
+        | WardCost::Blight(_)
         | WardCost::GetPlayerCounters { .. } => Axes::NONE,
     }
 }

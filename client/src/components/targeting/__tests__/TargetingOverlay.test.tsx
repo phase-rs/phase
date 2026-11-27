@@ -1846,6 +1846,48 @@ describe("TargetingOverlay", () => {
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
   });
 
+  it("shows the Ward Blight amount and lets only the payer decline", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const choice = {
+      counters: 2,
+      creatures: [7],
+      pending_effect: {},
+      cost: { type: "Blight", count: 2 },
+      remaining: [],
+    };
+    const gameState = createGameState({
+      waiting_for: {
+        type: "UnlessBlightChoice",
+        data: { ...choice, player: 1 },
+      },
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+    expect(screen.queryByRole("button", { name: "Don’t Pay" })).not.toBeInTheDocument();
+    act(() => {
+      const payerPrompt = {
+        type: "UnlessBlightChoice",
+        data: { ...choice, player: 0 },
+      } satisfies GameState["waiting_for"];
+      useGameStore.setState({
+        gameState: { ...gameState, waiting_for: payerPrompt },
+        waitingFor: payerPrompt,
+      });
+    });
+    expect(screen.getByText("Put 2 -1/-1 counters on a creature you control"))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Don’t Pay" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "PayUnlessCost", data: { pay: false } });
+  });
+
   // CR 608.2d + CR 115.10a: a single-pick `ChooseObjectsSelection` (`max: 1`) is a
   // choice made while the effect resolves, not a target. The overlay must not call
   // it one, must offer no Cancel (the spell or ability is already resolving, so

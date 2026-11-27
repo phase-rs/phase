@@ -8,7 +8,9 @@ use nom::combinator::{all_consuming, eof, not, opt, peek, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::{parse_discard_cost_body, parse_oracle_cost};
+use super::oracle_cost::{
+    parse_blight_head, parse_discard_cost_body, parse_oracle_cost, parse_single_cost,
+};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
@@ -16,9 +18,9 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
-    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, BlightCount, CostObjectCount,
+    CostReduction, DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
@@ -798,6 +800,17 @@ fn parse_ward_mana_leg(text: &str) -> Option<ManaCost> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 701.68a: Auntie Ool's Ward uses the same fixed Blight cost
+    // grammar as a spell cost. An unrecognized Blight leg remains unsupported.
+    if parse_blight_head(lower).is_ok() {
+        return match parse_single_cost(lower) {
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(count),
+            } => Some(WardCost::Blight(count)),
+            _ => None,
+        };
+    }
+
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
     // current power on resolution, or its last known information if it left its
     // expected public zone.
@@ -3760,9 +3773,9 @@ mod tests {
 
         for unmodeled in [
             "Collect evidence 4.",
-            "Blight 2.",
-            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
-            "{2}, Blight 2.",
+            "Blight 2 nonsense.",
+            // No printed Ward has this shape; extends Auntie Ool, Cursewretch's "Ward—Blight 2.".
+            "{2}, Blight X.",
             // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
             "Waterbend frob.",
             // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
@@ -3781,6 +3794,17 @@ mod tests {
         assert_eq!(
             parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
             Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Blight 2.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::Blight(2),
+            ])))
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward\u{2014}blight 2"),
+            Some(Keyword::Ward(WardCost::Blight(2)))
         );
         for unread_tail in [
             // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".

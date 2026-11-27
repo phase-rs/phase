@@ -974,6 +974,7 @@ impl MatchedProtectionQuality {
 #[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
+    Blight(u32),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
@@ -3183,7 +3184,22 @@ impl FromStr for Keyword {
                         parse_keyword_mana_cost(p),
                     )))
                 }
-                "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
+                "ward" => {
+                    let mut words = p.split_ascii_whitespace();
+                    if words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("blight"))
+                    {
+                        return Ok(match (words.next(), words.next()) {
+                            (Some(count), None) => count.parse().map_or_else(
+                                |_| Keyword::Unknown(s.to_string()),
+                                |count| Keyword::Ward(WardCost::Blight(count)),
+                            ),
+                            _ => Keyword::Unknown(s.to_string()),
+                        });
+                    }
+                    return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p))));
+                }
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),

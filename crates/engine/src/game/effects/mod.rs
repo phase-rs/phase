@@ -12647,6 +12647,7 @@ fn ward_cost_reads_filter_population(
         | WardCost::PayLife(_)
         | WardCost::PayLifeEqualToPower
         | WardCost::Waterbend(_)
+        | WardCost::Blight(_)
         | WardCost::GetPlayerCounters { .. } => false,
     }
 }

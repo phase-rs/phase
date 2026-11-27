@@ -1897,6 +1897,22 @@ fn handle_replacement_choice_inner(
         super::replacement::proposed_draw_cannot_happen(state, &pending.proposed)
     });
     let replacement_action_event_start = events.len();
+    let pending_cast_blight = state.pending_cast.as_ref().and_then(|cast| {
+        let recipient = cast.blight_in_flight?;
+        let pending = state.pending_replacement.as_ref()?;
+        matches!(
+            pending.proposed,
+            ProposedEvent::AddCounter {
+                placement: crate::types::proposed_event::CounterPlacement::Object {
+                    object_id,
+                    counter_type: crate::types::counter::CounterType::Minus1Minus1,
+                    ..
+                },
+                ..
+            } if object_id == recipient.object_id
+        )
+        .then_some(recipient)
+    });
     let parked_search_found_replacement = state
         .pending_replacement
         .as_ref()
@@ -3662,6 +3678,20 @@ fn handle_replacement_choice_inner(
                 if let Some(wf) = resume_active_draw_sequences(state, events) {
                     return Ok(wf);
                 }
+            }
+            // CR 601.2h: a prevented Blight placement leaves this casting cost unpaid.
+            if pending_cast_blight.is_some() {
+                let cast = state
+                    .pending_cast
+                    .as_ref()
+                    .expect("parked Blight cast")
+                    .clone();
+                return super::engine_casting::cancel_pending_cast(
+                    state,
+                    cast.ability.controller,
+                    &cast,
+                    events,
+                );
             }
             // CR 118.11 + CR 614.11a: a skipped draw that interrupted a bare
             // cast or activation cost payment resumes through the same authority

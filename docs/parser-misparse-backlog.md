@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4450
-- **Total card appearances across root causes:** 4483 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4449
+- **Total card appearances across root causes:** 4482 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -2958,7 +2958,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 8. Additional / alternative casting cost dropped  (207 cards)
+### 8. Additional / alternative casting cost dropped  (206 cards)
 
 **Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
 
@@ -2978,7 +2978,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Archive Trap
 - Arctic Merfolk
 - Artillerize
-- Auntie Ool, Cursewretch
 - Balduvian Horde
 - Baleful Mastery
 - Bankrupt in Blood

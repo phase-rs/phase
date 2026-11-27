@@ -359,6 +359,19 @@ export function formatCost(cost: SerializedCost): string {
   return formatKnownCost(cost) ?? "Activate";
 }
 
+export function formatBlightCost(count: unknown): string | null {
+  if (typeof count === "number") {
+    return i18n.t("game:gamePage.cost.blight", { count });
+  }
+  if (
+    count && typeof count === "object" && "type" in count
+    && count.type === "AnnouncedX" && "maximum" in count
+  ) {
+    return i18n.t("game:gamePage.cost.blightBoundedX");
+  }
+  return null;
+}
+
 /**
  * `formatCost` without its "Activate" fallback: null when the cost's type has
  * no rendering here, so a caller that labels something other than an
@@ -409,7 +422,7 @@ export function formatKnownCost(cost: SerializedCost): string | null {
         zone: formatZone(cost.zone),
       });
     }
-    case "Blight": return `Blight ${cost.count ?? 1}`;
+    case "Blight": return formatBlightCost(cost.count);
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;
     case "ReturnToHand": {

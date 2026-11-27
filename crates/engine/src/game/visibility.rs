@@ -225,6 +225,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. }
+        | WaitingFor::UnlessBlightChoice { .. }
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseRoomDoor { .. }
         | WaitingFor::ChooseDungeon { .. }
@@ -5274,6 +5275,7 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
         | WaitingFor::WardDiscardChoice { pending_effect, .. }
         | WaitingFor::WardSacrificeChoice { pending_effect, .. }
         | WaitingFor::UnlessBounceChoice { pending_effect, .. }
+        | WaitingFor::UnlessBlightChoice { pending_effect, .. }
         | WaitingFor::ExploreChoice { pending_effect, .. }
         | WaitingFor::ReturnAsAuraTarget { pending_effect, .. }
         | WaitingFor::MoveCountersDistribution { pending_effect, .. }
@@ -9522,6 +9524,7 @@ mod tests {
             activation_target_selection:
                 crate::types::game_state::ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,

@@ -215,6 +215,7 @@ import {
   abilityChoiceLabel,
   abilityLabel,
   formatAbilityCost,
+  formatBlightCost,
   loyaltyBadge,
   stripCostPrefix,
   stripLoyaltyCostPrefix,
@@ -3993,6 +3994,8 @@ function formatUnlessCost(
     return t("gamePage.cost.playerCounters", { count: cost.count, kind });
   }
   switch (cost.type) {
+    case "Blight":
+      return formatBlightCost(cost.count) ?? t("gamePage.cost.generic");
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
     case "SayPhrase":
