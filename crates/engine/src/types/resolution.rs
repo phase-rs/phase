@@ -14095,7 +14095,7 @@ mod tests {
 
     #[test]
     fn current_compound_parks_with_empty_batch_sets_are_not_rewritten() {
-        // The discriminator protects current data: a v16 payload whose batches
+        // The discriminator protects current data: a current (v16 or later) payload whose batches
         // genuinely omit the key (empty sets) keeps them absent.
         let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
         let wire = legacy_compound_wire(
