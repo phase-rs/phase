@@ -7331,6 +7331,67 @@ fn trigger_attacks_you_or_planeswalker_you_control() {
     assert_eq!(def.valid_target, Some(TargetFilter::Controller));
 }
 
+#[test]
+fn tenuous_truce_binds_each_reciprocal_attack_leg() {
+    let parsed = parse_oracle_text(
+        "When you attack enchanted opponent or a planeswalker they control or when they attack you or a planeswalker you control, sacrifice this Aura.",
+        "Tenuous Truce",
+        &[],
+        &["Enchantment".into()],
+        &["Aura".into()],
+    );
+    assert_eq!(parsed.triggers.len(), 2, "{:?}", parsed.triggers);
+    for (def, (source, target)) in parsed.triggers.iter().zip([
+        (TargetFilter::Controller, TargetFilter::AttachedTo),
+        (
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::EnchantedPlayer)),
+            TargetFilter::Controller,
+        ),
+    ]) {
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(def.valid_source.as_ref(), Some(&source));
+        assert_eq!(def.valid_target.as_ref(), Some(&target));
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert!(!def.batched);
+        assert!(matches!(
+            def.execute
+                .as_ref()
+                .expect("sacrifice effect")
+                .effect
+                .as_ref(),
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
+fn reciprocal_attack_dispatch_preserves_other_disjunctive_heads() {
+    for (name, oracle, card_type, expected_mode) in [
+        (
+            "Flavor Disaster",
+            "When Flavor Disaster enters the battlefield or when it's turned face up, target creature gets +X/+X until end of turn, where X is Flavor Disaster's power.",
+            "Creature",
+            TriggerMode::ChangesZone,
+        ),
+        (
+            "Sky Deck",
+            "Whenever you planeswalk here, at the beginning of your upkeep, or whenever chaos ensues, put a glass counter on up to one target nonland permanent.",
+            "Plane",
+            TriggerMode::Planeswalked { role: PlaneswalkRole::To },
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &[card_type.into()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{name}: {:?}", parsed.triggers);
+        assert_eq!(parsed.triggers[0].mode, expected_mode, "{name}");
+    }
+}
+
 /// Issue #4744 — Curse of Predation: "Whenever a creature attacks enchanted
 /// player, put a +1/+1 counter on it." The "enchanted player" defender scope
 /// must bind to the Aura's attached player (`valid_target = AttachedTo`), not be

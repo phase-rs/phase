@@ -965,7 +965,13 @@ fn player_matches_filter_as(
             .chosen_attributes
             .iter()
             .any(|choice| matches!(choice, crate::types::ability::ChosenAttribute::Player(chosen) if *chosen == player_id)),
-        TargetFilter::AttachedTo => {
+        // CR 303.4b + CR 303.4m: "enchanted player" is the player the source
+        // permanent is attached to.
+        TargetFilter::AttachedTo
+        | TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::EnchantedPlayer),
+            ..
+        }) => {
             source_context
                 .source_read(state)
                 .attached_to()
