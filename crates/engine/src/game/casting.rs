@@ -1200,17 +1200,9 @@ fn restriction_scope_matches_player(
             debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
             false
         }
-        RestrictionPlayerScope::ParentObjectTargetController => {
-            // CR 109.4: normally resolved to `SpecificPlayer` by `add_restriction`
-            // (via `parent_target_controller`) when the restriction is created.
-            // Unlike the always-resolved sibling scopes (`TargetedPlayer`,
-            // `ScopedPlayer`), this one can legitimately remain unresolved when
-            // there is no object referent — a malformed or hostile state, proven
-            // reachable by `add_restriction`'s
-            // `parent_object_target_controller_unresolved_without_object_target`.
-            // That is a genuine fail-closed outcome (restrict no one), NOT a bug,
-            // so this arm must return `false` rather than `debug_assert!(false)` —
-            // a debug/test panic here would break the documented fail-closed path.
+        RestrictionPlayerScope::ParentObjectTarget { .. } => {
+            // CR 608.2h: add_restriction resolves the affected player from the
+            // referenced object. Without a referent the scope matches no player.
             false
         }
         RestrictionPlayerScope::OpponentsOfSourceController => {
@@ -1308,6 +1300,117 @@ fn is_blocked_by_cant_cast_spells(
     is_blocked_by_cant_cast_spells_for(state, caster, spell_obj, false)
 }
 
+fn captured_cast_name_property(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::Named { .. } => true,
+        FilterProp::AnyOf { props } => {
+            !props.is_empty() && props.iter().all(captured_cast_name_property)
+        }
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::Not { .. }
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
 /// Fuse-aware sibling of [`is_blocked_by_cant_cast_spells`]. `fused` projects a
 /// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
 /// so `CastSpells { spell_filter }` prohibitions keyed on mana value / colors see
@@ -1355,12 +1458,34 @@ fn is_blocked_by_cant_cast_spells_for(
         caster_affected
             && match spell_filter {
                 Some(filter) => spell_obj.is_some_and(|spell_obj| {
-                    let Some(source_obj) = state.objects.get(source) else {
+                    if let Some(source_obj) = state.objects.get(source) {
+                        return cant_cast_filter_matches_for(
+                            state, spell_obj, filter, source_obj, caster, fused, None,
+                        );
+                    }
+
+                    // CR 611.2a + CR 601.3: a captured name keeps prohibiting
+                    // casts for the stated duration even if its source is gone.
+                    let TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: None,
+                        properties,
+                    }) = filter
+                    else {
                         return false;
                     };
-                    cant_cast_filter_matches_for(
-                        state, spell_obj, filter, source_obj, caster, fused, None,
-                    )
+                    type_filters.is_empty()
+                        && !properties.is_empty()
+                        && properties.iter().all(captured_cast_name_property)
+                        && super::filter::spell_object_matches_filter_from_for(
+                            spell_obj,
+                            spell_obj.zone,
+                            caster,
+                            filter,
+                            caster,
+                            &state.all_creature_types,
+                            fused,
+                        )
                 }),
                 None => true,
             }
@@ -1691,8 +1816,11 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         .filter(|obj_id| {
             state.objects.get(obj_id).is_some_and(|obj| {
                 !is_blocked_by_cast_only_from_zones(state, obj, player)
-                    && !is_blocked_by_cant_cast_spells(state, player, Some(obj))
                     && !is_blocked_by_prohibit_play_from_zone(state, obj, player)
+                    // CR 601.3a: proposing another face or a face-down spell
+                    // can change the characteristics the prohibition reads.
+                    && (!is_blocked_by_cant_cast_spells(state, player, Some(obj))
+                        || can_cast_object_now(state, player, *obj_id))
             })
         })
         .collect()
