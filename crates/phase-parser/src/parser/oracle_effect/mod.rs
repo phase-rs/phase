@@ -18495,19 +18495,44 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
         .map(|(count, rest_orig)| (filter, count, rest_orig.to_string()))
 }
 
-fn parse_owner_library_shuffle_verb(input: &str) -> OracleResult<'_, &str> {
-    alt((tag("shuffle "), tag("shuffles "))).parse(input)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerLibraryShuffleVerb {
+    Shuffle,
+    Shuffles,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerLibraryShuffleDestination {
+    TheirLibrary,
+    ItsOwnersLibrary,
+}
+
+fn parse_owner_library_shuffle_verb(input: &str) -> OracleResult<'_, OwnerLibraryShuffleVerb> {
+    alt((
+        value(OwnerLibraryShuffleVerb::Shuffle, tag("shuffle ")),
+        value(OwnerLibraryShuffleVerb::Shuffles, tag("shuffles ")),
+    ))
+    .parse(input)
 }
 
 fn parse_singular_owner_library_shuffle<'a, O>(
     input: &'a str,
     operand: impl Parser<&'a str, Output = O, Error = OracleError<'a>>,
-) -> OracleResult<'a, (&'a str, &'a str)> {
+) -> OracleResult<'a, (OwnerLibraryShuffleVerb, OwnerLibraryShuffleDestination)> {
     let (input, (verb, _, _, library)) = (
         parse_owner_library_shuffle_verb,
         operand,
         tag(" into "),
-        alt((tag("their library"), tag("its owner's library"))),
+        alt((
+            value(
+                OwnerLibraryShuffleDestination::TheirLibrary,
+                tag("their library"),
+            ),
+            value(
+                OwnerLibraryShuffleDestination::ItsOwnersLibrary,
+                tag("its owner's library"),
+            ),
+        )),
     )
         .parse(input)?;
     Ok((input, (verb, library)))
@@ -18521,7 +18546,15 @@ pub(super) fn try_parse_trigger_source_owner_shuffle(body: &str) -> Option<Parse
         tag("its owner "),
         verify(
             |input| parse_singular_owner_library_shuffle(input, tag("it")),
-            |(verb, library)| *verb == "shuffles " && *library == "their library",
+            |predicate| {
+                matches!(
+                    predicate,
+                    (
+                        OwnerLibraryShuffleVerb::Shuffles,
+                        OwnerLibraryShuffleDestination::TheirLibrary
+                    )
+                )
+            },
         ),
         opt(tag(".")),
     ))

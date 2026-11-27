@@ -1022,6 +1022,7 @@ fn watery_grasp_activation_shuffles_enchanted_creature_into_owners_library() {
 
 const LEMBAS: &str = "When this artifact enters, scry 1, then draw a card.\n{2}, {T}, Sacrifice this artifact: You gain 3 life.\nWhen this artifact is put into a graveyard from the battlefield, its owner shuffles it into their library.";
 const INFERNO_HELLION: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nAt the beginning of each end step, if this creature attacked or blocked this turn, its owner shuffles it into their library.";
+const GRUESOME_ENCORE: &str = "Put target creature card from an opponent's graveyard onto the battlefield under your control. It gains haste. Exile it at the beginning of the next end step. If that creature would leave the battlefield, exile it instead of putting it anywhere else.";
 
 fn finish_owner_shuffle(runner: &mut GameRunner, source: ObjectId, owner: PlayerId) {
     let mut events = Vec::new();
@@ -1042,6 +1043,10 @@ fn finish_owner_shuffle(runner: &mut GameRunner, source: ObjectId, owner: Player
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+    assert_owner_shuffle(&events, source, owner);
+}
+
+fn assert_owner_shuffle(events: &[GameEvent], source: ObjectId, owner: PlayerId) {
     assert!(events.iter().any(|event| matches!(event,
         GameEvent::EffectResolved { kind: EffectKind::Shuffle, source_id, .. } if *source_id == source
     )));
@@ -1130,6 +1135,113 @@ enum HellionCombat {
     Attacks,
     Blocks,
     SitsOut,
+}
+
+#[test]
+fn inferno_hellion_owner_performs_move_redirected_to_exile_and_still_shuffles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hellion = scenario
+        .add_creature_to_graveyard(P1, "Inferno Hellion", 7, 3)
+        .from_oracle_text(INFERNO_HELLION)
+        .id();
+    let encore = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gruesome Encore", false, GRUESOME_ENCORE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.add_creature(P1, "Available Blocker", 0, 8);
+    scenario.add_card_to_library_top(P0, "Island");
+    let forest = scenario.add_card_to_library_top(P1, "Forest");
+    let mut runner = scenario.build();
+    let outcome = runner.cast(encore).target_object(hellion).resolve();
+    outcome.assert_zone(&[hellion], Zone::Battlefield);
+    assert_eq!(outcome.state().objects[&hellion].controller, P0);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+
+    runner.advance_to_combat();
+    // CR 508.1a: record Hellion's attack through the public declaration.
+    runner
+        .declare_attackers(&[(hellion, AttackTarget::Player(P1))])
+        .unwrap();
+    drive_until(&mut runner, |state| {
+        matches!(state.waiting_for, WaitingFor::DeclareBlockers { .. })
+    });
+    runner.declare_blockers(&[]).unwrap();
+    drive_until(&mut runner, |state| state.phase == Phase::End);
+
+    // CR 603.3b: P0 puts Encore's delayed trigger below Hellion's trigger.
+    let WaitingFor::OrderTriggers {
+        player: P0,
+        triggers,
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected P0 to order both end-step triggers: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(triggers.len(), 2);
+    let hellion_index = triggers
+        .iter()
+        .position(|trigger| trigger.source_id == hellion)
+        .unwrap();
+    let encore_index = triggers
+        .iter()
+        .position(|trigger| trigger.source_id == encore)
+        .unwrap();
+    runner
+        .act(GameAction::OrderTriggers {
+            order: vec![encore_index, hellion_index],
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(runner.state().stack[0].source_id, encore);
+    assert_eq!(runner.state().stack[1].source_id, hellion);
+    assert_eq!(runner.state().stack[1].controller, P0);
+
+    let mut events = Vec::new();
+    for expected_player in [P0, P1] {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == expected_player
+        ));
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].source_id, encore);
+    assert!(runner.state().resolution_stack.is_empty());
+    // CR 701.24c: the owner shuffles even when Encore redirects the move.
+    assert_owner_shuffle(&events, hellion, P1);
+    let exiled = &runner.state().objects[&hellion];
+    // CR 614.1a: Encore replaces the destination of the owner's move.
+    assert_eq!(exiled.zone, Zone::Exile);
+    assert_eq!(
+        exiled.exiled_by,
+        Some(P1),
+        "Hellion's owner performs the redirected move"
+    );
+    assert!(runner.state().players[1]
+        .library
+        .iter()
+        .copied()
+        .eq([forest]));
+    drive_until(&mut runner, |state| state.stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().resolution_stack.is_empty());
 }
 
 #[test]
