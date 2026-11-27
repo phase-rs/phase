@@ -437,3 +437,86 @@ fn the_room_restriction_matches_only_the_names_of_unlocked_doors() {
         }
     }
 }
+
+#[test]
+fn room_restriction_keeps_both_names_after_oko_removes_room_subtype() {
+    let db = shared_card_db().expect("integration card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 3]);
+    scenario.with_library_top(P1, &["Forest"; 8]);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    scenario.add_basic_land(P0, ManaColor::White);
+    for _ in 0..9 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
+    let mage = scenario.add_real_card(P0, "Reflector Mage", Zone::Hand, db);
+    scenario.add_real_card(P1, "Opalescence", Zone::Battlefield, db);
+    let oko = scenario.add_real_card(P1, "Oko, Thief of Crowns", Zone::Battlefield, db);
+    let room = scenario.add_real_card(P1, "Moldering Gym", Zone::Hand, db);
+    let other = scenario.add_real_card(P1, "Moldering Gym", Zone::Hand, db);
+    let mut runner = scenario.build();
+
+    advance_to_main(&mut runner, P1);
+    runner
+        .cast(room)
+        .modal_back_face(false)
+        .search_first_legal()
+        .resolve();
+    runner
+        .act(GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Right,
+        })
+        .unwrap();
+    resolve_weight_room_manifest(&mut runner);
+    assert_eq!(
+        runner.state().objects[&room].name,
+        "Moldering Gym // Weight Room"
+    );
+
+    // Oko's real [+1] ability changes the Room's types and subtypes before the
+    // Reflector Mage trigger captures its last-known information.
+    runner.activate(oko, 1).target_object(room).resolve();
+    let changed_room = &runner.state().objects[&room];
+    assert!(!changed_room
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Room"));
+    assert_eq!(changed_room.name, "Moldering Gym // Weight Room");
+
+    advance_to_main(&mut runner, P0);
+    runner.cast(mage).target_object(room).resolve();
+    let departure = &runner.state().lki_cache[&room];
+    assert_eq!(departure.name, "Moldering Gym // Weight Room");
+
+    let [GameRestriction::ProhibitActivity {
+        source: _,
+        activity: ProhibitedActivity::CastSpells {
+            spell_filter: Some(filter),
+        },
+        ..
+    }] = runner.state().restrictions.as_slice()
+    else {
+        panic!("expected a captured cast prohibition")
+    };
+    for name in ["Moldering Gym", "Weight Room"] {
+        let record = SpellCastRecord {
+            name: name.into(),
+            ..Default::default()
+        };
+        assert!(spell_record_matches_filter(&record, filter, P1, &[]));
+    }
+    let joined = SpellCastRecord {
+        name: "Moldering Gym // Weight Room".into(),
+        ..Default::default()
+    };
+    assert!(!spell_record_matches_filter(&joined, filter, P1, &[]));
+
+    advance_to_main(&mut runner, P1);
+    assert!(!can_cast_modal_face_now(runner.state(), P1, other, false));
+    assert!(!can_cast_modal_face_now(runner.state(), P1, other, true));
+}

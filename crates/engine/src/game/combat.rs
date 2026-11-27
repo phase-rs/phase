@@ -5808,10 +5808,25 @@ fn attack_passes_temporary_prohibition(
         // serialized restrictions have no snapshot and retain their historic
         // source-controller lookup.
         let Some(protected) = (*protected_player).or_else(|| match protected_scope {
+            // CR 108.3 + CR 608.2h: an unresolved parent owner supplies no
+            // player; last-known information cannot be replaced by source control.
             Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
                 possession: crate::types::ability::PossessionAxis::Owner,
             }) => None,
-            _ => state.objects.get(source).map(|object| object.controller),
+            None
+            | Some(crate::types::ability::RestrictionPlayerScope::AllPlayers)
+            | Some(crate::types::ability::RestrictionPlayerScope::SpecificPlayer(_))
+            | Some(crate::types::ability::RestrictionPlayerScope::TargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController)
+            | Some(crate::types::ability::RestrictionPlayerScope::DefendingPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            })
+            | Some(crate::types::ability::RestrictionPlayerScope::ScopedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::SourceController) => {
+                state.objects.get(source).map(|object| object.controller)
+            }
         }) else {
             continue;
         };

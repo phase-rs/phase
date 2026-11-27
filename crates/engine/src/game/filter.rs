@@ -10797,9 +10797,9 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
     )
 }
 
-/// CR 201.2a + CR 608.2h + CR 709.5: a fully unlocked Room has two names.
-/// Its last-known name uses the Room separator, and its last-known subtypes
-/// distinguish it from other objects with the same separator in their name.
+/// CR 201.2a + CR 608.2h + CR 709.4a: a captured multi-name object keeps each
+/// name from its last-known name identity. Room subtypes are mutable, so they
+/// cannot be used to decide whether a captured joined name has two names.
 pub(crate) fn parent_target_names(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -10828,12 +10828,10 @@ pub(crate) fn parent_target_names(
             )
         },
         |snapshot| {
-            let door_names = if super::room::has_room_subtype(&snapshot.subtypes) {
-                snapshot.name.split_once(super::room::DOOR_NAME_SEPARATOR)
-            } else {
-                None
-            };
-            names(door_names, &snapshot.name)
+            names(
+                snapshot.name.split_once(super::room::DOOR_NAME_SEPARATOR),
+                &snapshot.name,
+            )
         },
     )
 }
@@ -28041,7 +28039,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_target_names_splits_only_captured_room_names() {
+    fn parent_target_names_splits_captured_multi_name_identity() {
         let mut state = setup();
         let target = add_creature(&mut state, PlayerId(1), "Current Name");
         let object = &state.objects[&target];
@@ -28054,13 +28052,6 @@ mod tests {
         let mut lki = object.snapshot_public_characteristics();
         lki.name = "Moldering Gym // Weight Room".into();
         ability.effect_context_object = Some(CostPaidObjectSnapshot::capture(object, lki));
-        assert_eq!(
-            parent_target_names(&state, &ability).unwrap(),
-            ["Moldering Gym // Weight Room"],
-        );
-
-        let captured = ability.effect_context_object.as_mut().unwrap();
-        captured.lki.subtypes.push("Room".into());
         assert_eq!(
             parent_target_names(&state, &ability).unwrap(),
             ["Moldering Gym", "Weight Room"],
