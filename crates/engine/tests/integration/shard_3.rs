@@ -277,6 +277,7 @@ mod gemstone_mine_depletion_sacrifice_6507;
 mod generated_target_slot_ownership;
 mod gev_scaled_scorch_enter_counters;
 mod ghalta_and_mavren_attack_trigger;
+mod ghired_copy_token_716;
 mod ghyrson_starn;
 mod giada_angel_counters;
 mod giada_metallic_mimic;
