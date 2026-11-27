@@ -6495,7 +6495,7 @@ fn build_dethrone_trigger() -> TriggerDefinition {
     )
     .description("Put a +1/+1 counter on this creature".to_string());
 
-    // CR 702.105a + CR 603.4: the life comparison qualifies the attack event.
+    // CR 702.105a + CR 603.2: the life comparison qualifies the attack event.
     // Once Dethrone triggers, subsequent changes in life totals cannot stop it.
     let condition = TriggerCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
