@@ -14792,7 +14792,14 @@ async fn handle_client_message(
                 spectator_visibility: draft_core::types::SpectatorVisibility::default(),
             };
 
-            let (draft_code, player_token, seat_index) = {
+            let (
+                draft_code,
+                player_token,
+                seat_index,
+                registration,
+                host_version,
+                host_build_commit,
+            ) = {
                 let mut mgr = draft_state.lock().await;
                 let (draft_code, player_token, seat_index) =
                     mgr.create_draft(config, display_name.clone());
@@ -14821,67 +14828,81 @@ async fn handle_client_message(
                     tx,
                 )
                 .await;
-                (draft_code, player_token, seat_index)
+                // The pod's lobby row is registered here, unlisted, under the guard that
+                // created the pod and issued its host's credentials, and after `Created` is
+                // sent: every reconnect, join and departure acts on the row under this guard,
+                // so none of them can reach the pod before its row exists, and a busy lobby
+                // delays the row, never the creator's result.
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
+                #[cfg(test)]
+                context
+                    .socket_hooks
+                    .before_draft_create_registration()
+                    .await;
+                let registration = {
+                    let mut lob_guard = lobby.lock().await;
+                    let registration = lob_guard.lobby_mut().register_game(
+                        &draft_code,
+                        RegisterGameRequest {
+                            host_name: display_name.clone(),
+                            public,
+                            password,
+                            timer_seconds,
+                            host_version: host_version.clone(),
+                            host_build_commit: host_build_commit.clone(),
+                            current_players: 1,
+                            max_players: pod_size as u32,
+                            format_config: None,
+                            match_config: Default::default(),
+                            room_name: None,
+                            host_peer_id: String::new(),
+                            draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
+                                set_code: lobby_set_label,
+                                draft_kind: format!("{kind:?}"),
+                                cube_name: None,
+                            }),
+                            ranked: false,
+                        },
+                        &SysEnv,
+                    );
+                    // Unlisted until the step below confirms the pod, so no
+                    // subscriber can see a row that may yet be withdrawn.
+                    lob_guard.lobby_mut().mark_host_away(&draft_code);
+                    registration
+                };
+                (
+                    draft_code,
+                    player_token,
+                    seat_index,
+                    registration,
+                    host_version,
+                    host_build_commit,
+                )
             };
 
             identity.draft_code = Some(draft_code.clone());
             identity.draft_seat = Some(seat_index as usize);
             identity.draft_token = Some(player_token);
 
-            // Register in lobby so draft appears in the lobby list
-            let (host_version, host_build_commit) = identity
-                .client_hello
-                .as_ref()
-                .map(|h| (h.client_version.clone(), h.build_commit.clone()))
-                .unwrap_or_default();
-            let registration = {
-                let mut lob_guard = lobby.lock().await;
-                let registration = lob_guard.lobby_mut().register_game(
-                    &draft_code,
-                    RegisterGameRequest {
-                        host_name: display_name.clone(),
-                        public,
-                        password,
-                        timer_seconds,
-                        host_version: host_version.clone(),
-                        host_build_commit: host_build_commit.clone(),
-                        current_players: 1,
-                        max_players: pod_size as u32,
-                        format_config: None,
-                        match_config: Default::default(),
-                        room_name: None,
-                        host_peer_id: String::new(),
-                        draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code: lobby_set_label,
-                            draft_kind: format!("{kind:?}"),
-                            cube_name: None,
-                        }),
-                        ranked: false,
-                    },
-                    &SysEnv,
-                );
-                // Unlisted until the step below confirms the pod, so no
-                // subscriber can see a row that may yet be withdrawn.
-                lob_guard.lobby_mut().mark_host_away(&draft_code);
-                registration
-            };
-
             #[cfg(test)]
             context.socket_hooks.before_draft_create_listing().await;
 
-            // The registration ran after the create released the draft guard,
-            // so since then the pod may have been removed and its code given
-            // to a FIFO owner or to another lobby row, and a newer socket may
-            // have taken the host seat. Registering under the create's own
-            // guard would make the creator's bootstrap wait on unrelated lobby
-            // work, so the listing is settled here, under the draft guard,
-            // against the row this create registered: a code no legacy pod
-            // holds withdraws that row while it is still unlisted, so nothing
-            // is announced; otherwise the row is listed with the creator's
-            // build only while the creator's socket still holds the host seat,
-            // so a newer host's build and presence are left as that host's
-            // reconnect or departure set them. Another row under the code is
-            // never touched.
+            // The row was registered under the draft guard that created the pod, so
+            // every reconnect, join and departure of the pod found it. Since that
+            // guard was released, the pod may have been removed and its code given
+            // to a FIFO owner or to another lobby row, and a newer socket may have
+            // taken the host seat. So the listing is settled here, in a second
+            // critical section under the draft guard,
+            // against the row this create registered: a code no legacy pod holds
+            // withdraws that row while it is still unlisted, so nothing is announced;
+            // otherwise the row is listed with the creator's build only while the
+            // creator's socket still holds the host seat, so a newer host's build and
+            // presence are left as that host's reconnect or departure set them.
+            // Another row under the code is never touched.
             {
                 let mgr = draft_state.lock().await;
                 if !mgr
@@ -20052,9 +20073,16 @@ mod issue_4548_full_create_tests {
     async fn frames_until_lobby_snapshot(sock: &mut TestWs) -> Vec<ServerMessage> {
         send_test_message(sock, &ClientMessage::SubscribeLobby, false).await;
         let mut frames = Vec::new();
+        collect_until_lobby_snapshot(sock, &mut frames).await;
+        frames
+    }
+
+    /// Reads `sock` into `frames` until a lobby snapshot arrives. Cancelling
+    /// the read keeps every frame already read in `frames`.
+    async fn collect_until_lobby_snapshot(sock: &mut TestWs, frames: &mut Vec<ServerMessage>) {
         loop {
             match recv_server_message(sock).await {
-                ServerMessage::LobbyUpdate { .. } => return frames,
+                ServerMessage::LobbyUpdate { .. } => return,
                 other => frames.push(other),
             }
         }
@@ -21784,21 +21812,8 @@ mod issue_4548_full_create_tests {
     #[tokio::test]
     async fn a_late_create_listing_never_lists_a_fifo_owner() {
         let (url, server, _dir, app) = spawn_draft_server().await;
-        let (mut sub, _) = subscribe_as(&url, "build-a").await;
-        let mut host = connect_as(&url, "build-a").await;
-        let held = app.lobby.lock().await;
-        let create = pod_frame(8, true);
-        let id = draft_command_id(&create);
-        send_test_message(&mut host, &create, false).await;
-        // The create answers under the draft guard, before it waits on the
-        // lobby guard this test holds.
-        let reply = tokio::time::timeout(
-            Duration::from_secs(10),
-            super::draft_socket_authority_tests::next_draft_result(&mut host),
-        )
-        .await
-        .expect("the create's reply");
-        let (code, _) = created_pod(reply, id);
+        let mut held = create_held_at_listing(&url, &app).await;
+        let code = held.code.clone();
         let mut manager = app.draft_sessions.lock().await;
         manager.remove_draft(&code).expect("the created pod");
         let staged = manager
@@ -21809,17 +21824,10 @@ mod issue_4548_full_create_tests {
             .unwrap();
         app.game_db.save_draft_session(&code, staged.row()).unwrap();
         manager.install_fifo(staged).unwrap();
-        drop(held);
-        // Holding the draft guard keeps the create between its registration
-        // and its recheck. The row is registered there, but a subscriber
-        // arriving then is not shown it.
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !app.lobby.lock().await.lobby().has_game(&code) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the create registers its row");
+        // The create is held between its registration and its recheck. The
+        // row is registered there, but a subscriber arriving then is not
+        // shown it.
+        assert!(app.lobby.lock().await.lobby().has_game(&code));
         let window_snapshot = tokio::time::timeout(
             Duration::from_secs(10),
             snapshot_lists(&url, "build-a", &code),
@@ -21828,12 +21836,7 @@ mod issue_4548_full_create_tests {
         .expect("a lobby snapshot while the create waits on its recheck");
         assert!(!window_snapshot);
         drop(manager);
-        // The socket's next create is refused, so the first create's handler
-        // has finished.
-        assert_eq!(
-            draft_refusal(send_draft(&mut host, &pod_frame(8, true)).await),
-            DRAFT_SOCKET_FRESH_REJECTION
-        );
+        release_and_finish(&mut held).await;
         assert!(!app.lobby.lock().await.lobby().has_game(&code));
         assert!(matches!(
             app.draft_sessions.lock().await.sessions[&code].schedule,
@@ -21851,7 +21854,7 @@ mod issue_4548_full_create_tests {
             other => panic!("create refused: {other:?}"),
         };
         assert!(app.lobby.lock().await.lobby().has_game(&other));
-        let frames = frames_until_lobby_snapshot(&mut sub).await;
+        let frames = frames_until_lobby_snapshot(&mut held.sub).await;
         // The withdrawn row was never shown, so its withdrawal announces
         // nothing either.
         assert_eq!(listing_of(&frames, &code), Vec::<&str>::new());
@@ -22094,6 +22097,176 @@ mod issue_4548_full_create_tests {
             lobby_frames(&mut held.sub, &held.code).await,
             vec!["Removed"]
         );
+        server.abort();
+    }
+
+    /// A public pod's create, held after it issued the host's credentials and
+    /// before it registers the pod's lobby row.
+    struct UnregisteredCreate {
+        host: TestWs,
+        code: String,
+        token: String,
+        gate: Arc<socket_test_hooks::BootstrapGate>,
+    }
+
+    /// Creates a public pod from a `build-a` host and holds the create before
+    /// its lobby registration.
+    async fn create_held_at_registration(url: &str, app: &AppState) -> UnregisteredCreate {
+        let mut host = connect_as(url, "build-a").await;
+        let gate = app.context.socket_hooks.arm_draft_create_registration();
+        let create = pod_frame(8, true);
+        let id = draft_command_id(&create);
+        send_test_message(&mut host, &create, false).await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::draft_socket_authority_tests::next_draft_result(&mut host),
+        )
+        .await
+        .expect("the create's reply");
+        let (code, token) = created_pod(reply, id);
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .expect("the create reaches its registration");
+        assert!(
+            !app.lobby.lock().await.lobby().has_game(&code),
+            "reach guard: the pod has no lobby row yet"
+        );
+        UnregisteredCreate {
+            host,
+            code,
+            token,
+            gate,
+        }
+    }
+
+    /// Sends `frame` from a fresh `build` socket while `held` is before its
+    /// registration, releases the create, and returns the socket and the
+    /// frame's own result once the frame's handler has returned.
+    ///
+    /// The server reads the frame while the create is held. A handler that
+    /// does not wait on the create runs to completion inside the 500 ms the
+    /// window then stays open; one that waits is answered after the release.
+    async fn send_while_unregistered(
+        url: &str,
+        app: &AppState,
+        held: &UnregisteredCreate,
+        build: &str,
+        frame: &ClientMessage,
+    ) -> (TestWs, ServerMessage) {
+        let work = app.context.socket_hooks.arm_parser_work();
+        let mut sock = connect_as(url, build).await;
+        tokio::time::timeout(Duration::from_secs(10), work.wait_counts((1, 0)))
+            .await
+            .expect("the server decodes the socket's hello");
+        let id = draft_command_id(frame);
+        send_test_message(&mut sock, frame, false).await;
+        tokio::time::timeout(Duration::from_secs(10), work.wait_counts((2, 0)))
+            .await
+            .expect("reach guard: the server read the frame while the create was held");
+        assert!(
+            !app.lobby.lock().await.lobby().has_game(&held.code),
+            "reach guard: the create is still before its registration"
+        );
+        // A lobby snapshot on the same socket is answered only after the
+        // frame's handler returned.
+        send_test_message(&mut sock, &ClientMessage::SubscribeLobby, false).await;
+        let mut frames = Vec::new();
+        let handled_while_held = tokio::time::timeout(
+            Duration::from_millis(500),
+            collect_until_lobby_snapshot(&mut sock, &mut frames),
+        )
+        .await
+        .is_ok();
+        held.gate.release.notify_one();
+        if !handled_while_held {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                collect_until_lobby_snapshot(&mut sock, &mut frames),
+            )
+            .await
+            .expect("the frame's handler returns after the create's release");
+        }
+        let mut results = frames.into_iter().filter(|reply| {
+            matches!(
+                reply,
+                ServerMessage::DraftCommandAccepted { request_id, .. }
+                    | ServerMessage::DraftCommandRefused { request_id, .. }
+                    if *request_id == id
+            )
+        });
+        let reply = results.next().expect("the frame's own result");
+        assert!(results.next().is_none(), "the frame is answered once");
+        (sock, reply)
+    }
+
+    /// Returns once the held create's handler, its listing step included, has
+    /// finished: the socket's next create is refused only after the first
+    /// returned.
+    async fn finish_unregistered(held: &mut UnregisteredCreate) {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut held.host, &pod_frame(8, true)),
+        )
+        .await
+        .expect("the socket's next create is answered");
+        assert_eq!(draft_refusal(reply), DRAFT_SOCKET_FRESH_REJECTION);
+    }
+
+    #[tokio::test]
+    async fn a_host_reconnect_before_the_create_registers_its_row_leaves_the_live_host_listed() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let reconnect = draft_reconnect(&held.code, &held.token);
+        let (newer, reply) =
+            send_while_unregistered(&url, &app, &held, "build-b", &reconnect).await;
+        assert!(reconnected(reply), "the newer socket takes the host seat");
+        finish_unregistered(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        drop(newer);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_join_before_the_create_registers_its_row_meets_the_hosts_build_gate() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let join = draft_join(&held.code);
+        let (guest, reply) = send_while_unregistered(&url, &app, &held, "build-z", &join).await;
+        // The refusal names the creator's build, so the gate read the
+        // create's own row.
+        assert_eq!(
+            draft_refusal(reply),
+            "Build mismatch: host is on build-a, you are on build-z. Refresh to update."
+        );
+        finish_unregistered(&mut held).await;
+        assert_eq!(filled_draft_seats(&app, &held.code).await, 1);
+        drop(guest);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_join_before_the_create_registers_its_row_is_counted_in_the_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let join = draft_join(&held.code);
+        let (guest, reply) = send_while_unregistered(&url, &app, &held, "build-a", &join).await;
+        assert_eq!(joined_seat(reply), 1, "the join takes the next seat");
+        finish_unregistered(&mut held).await;
+        assert_eq!(
+            app.lobby
+                .lock()
+                .await
+                .lobby()
+                .public_game(&held.code)
+                .expect("the live host's row is listed")
+                .current_players,
+            2
+        );
+        drop(guest);
         server.abort();
     }
 

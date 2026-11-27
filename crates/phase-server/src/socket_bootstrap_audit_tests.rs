@@ -104,17 +104,18 @@ fn draft_creator_bootstrap_does_not_wait_for_unrelated_lobby_work() {
                 false,
             )
             .await;
-            let code = loop {
-                if let Some(code) = app.draft_sessions.lock().await.sessions.keys().next() {
-                    break code.clone();
-                }
-                tokio::task::yield_now().await;
+            let code = match accepted_result(next_draft_result(&mut host).await, 403) {
+                DraftCommandResult::Created {
+                    draft_code,
+                    seat_index: 0,
+                    ..
+                } => draft_code,
+                other => panic!("expected the creator's seat-0 result, got {other:?}"),
             };
-            assert!(matches!(
-                accepted_result(next_draft_result(&mut host).await, 403),
-                DraftCommandResult::Created { draft_code, seat_index: 0, .. } if draft_code == code
-            ));
+            // The create holds the draft guard while it waits for the lobby,
+            // so the manager is read only once the lobby is free.
             drop(held);
+            assert!(app.draft_sessions.lock().await.sessions.contains_key(&code));
         })
         .await;
         server.abort();
