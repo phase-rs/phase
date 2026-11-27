@@ -7638,8 +7638,8 @@ fn try_parse_standing_top_library_permission(
 fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let (scope_tp, expiry, duration) = strip_temporary_restriction_duration_prefix(tp);
 
-    let (affected_players, rest_orig) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
-        alt((
+    let (affected_players, predicate) = nom_on_lower(scope_tp.original, scope_tp.lower, |input| {
+        let scope = alt((
             value(
                 RestrictionPlayerScope::OpponentsOfSourceController,
                 tag("your opponents"),
@@ -7679,50 +7679,65 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
             // Ordered LAST so the longer "your opponents" possessive tag above
             // cannot be shadowed by this "you" prefix.
             value(RestrictionPlayerScope::SourceController, tag("you")),
-        ))
-        .parse(input)
+        ));
+        terminated(scope, tag(" ")).parse(input)
     })?;
-    let rest_lower = &scope_tp.lower[scope_tp.lower.len() - rest_orig.len()..];
+    let predicate_lower = &scope_tp.lower[scope_tp.lower.len() - predicate.len()..];
+    parse_cant_cast_predicate(
+        tp.original,
+        TextPair::new(predicate, predicate_lower),
+        affected_players,
+        expiry,
+        duration,
+    )
+}
 
-    let (spell_filter_text, remaining) = nom_on_lower(rest_orig, rest_lower, |input| {
+/// CR 601.3: both a printed player prefix and an already-bound subject use
+/// the same cast prohibition, spell filter, duration and continuation grammar.
+fn parse_cant_cast_predicate(
+    clause_text: &str,
+    predicate: TextPair<'_>,
+    affected_players: RestrictionPlayerScope,
+    expiry: RestrictionExpiry,
+    duration: Option<Duration>,
+) -> Option<ParsedEffectClause> {
+    let (spell_filter, remaining) = nom_on_lower(predicate.original, predicate.lower, |input| {
+        let (input, _) = (alt((tag("can't"), tag("cannot"))), tag(" cast ")).parse(input)?;
         alt((
-            value(None, tag(" can't cast spells")),
-            value(None, tag(" cannot cast spells")),
-            // CR 101.2: "additional/more/another spell(s)" is an incremental
-            // BLANKET ban (spell_filter None), not a spell-type filter — consume
-            // the qualifier wholesale before the generic filtered arm below can
-            // mis-read "additional" as a type phrase. Composed as two
-            // independent axes (can't/cannot × additional/more/another) rather
-            // than enumerating the permutations.
+            map(
+                preceded(
+                    tag("spells "),
+                    verify(super::oracle_target::parse_same_name_suffix, |prop| {
+                        matches!(prop, FilterProp::SameNameAsParentTarget)
+                    }),
+                ),
+                |prop| {
+                    Some(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![prop]),
+                    ))
+                },
+            ),
             value(
                 None,
-                (
-                    alt((tag(" can't cast "), tag(" cannot cast "))),
-                    alt((
-                        tag("additional spells"),
-                        tag("more spells"),
-                        tag("another spell"),
-                    )),
-                ),
+                alt((
+                    tag("spells"),
+                    tag("additional spells"),
+                    tag("more spells"),
+                    tag("another spell"),
+                )),
             ),
-            map(
-                preceded(
-                    tag(" can't cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
-                ),
-                |text: &str| Some(text.to_string()),
-            ),
-            map(
-                preceded(
-                    tag(" cannot cast "),
-                    nom::sequence::terminated(take_until(" spells"), tag(" spells")),
-                ),
-                |text: &str| Some(text.to_string()),
+            map_opt(
+                terminated(take_until(" spells"), tag(" spells")),
+                |text: &str| {
+                    let (filter, rem) = parse_type_phrase_folding(text.trim());
+                    (rem.trim().is_empty() && !matches!(filter, TargetFilter::Any))
+                        .then_some(Some(filter))
+                },
             ),
         ))
         .parse(input)
     })?;
-    let remaining_lower = &rest_lower[rest_lower.len() - remaining.len()..];
+    let remaining_lower = &predicate.lower[predicate.lower.len() - remaining.len()..];
 
     if tag::<_, _, OracleError<'_>>(" from")
         .parse(remaining_lower)
@@ -7760,17 +7775,6 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         _ => (duration, remaining),
     };
 
-    let spell_filter = match spell_filter_text {
-        None => None,
-        Some(text) => {
-            let (filter, rem) = parse_type_phrase_folding(text.trim());
-            if !rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
-                return None;
-            }
-            Some(filter)
-        }
-    };
-
     let tail = remaining
         .trim_start()
         .trim_start_matches([',', ' '])
@@ -7801,7 +7805,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     let clause = ParsedEffectClause {
         history,
         // The continuation owns its text and history, independently of this restriction.
-        head_text: Some(tp.original[..tp.original.len() - tail.len()].to_string()),
+        head_text: Some(clause_text[..clause_text.len() - tail.len()].to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         linked_exile_return: None,
@@ -35165,20 +35169,29 @@ fn lower_subject_predicate_ast_body(
             {
                 return parsed_clause(Effect::Shuffle { target: affected });
             }
+            let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+            if affected == TargetFilter::ParentTargetOwner {
+                if let Some(clause) = parse_cant_cast_predicate(
+                    original_clause,
+                    pred_tp,
+                    RestrictionPlayerScope::ParentObjectTargetOwner,
+                    RestrictionExpiry::EndOfTurn,
+                    None,
+                ) {
+                    return clause;
+                }
+            }
             // CR 701.20a: "<player> reveals cards from the top of their library
             // until they reveal a [filter]" — third-person form. The subject
             // (e.g., "its controller", "that player", "target opponent") was
             // extracted into `affected` and identifies whose library is
             // revealed. Must be checked BEFORE the RevealTop fallback below,
             // which would otherwise greedy-match the "reveals/top/library" verbs.
-            {
-                let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
-                if let Some(clause) = try_parse_exile_from_top_until(pred_tp, affected.clone()) {
-                    return clause;
-                }
-                if let Some(clause) = try_parse_reveal_until(pred_tp, affected.clone()) {
-                    return clause;
-                }
+            if let Some(clause) = try_parse_exile_from_top_until(pred_tp, affected.clone()) {
+                return clause;
+            }
+            if let Some(clause) = try_parse_reveal_until(pred_tp, affected.clone()) {
+                return clause;
             }
             // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
             if alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))

@@ -10788,7 +10788,10 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
-fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
+pub(crate) fn parent_target_name(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+) -> Option<String> {
     let ability = ability?;
     let id = first_object_target(ability)?;
     if let Some(snapshot) = ability
@@ -12654,6 +12657,9 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
 /// named" match. Single authority for every
 /// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
 pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
+    let (Some(a), Some(b)) = (name_value(a), name_value(b)) else {
+        return false;
+    };
     if a.is_ascii() && b.is_ascii() {
         a.eq_ignore_ascii_case(b)
     } else {
@@ -22595,6 +22601,9 @@ mod tests {
     /// pairwise path give the same answer.
     #[test]
     fn names_shared_and_shared_name_values_agree_on_the_nameless_test() {
+        assert!(!card_names_match("", ""));
+        assert!(!card_names_match("Grizzly Bears", ""));
+        assert!(card_names_match("Grizzly Bears", "grizzly bears"));
         assert!(
             !names_shared("", ""),
             "a nameless object shares no name, not even with another nameless one"

@@ -1200,17 +1200,10 @@ fn restriction_scope_matches_player(
             debug_assert!(false, "ScopedPlayer should be resolved by add_restriction");
             false
         }
-        RestrictionPlayerScope::ParentObjectTargetController => {
-            // CR 109.4: normally resolved to `SpecificPlayer` by `add_restriction`
-            // (via `parent_target_controller`) when the restriction is created.
-            // Unlike the always-resolved sibling scopes (`TargetedPlayer`,
-            // `ScopedPlayer`), this one can legitimately remain unresolved when
-            // there is no object referent — a malformed or hostile state, proven
-            // reachable by `add_restriction`'s
-            // `parent_object_target_controller_unresolved_without_object_target`.
-            // That is a genuine fail-closed outcome (restrict no one), NOT a bug,
-            // so this arm must return `false` rather than `debug_assert!(false)` —
-            // a debug/test panic here would break the documented fail-closed path.
+        RestrictionPlayerScope::ParentObjectTargetOwner
+        | RestrictionPlayerScope::ParentObjectTargetController => {
+            // CR 608.2h: add_restriction resolves the affected player from the
+            // referenced object. Without a referent the scope matches no player.
             false
         }
         RestrictionPlayerScope::OpponentsOfSourceController => {
@@ -1355,12 +1348,36 @@ fn is_blocked_by_cant_cast_spells_for(
         caster_affected
             && match spell_filter {
                 Some(filter) => spell_obj.is_some_and(|spell_obj| {
-                    let Some(source_obj) = state.objects.get(source) else {
+                    if let Some(source_obj) = state.objects.get(source) {
+                        return cant_cast_filter_matches_for(
+                            state, spell_obj, filter, source_obj, caster, fused, None,
+                        );
+                    }
+
+                    // CR 611.2a + CR 601.3: a captured name keeps prohibiting
+                    // casts for the stated duration even if its source is gone.
+                    let TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: None,
+                        properties,
+                    }) = filter
+                    else {
                         return false;
                     };
-                    cant_cast_filter_matches_for(
-                        state, spell_obj, filter, source_obj, caster, fused, None,
-                    )
+                    type_filters.is_empty()
+                        && !properties.is_empty()
+                        && properties
+                            .iter()
+                            .all(|prop| matches!(prop, FilterProp::Named { .. }))
+                        && super::filter::spell_object_matches_filter_from_for(
+                            spell_obj,
+                            spell_obj.zone,
+                            caster,
+                            filter,
+                            caster,
+                            &state.all_creature_types,
+                            fused,
+                        )
                 }),
                 None => true,
             }

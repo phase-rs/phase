@@ -5797,11 +5797,7 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
-                    // MECHANICAL: the scope-selection field is parser→resolver
-                    // metadata consumed solely by `add_restriction` at creation;
-                    // enforcement reads only the snapshotted player. No behavior
-                    // change.
-                    protected_scope: _,
+                    protected_scope,
                 },
             ..
         } = restriction
@@ -5811,9 +5807,10 @@ fn attack_passes_temporary_prohibition(
         // New restrictions snapshot the protected player on resolution. Legacy
         // serialized restrictions have no snapshot and retain their historic
         // source-controller lookup.
-        let Some(protected) = (*protected_player)
-            .or_else(|| state.objects.get(source).map(|object| object.controller))
-        else {
+        let Some(protected) = (*protected_player).or_else(|| match protected_scope {
+            Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTargetOwner) => None,
+            _ => state.objects.get(source).map(|object| object.controller),
+        }) else {
             continue;
         };
         let attacker_is_affected = match affected_players {
@@ -5836,6 +5833,7 @@ fn attack_passes_temporary_prohibition(
             | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
             | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
+            | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetOwner
             | crate::types::ability::RestrictionPlayerScope::ScopedPlayer
             | crate::types::ability::RestrictionPlayerScope::SourceController => false,
         };

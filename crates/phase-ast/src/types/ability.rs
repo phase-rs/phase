@@ -5052,6 +5052,9 @@ pub enum RestrictionPlayerScope {
     /// Mirrors `PlayerFilter::ParentObjectTargetController` /
     /// `PlayerScope::ParentObjectTarget` on the sibling enums.
     ParentObjectTargetController,
+    /// CR 108.3 + CR 608.2c + CR 608.2h: the owner of the preceding instruction's
+    /// object target, captured when the restriction is created after that instruction.
+    ParentObjectTargetOwner,
     OpponentsOfSourceController,
     /// CR 508.5 / CR 508.5a: The defending player for the source's attack
     /// ("Whenever ~ attacks, defending player can't cast spells this turn." —

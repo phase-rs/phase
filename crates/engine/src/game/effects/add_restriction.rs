@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GameRestriction, ProhibitedActivity, ResolvedAbility,
-    RestrictionExpiry,
+    Effect, EffectError, EffectKind, FilterProp, GameRestriction, ProhibitedActivity,
+    ResolvedAbility, RestrictionExpiry, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -106,6 +106,25 @@ fn fill_runtime_fields(
         }
     }
 
+    // CR 400.7 + CR 608.2h: capture the target's name as it last existed in
+    // the expected zone, while the resolving ability still carries that context.
+    if let GameRestriction::ProhibitActivity {
+        activity:
+            ProhibitedActivity::CastSpells {
+                spell_filter: Some(TargetFilter::Typed(filter)),
+            },
+        ..
+    } = restriction
+    {
+        for prop in &mut filter.properties {
+            if matches!(prop, FilterProp::SameNameAsParentTarget) {
+                if let Some(name) = crate::game::filter::parent_target_name(state, Some(ability)) {
+                    *prop = FilterProp::Named { name };
+                }
+            }
+        }
+    }
+
     let resolved_target_player = ability.target_player();
 
     match restriction {
@@ -146,6 +165,15 @@ fn fill_runtime_fields(
                     *affected_players = RestrictionPlayerScope::SpecificPlayer(
                         ability.scoped_player.unwrap_or(ability.controller),
                     );
+                }
+                // CR 108.3 + CR 608.2h: capture the owner of the object target
+                // if the preceding instruction moved it to another zone.
+                RestrictionPlayerScope::ParentObjectTargetOwner => {
+                    if let Some(owner) =
+                        crate::game::ability_utils::parent_target_owner(ability, state)
+                    {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(owner);
+                    }
                 }
                 // CR 109.4 + CR 608.2c + CR 608.2h: "its controller" — capture the
                 // controller of the parent object target (the countered spell) as
@@ -229,6 +257,9 @@ fn fill_runtime_fields(
             // in the affected-player lowering above.
             Some(RestrictionPlayerScope::ScopedPlayer) => {
                 *protected_player = Some(ability.scoped_player.unwrap_or(original_controller));
+            }
+            Some(RestrictionPlayerScope::ParentObjectTargetOwner) => {
+                *protected_player = crate::game::ability_utils::parent_target_owner(ability, state);
             }
             // No producer emits an explicit protected player today; an
             // explicit id wins if one ever does.

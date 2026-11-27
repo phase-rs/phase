@@ -44384,6 +44384,47 @@ fn cant_cast_spells_this_turn_defending_player() {
 }
 
 #[test]
+fn reflector_mage_bounces_one_target_then_restricts_its_owner() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, return target creature an opponent controls to its owner's hand. That creature's owner can't cast spells with the same name as that creature until your next turn.",
+        "Reflector Mage",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one ETB trigger")
+    };
+    let bounce = trigger.execute.as_deref().expect("ETB bounce");
+    assert!(matches!(&*bounce.effect, Effect::Bounce { .. }));
+    assert_eq!(
+        bounce.effect.target_filter(),
+        Some(&TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::Opponent)
+        ))
+    );
+    let ban = bounce
+        .sub_ability
+        .as_deref()
+        .expect("restriction follows the bounce");
+    assert!(matches!(&*ban.effect, Effect::AddRestriction {
+        restriction: GameRestriction::ProhibitActivity {
+            affected_players: RestrictionPlayerScope::ParentObjectTargetOwner,
+            activity: ProhibitedActivity::CastSpells { spell_filter: Some(TargetFilter::Typed(filter)) },
+            ..
+        }
+    } if filter == &TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget])));
+    assert_eq!(
+        ban.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller
+        })
+    );
+    assert!(ban.effect.target_filter().is_none());
+    assert!(ban.sub_ability.is_none());
+}
+
+#[test]
 fn render_silent_its_controller_cant_cast_spells() {
     // CR 109.4 + CR 608.2c + CR 701.6: Render Silent (DGM) — "Counter target
     // spell. Its controller can't cast spells this turn." The head is a counter;
@@ -44428,6 +44469,8 @@ fn render_silent_its_controller_cant_cast_spells() {
         "sub got {:?}",
         sub.effect
     );
+    assert_eq!(sub.duration, Some(Duration::UntilEndOfTurn));
+    assert!(sub.effect.target_filter().is_none());
     // Discriminating guard: no Effect::Unimplemented anywhere in the parsed chain.
     // A swallowed "this turn" tail or an unrecognized "its controller" subject
     // would surface here as an Unimplemented sub-ability — the exact blind spot a
@@ -44840,10 +44883,12 @@ fn conjurers_ban_compound_cant_be_cast_and_cant_be_played() {
         "spell half must carry the shared 'until your next turn' duration"
     );
 
+    assert!(def.effect.target_filter().is_none());
     let land_sub = def
         .sub_ability
         .as_deref()
         .expect("the compound must chain a land-play restriction sub-ability");
+    assert!(land_sub.effect.target_filter().is_none());
     assert!(
         matches!(
             &*land_sub.effect,
