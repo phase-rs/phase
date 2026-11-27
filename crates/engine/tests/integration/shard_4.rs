@@ -498,6 +498,7 @@ mod orzhov_advokist;
 mod other_than_attached_host_exclusion;
 mod otherwise_conditional_effects;
 mod out_of_the_tombs_draw_substitute;
+mod outlaws_merriment_rogue_trigger;
 mod outrageous_robbery_look_and_play;
 mod overflow_submatrix_graveyard_finality;
 mod overload_no_legal_target;
