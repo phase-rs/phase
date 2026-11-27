@@ -537,15 +537,20 @@ fn declaration_offerable_reserving(
             scratch
         });
     let state = reserved_root_state.as_ref().unwrap_or(state);
+    declaration_offerable_with_payment_root(state, player, pending, cost, reserved_life)
+}
+
+fn declaration_offerable_with_payment_root(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: AbilityCost,
+    reserved_life: u32,
+) -> Result<bool, EngineError> {
     // CR 601.2a + CR 609.4b + CR 611.2f: the cast is priced under the terms of
     // the graveyard grant it is announced under (Whispersteel Dagger's
     // concession), which ride its ability until it becomes the pending cast.
-    let terms_state = pending
-        .ability
-        .context
-        .graveyard_permission_latch
-        .as_ref()
-        .and_then(|latch| super::casting::latch_payment_terms_state(state, latch));
+    let terms_state = declaration_payment_terms_state(state, pending);
     let state = terms_state.as_ref().unwrap_or(state);
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
@@ -560,13 +565,26 @@ fn declaration_offerable_reserving(
     // will lock in, including the reduction an Emerge or Offering sacrifice
     // already earned, so an optional cost the pool pays beside the reduced
     // total is offered.
-    let mut total = super::casting::recompute_pending_mana_total_with(
-        state,
-        player,
-        &pending,
-        pending.ability.chosen_x,
-        &super::casting::CostFinalizeContext::from_pending(&pending),
-    );
+    let ctx = super::casting::CostFinalizeContext::from_pending(&pending);
+    let preview = if pending.deferred_target_selection
+        && pending
+            .additional_cost_queue
+            .first()
+            .is_some_and(|instance| instance.origin == AdditionalCostOrigin::Replicate)
+    {
+        super::casting::replicate_mana_total_with_unchosen_targets(state, player, &pending, &ctx)
+    } else {
+        None
+    };
+    let mut total = preview.unwrap_or_else(|| {
+        super::casting::recompute_pending_mana_total_with(
+            state,
+            player,
+            &pending,
+            pending.ability.chosen_x,
+            &ctx,
+        )
+    });
     // CR 601.2f: An optional exile-this-way cost can make the announced X
     // payable. The declaration preview runs before the cards are selected, so
     // account for the greatest legal generic reduction here; otherwise the
@@ -604,6 +622,15 @@ fn declaration_offerable_reserving(
     });
     let payable = |probe: &GameState| {
         super::casting::can_feasibly_pay_mana_cost(probe, player, Some(pending.object_id), &total)
+            // CR 702.132a: Assist applies to the generic portion of the total.
+            || super::casting::can_feasibly_pay_mana_cost_with_assist(
+                probe,
+                player,
+                pending.object_id,
+                pending.casting_variant == CastingVariant::Fuse,
+                &total,
+                None,
+            )
             || payment_mode.is_some_and(|mode| {
                 super::casting::can_feasibly_pay_mana_cost_with_tap_payment_mode(
                     probe,
@@ -2701,7 +2728,9 @@ fn replicate_declaration_is_offerable(
             );
         }
         AbilityCost::TapCreatures { filter, .. } => {
-            return Ok(!replicate_tap_choices(state, player, pending, cost, filter)?.is_empty());
+            return Ok(
+                !replicate_tap_choices(state, player, pending, cost, filter, None)?.is_empty(),
+            );
         }
         AbilityCost::PayEnergy { .. }
         | AbilityCost::Mana { .. }
@@ -2816,45 +2845,98 @@ fn remaining_required_cast_energy(
         })
 }
 
+fn declaration_payment_terms_state(state: &GameState, pending: &PendingCast) -> Option<GameState> {
+    pending
+        .ability
+        .context
+        .graveyard_permission_latch
+        .as_ref()
+        .and_then(|latch| super::casting::latch_payment_terms_state(state, latch))
+}
+
 fn replicate_tap_choices(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
     cost: &AbilityCost,
     filter: &TargetFilter,
+    selection: Option<&[ObjectId]>,
 ) -> Result<Vec<ObjectId>, EngineError> {
-    let mut choices = Vec::new();
-    let mut preview = pending.clone();
-    for id in super::casting::find_eligible_tap_creatures_for_cost(
+    let mut candidates = super::casting::tap_creature_cost_candidates(
         state,
         player,
         pending.object_id,
         pending.ability.context.granting_object,
         cost,
         filter,
-    ) {
-        if pending.holds_tap_reservation(id) || super::restrictions::object_cant_tap(state, id) {
-            continue;
-        }
+    );
+    candidates.retain(|id| {
+        let object = &state.objects[id];
+        !pending.holds_tap_reservation(*id)
+            && !super::restrictions::object_cant_tap(state, *id)
+            && (!object.tapped
+                || object.abilities.iter().any(|ability| {
+                    super::mana_abilities::is_mana_ability(ability)
+                        && super::mana_sources::has_untap_component(&ability.cost)
+                }))
+    });
+    if candidates.is_empty() {
+        return Ok(candidates);
+    }
+    let mut scratch =
+        declaration_payment_terms_state(state, pending).unwrap_or_else(|| state.clone());
+    scratch.pending_cast = Some(Box::new(pending.clone()));
+    let ordinal = queued_replicate_ordinal(pending, cost);
+    let mut payable = |object_ids: &[ObjectId]| {
         // CR 601.2g and CR 601.2h: a permanent held to pay the spell's tap
         // cost must still be untapped after any mana abilities are activated.
-        preview
+        scratch
+            .pending_cast
+            .as_mut()
+            .unwrap()
             .deferred_tapped_permanents
             .push(crate::types::game_state::DeferredSpellTap {
-                object_ids: vec![id],
+                object_ids: object_ids.to_vec(),
                 cost: cost.clone(),
-                replicate_ordinal: queued_replicate_ordinal(pending, cost),
+                replicate_ordinal: ordinal,
             });
-        let payable = additional_cost_declaration_is_offerable(
-            state,
+        let payable = declaration_offerable_with_payment_root(
+            &scratch,
             player,
-            &preview,
+            scratch.pending_cast.as_deref().unwrap(),
             AbilityCost::Mana {
                 cost: ManaCost::NoCost,
             },
-        )?;
-        preview.deferred_tapped_permanents.pop();
-        if payable {
+            0,
+        );
+        scratch
+            .pending_cast
+            .as_mut()
+            .unwrap()
+            .deferred_tapped_permanents
+            .pop();
+        payable
+    };
+    if let Some(chosen) = selection {
+        // CR 601.2h: Check the submitted reservation even when the preview
+        // budget left its creatures unprobed.
+        return if chosen.iter().all(|id| candidates.contains(id)) && payable(chosen)? {
+            Ok(chosen.to_vec())
+        } else {
+            Ok(Vec::new())
+        };
+    }
+    bounded_replicate_tap_choices(candidates, |id| payable(&[id]))
+}
+
+fn bounded_replicate_tap_choices(
+    candidates: Vec<ObjectId>,
+    mut payable: impl FnMut(ObjectId) -> Result<bool, EngineError>,
+) -> Result<Vec<ObjectId>, EngineError> {
+    let mut choices = Vec::new();
+    // Beyond the preview budget, keep the offer and let payment validate it.
+    for (index, id) in candidates.into_iter().enumerate() {
+        if index >= CARD_HOLD_PROBE_BUDGET || payable(id)? {
             choices.push(id);
         }
     }
@@ -3051,8 +3133,7 @@ pub(crate) fn validate_restored_replicate_payment(state: &GameState) -> Result<(
             return Err("Replicate energy differs from its declared payments".into());
         }
     }
-    validate_deferred_spell_tap_reservations(state, player, pending)
-        .map_err(|err| err.to_string())?;
+    validate_deferred_spell_tap_structure(pending).map_err(|err| err.to_string())?;
     if let WaitingFor::OptionalCostChoice {
         player: offered_player,
         origin: AdditionalCostOrigin::Replicate,
@@ -3077,7 +3158,7 @@ pub(crate) fn validate_restored_replicate_payment(state: &GameState) -> Result<(
             origin: AdditionalCostOrigin::Replicate,
             cost:
                 AdditionalCost::Optional {
-                    cost: queued @ AbilityCost::TapCreatures { filter, .. },
+                    cost: queued @ AbilityCost::TapCreatures { .. },
                     ..
                 },
             ..
@@ -3093,16 +3174,22 @@ pub(crate) fn validate_restored_replicate_payment(state: &GameState) -> Result<(
             resume,
         } = &state.waiting_for
         {
-            let eligible = replicate_tap_choices(state, player, pending, queued, filter)
-                .map_err(|err| err.to_string())?;
+            // Candidate affordability is a preview. Saved choices can differ
+            // if the preview budget changes. Submission validates the pick
+            // against live state and commit rechecks the actual payment.
+            let mut seen = std::collections::BTreeSet::new();
             if *offered_player != player
                 || !instances.contains(head)
                 || !matches!(resume, CostResume::SpellCost { cost, .. } if cost.as_ref() == queued)
                 || paid(head.origin_ordinal) == 0
                 || *mode != TapCreaturesSelectionMode::Fixed
                 || (*count, *min_count) != (1, 1)
-                || eligible.is_empty()
-                || *choices != eligible
+                || choices.is_empty()
+                || choices.iter().any(|id| {
+                    !seen.insert(*id)
+                        || !state.objects.contains_key(id)
+                        || pending.holds_tap_reservation(*id)
+                })
             {
                 return Err("Replicate tap prompt does not match its cast payment".into());
             }
@@ -5758,6 +5845,15 @@ fn commit_deferred_spell_taps_and_energy(
     Ok(())
 }
 
+fn has_tapped_replicate_reservation(state: &GameState, pending: &PendingCast) -> bool {
+    pending
+        .deferred_tapped_permanents
+        .iter()
+        .filter(|tap| tap.replicate_ordinal.is_some())
+        .flat_map(|tap| &tap.object_ids)
+        .any(|id| state.objects.get(id).is_some_and(|object| object.tapped))
+}
+
 fn invalid_deferred_spell_tap() -> EngineError {
     EngineError::ActionNotAllowed(
         "The creatures selected to pay this spell's tap cost can no longer pay it".to_string(),
@@ -5769,7 +5865,7 @@ fn validate_deferred_spell_tap_reservations(
     player: PlayerId,
     pending: &PendingCast,
 ) -> Result<(), EngineError> {
-    let mut seen = std::collections::BTreeSet::new();
+    validate_deferred_spell_tap_structure(pending)?;
     for tap in &pending.deferred_tapped_permanents {
         // CR 601.2h: each creature must still pay its selected cost and may
         // only be tapped once; aggregate costs must still meet their threshold (CR 208.1).
@@ -5805,7 +5901,29 @@ fn validate_deferred_spell_tap_reservations(
                 .is_ok()
             },
         );
-        if !still_payable || tap.object_ids.iter().any(|id| !seen.insert(*id)) {
+        if !still_payable {
+            return Err(invalid_deferred_spell_tap());
+        }
+    }
+    Ok(())
+}
+
+fn validate_deferred_spell_tap_structure(pending: &PendingCast) -> Result<(), EngineError> {
+    use crate::types::ability::TapCreaturesRequirement;
+
+    let mut seen = std::collections::BTreeSet::new();
+    for tap in &pending.deferred_tapped_permanents {
+        let valid_count = match super::casting::find_tap_creatures_cost(&tap.cost) {
+            Some((TapCreaturesRequirement::Count { count }, _)) if *count != u32::MAX => {
+                tap.object_ids.len() == *count as usize
+            }
+            Some((
+                TapCreaturesRequirement::Count { .. } | TapCreaturesRequirement::Aggregate { .. },
+                _,
+            )) => true,
+            None => false,
+        };
+        if !valid_count || tap.object_ids.iter().any(|id| !seen.insert(*id)) {
             return Err(invalid_deferred_spell_tap());
         }
     }
@@ -8180,7 +8298,8 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
         validate_tap_creatures_selection(state, min_count, count, mode, legal_creatures, chosen)?;
         if let AbilityCost::TapCreatures { filter, .. } = &cost {
             if queued_replicate_ordinal(&pending, &cost).is_some() {
-                let live_choices = replicate_tap_choices(state, player, &pending, &cost, filter)?;
+                let live_choices =
+                    replicate_tap_choices(state, player, &pending, &cost, filter, Some(chosen))?;
                 validate_tap_creatures_selection(
                     state,
                     min_count,
@@ -13993,7 +14112,7 @@ fn pay_additional_cost_with_source(
             // spell's deferred tap costs are held for that payment. Before
             // payment the in-hand pending is the reservation's carrier.
             let eligible: Vec<ObjectId> = if queued_replicate_ordinal(&pending, &cost).is_some() {
-                replicate_tap_choices(state, player, &pending, &cost, filter)?
+                replicate_tap_choices(state, player, &pending, &cost, filter, None)?
             } else {
                 super::casting::find_eligible_tap_creatures_for_cost(
                     state,
@@ -15829,12 +15948,23 @@ fn classify_payment_route(
     // window (an alternative {0} such as Warped Space's completes the cast). A cast
     // with a deferred commit-time cost opens its window through `enter_payment_step`.
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
+    // CR 601.2g-h: A held creature can untap during the mana window even
+    // when the pool already covers the locked mana cost.
+    let held_creature_needs_untap = state
+        .pending_cast
+        .as_ref()
+        .is_some_and(|pending| has_tapped_replicate_reservation(state, pending));
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
         && super::casting::spell_payment_manual_route(state, player, object_id, cost)
             == super::casting::ManualPaymentRoute::Feasible;
-    let route = if has_x || convoke_mode.is_some() || manual_payment || auto_payment_needs_input {
+    let route = if has_x
+        || convoke_mode.is_some()
+        || manual_payment
+        || auto_payment_needs_input
+        || held_creature_needs_untap
+    {
         PaymentRoute::PaymentStep
     } else {
         PaymentRoute::Automatic
@@ -21320,6 +21450,9 @@ pub fn enter_payment_step(
     // CR 601.2h: Auto-finalize only when the shared choice-free classifier
     // proves the real Auto payer can complete the locked obligation.
     let should_auto_finalize = state.pending_cast.as_ref().is_some_and(|pending| {
+        if has_tapped_replicate_reservation(state, pending) {
+            return false;
+        }
         let tap_payment_mode = eligible_tap_payment_mode(state, player, pending, convoke_mode);
         choice_free_auto_payment_verdict(pending, tap_payment_mode, || {
             super::casting::can_pay_cost_after_auto_tap(
@@ -21491,6 +21624,11 @@ fn finalize_mana_payment_with_resume(
     // `PendingCast` stays in `state.pending_cast` across the pause — the resume handler
     // in `engine.rs` calls `finalize_mana_payment_with_phyrexian_choices`.
     if let Some(pending) = state.pending_cast.as_ref() {
+        // CR 601.2g-h: Keep the mana window open if the payer still needs
+        // to untap. Reject before consuming mana or taking the pending cast.
+        if has_tapped_replicate_reservation(state, pending) {
+            return Err(invalid_deferred_spell_tap());
+        }
         if let Err(error) = ensure_pending_spell_announcement_is_live(state, pending) {
             state.pending_cast = None;
             return Err(error);
@@ -39112,7 +39250,7 @@ its replicate cost was paid.)\nDraw a card.";
 
 #[cfg(test)]
 mod card_hold_probe_budget_tests {
-    use super::{assign_reserved_legs, CARD_HOLD_PROBE_BUDGET};
+    use super::{assign_reserved_legs, bounded_replicate_tap_choices, CARD_HOLD_PROBE_BUDGET};
     use crate::game::casting::ReservedUse;
     use crate::game::cost_payability::ReservableLeg;
     use crate::types::identifiers::ObjectId;
@@ -39142,5 +39280,18 @@ mod card_hold_probe_budget_tests {
         );
         assert_eq!(verdict, None);
         assert_eq!(probes.get(), CARD_HOLD_PROBE_BUDGET);
+    }
+
+    #[test]
+    fn replicate_tap_preview_keeps_unprobed_candidates() {
+        let candidates: Vec<_> = (0..128).map(ObjectId).collect();
+        let mut probes = 0;
+        let choices = bounded_replicate_tap_choices(candidates.clone(), |_| {
+            probes += 1;
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(probes, CARD_HOLD_PROBE_BUDGET);
+        assert_eq!(choices, candidates[CARD_HOLD_PROBE_BUDGET..]);
     }
 }

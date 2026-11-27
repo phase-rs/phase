@@ -7,6 +7,7 @@ import type {
   RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
+  TapOneDisplay,
   UnlessDrawCostView,
 } from "../adapter/types.ts";
 import i18n from "../i18n";
@@ -116,8 +117,8 @@ type SerializedCost = {
   count?: QuantityExpr | number;
   costs?: SerializedCost[];
   cost?: { type: string; shards?: string[]; generic?: number };
-  filter?: { type: string; type_filters?: unknown[]; controller?: unknown } | null;
-  requirement?: { requirement: string; count?: number };
+  filter?: { type: string; type_filters?: unknown[] } | null;
+  tap_display?: TapOneDisplay;
   zone?: string | null;
   effect?: {
     type: string;
@@ -195,12 +196,9 @@ function formatFilteredCard(filter: SerializedCost["filter"], plural: boolean): 
   );
 }
 
-export function formatTapOneCost(filter: SerializedCost["filter"]): string {
-  const subtype = filter?.type === "Typed"
-    ? filter.type_filters?.find((type) => type != null && typeof type === "object" && "Subtype" in type)
-    : undefined;
-  return subtype && filter?.controller === "You"
-    ? i18n.t("game:optionalCost.replicate.tapSubtype", { subtype: formatTypeFilter(subtype) })
+export function formatTapOneCost(display: TapOneDisplay | undefined): string {
+  return display?.type === "ControlledSubtype"
+    ? i18n.t("game:optionalCost.replicate.tapSubtype", { subtype: display.subtype })
     : i18n.t("game:optionalCost.replicate.tapCreature");
 }
 
@@ -414,9 +412,7 @@ export function formatKnownCost(cost: SerializedCost): string | null {
     case "PayLife": return `Pay ${formatQuantity(cost.amount, 1)} life`;
     case "PayEnergy": return formatEnergyCost(cost.amount);
     case "TapCreatures":
-      return cost.requirement?.requirement === "count" && cost.requirement.count === 1
-        ? formatTapOneCost(cost.filter)
-        : null;
+      return cost.tap_display ? formatTapOneCost(cost.tap_display) : null;
     case "Sacrifice": return "Sacrifice";
     case "Discard": {
       const label = formatQuantity(cost.count, 1);

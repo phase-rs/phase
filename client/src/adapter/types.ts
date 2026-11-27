@@ -2786,7 +2786,11 @@ export type AdditionalCost =
   | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
-export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+export type SerializedAbilityCost = { type: string; tap_display?: TapOneDisplay; [key: string]: unknown };
+
+export type TapOneDisplay =
+  | { type: "ControlledSubtype"; subtype: string }
+  | { type: "Creature" };
 
 /**
  * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in

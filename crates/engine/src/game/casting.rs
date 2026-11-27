@@ -13414,6 +13414,47 @@ pub(super) fn recompute_pending_mana_total_with(
     )
 }
 
+/// CR 601.2b-f: Replicate is declared before targets. Price the best
+/// possible target-dependent discounts here; settlement prices chosen targets.
+pub(super) fn replicate_mana_total_with_unchosen_targets(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    ctx: &CostFinalizeContext,
+) -> Option<ManaCost> {
+    if !target_dependent_cost_reduction_present(
+        state,
+        player,
+        pending.object_id,
+        pending.casting_variant,
+    ) {
+        return None;
+    }
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        pending.object_id,
+        Some(pending.casting_variant),
+    );
+    let modifiers =
+        CollectedCostModifiers::collect_on_view(&view, None, pending.casting_permission_index, ctx);
+    let discounts = collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
+        .into_iter()
+        .filter(|modifier| !modifier.is_raise)
+        .collect();
+    let collected = CollectedCastCosts::seeded(
+        modifiers.with_target_dependent(discounts),
+        CollectedCostFloors::collect_target_independent(&view),
+    );
+    Some(recompute_pending_mana_total_using(
+        &view,
+        pending,
+        pending.ability.chosen_x,
+        ctx,
+        &collected,
+    ))
+}
+
 /// CR 601.2f: as [`recompute_pending_mana_total_with`], reading its board inputs
 /// out of `collected` instead of re-deriving them.
 ///
@@ -23536,7 +23577,7 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
 /// spell's total cost between its caster and one chosen other player. Candidate
 /// feasibility must therefore preserve a cast that neither player can pay alone
 /// when some concrete helper contribution leaves both shares payable.
-fn can_feasibly_pay_mana_cost_with_assist(
+pub(crate) fn can_feasibly_pay_mana_cost_with_assist(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -24206,11 +24247,25 @@ fn target_dependent_reduction_makes_payable(
     // With clean layers the live state is authoritative, so the common
     // no-reduction case is decided without the flush clone.
     let layers_dirty = state.layers_dirty.is_dirty();
-    if !layers_dirty && !target_dependent_cost_reduction_present(state, player, prepared) {
+    if !layers_dirty
+        && !target_dependent_cost_reduction_present(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_variant,
+        )
+    {
         return false;
     }
     with_flushed_cast_state(state, player, probe, |flushed| {
-        if layers_dirty && !target_dependent_cost_reduction_present(flushed, player, prepared) {
+        if layers_dirty
+            && !target_dependent_cost_reduction_present(
+                flushed,
+                player,
+                prepared.object_id,
+                prepared.casting_variant,
+            )
+        {
             return false;
         }
         let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
@@ -24432,10 +24487,10 @@ fn target_pricing_chains(
 fn target_dependent_cost_reduction_present(
     state: &GameState,
     player: PlayerId,
-    prepared: &PreparedSpellCast,
+    spell_id: ObjectId,
+    variant: CastingVariant,
 ) -> bool {
-    let spell_id = prepared.object_id;
-    let view = SpellCostView::for_variant(state, player, spell_id, Some(prepared.casting_variant));
+    let view = SpellCostView::for_variant(state, player, spell_id, Some(variant));
 
     let Some(spell) = state.objects.get(&spell_id) else {
         return false;
@@ -26048,6 +26103,87 @@ fn has_exact_filter_land_payment_witness(
     }
 }
 
+/// CR 601.2g-h + CR 107.6: A creature held for a spell cost can produce mana
+/// by tapping and then paying its own untap cost before the spell is paid.
+/// Walk both real activations and leave all reservations published for the
+/// residual affordability check.
+fn has_held_tap_untap_payment_witness(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    const HELD_TAP_UNTAP_PROBE_BUDGET: usize = 8;
+
+    use super::mana_abilities::ManaActivationPurpose;
+    use super::mana_sources::{has_tap_component, has_untap_component, mana_source_selections};
+
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    let held: std::collections::BTreeSet<_> = pending
+        .deferred_tap_ids()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.abilities.iter().any(|ability| {
+                    super::mana_abilities::is_mana_ability(ability)
+                        && has_untap_component(&ability.cost)
+                })
+            })
+        })
+        .collect();
+    if held.is_empty() {
+        return false;
+    }
+
+    let mut scratch = state.clone();
+    scratch.waiting_for = WaitingFor::Priority { player };
+    let selection_has_cost =
+        |probe: &GameState,
+         selection: &ManaSourceSelection,
+         has_component: fn(&Option<AbilityCost>) -> bool| {
+            selection
+                .ability_index
+                .and_then(|index| {
+                    probe.objects[&selection.source.object_id]
+                        .abilities
+                        .get(index)
+                })
+                .is_some_and(|ability| has_component(&ability.cost))
+        };
+    mana_source_selections(&scratch, player, ManaActivationPurpose::Explicit)
+        .into_iter()
+        .filter(|selection| {
+            held.contains(&selection.source.object_id)
+                && selection_has_cost(&scratch, selection, has_tap_component)
+        })
+        .take(HELD_TAP_UNTAP_PROBE_BUDGET)
+        .any(|tap| {
+            exact_mana_ability_successors(scratch.clone(), player, &tap)
+                .into_iter()
+                .any(|tapped| {
+                    mana_source_selections(&tapped, player, ManaActivationPurpose::Explicit)
+                        .into_iter()
+                        .filter(|selection| {
+                            selection.source == tap.source
+                                && selection_has_cost(&tapped, selection, has_untap_component)
+                        })
+                        .take(HELD_TAP_UNTAP_PROBE_BUDGET)
+                        .any(|untap| {
+                            exact_mana_ability_successors(tapped.clone(), player, &untap)
+                                .into_iter()
+                                .any(|untapped| {
+                                    untapped.objects.get(&untap.source.object_id).is_some_and(
+                                        |object| !object.tapped && object.zone == Zone::Battlefield,
+                                    ) && can_pay_cost_after_auto_tap_with_probe(
+                                        &untapped, player, source_id, cost, None,
+                                    )
+                                })
+                        })
+                })
+        })
+}
+
 fn can_feasibly_pay_mana_cost_without_x_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -26182,7 +26318,9 @@ fn manual_mana_payment_route(
     // the narrow producer -> filter-land route by executing both abilities on
     // a clone through their normal reducer actions and exact choice prompts.
     if let Some(sid) = source_id {
-        if has_exact_filter_land_payment_witness(state, player, sid, cost, probe) {
+        if has_held_tap_untap_payment_witness(state, player, sid, cost)
+            || has_exact_filter_land_payment_witness(state, player, sid, cost, probe)
+        {
             return ManualPaymentRoute::Feasible;
         }
     }

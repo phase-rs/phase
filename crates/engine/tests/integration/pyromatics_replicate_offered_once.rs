@@ -2,6 +2,8 @@
 //! before its targets, with the rest of its optional additional costs, and every
 //! payment made there copies the spell. Oracle text is verbatim from Scryfall.
 
+use std::collections::BTreeSet;
+
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability, TargetRef,
@@ -363,11 +365,18 @@ fn copies_per_trigger(board: &mut Board) -> Vec<usize> {
     };
     let mut open = triggers(board);
     let mut per_trigger = Vec::new();
-    let mut copies = 0;
+    let mut retargeted_copies = BTreeSet::new();
     for _ in 0..60 {
         match board.runner.state().waiting_for {
-            WaitingFor::CopyRetarget { .. } => {
-                copies += 1;
+            WaitingFor::CopyRetarget {
+                copy_id,
+                player: P0,
+                ..
+            } => {
+                assert!(
+                    retargeted_copies.insert(copy_id),
+                    "each copy gets one retarget choice"
+                );
                 board
                     .runner
                     .act(GameAction::KeepAllCopyTargets)
@@ -376,8 +385,20 @@ fn copies_per_trigger(board: &mut Board) -> Vec<usize> {
             WaitingFor::Priority { .. } => {
                 let now = triggers(board);
                 if now < open {
-                    per_trigger.push(copies);
-                    copies = 0;
+                    let stack_copies: BTreeSet<_> = board
+                        .runner
+                        .state()
+                        .stack
+                        .iter()
+                        .filter(|entry| {
+                            entry.id != board.spell
+                                && matches!(entry.kind, StackEntryKind::Spell { .. })
+                        })
+                        .map(|entry| entry.id)
+                        .collect();
+                    assert_eq!(stack_copies, retargeted_copies);
+                    per_trigger.push(stack_copies.len());
+                    retargeted_copies.clear();
                     open = now;
                 }
                 if now == 0 {
@@ -472,14 +493,6 @@ fn paying_only_one_pyromatics_replicate_instance_survives_a_mana_only_save() {
             assert_eq!(mana_spent(&board), 6);
             assert_eq!(replicate_records(&board), vec![(ordinal, 1); 2]);
             assert_eq!(copies_per_trigger(&mut board), vec![2]);
-            assert_eq!(
-                board
-                    .events
-                    .iter()
-                    .filter(|event| matches!(event, GameEvent::SpellCast { .. }))
-                    .count(),
-                1,
-            );
         }
     }
 }

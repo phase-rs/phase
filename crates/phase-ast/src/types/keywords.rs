@@ -70,19 +70,34 @@ impl From<ReplicateEnergy> for i32 {
 }
 
 mod replicate_tap_one {
+    use crate::types::ability::TapOneDisplay;
+
     use super::{Deserialize, Serialize, TargetFilter};
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize)]
     #[serde(tag = "type")]
-    enum Payload<T> {
-        TapOne { filter: T },
+    enum DisplayPayload<'a> {
+        TapOne {
+            filter: &'a TargetFilter,
+            tap_display: TapOneDisplay<'a>,
+        },
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "type")]
+    enum Payload {
+        TapOne { filter: Box<TargetFilter> },
     }
 
     pub(super) fn serialize<S: serde::Serializer>(
         filter: &TargetFilter,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        Payload::TapOne { filter }.serialize(serializer)
+        DisplayPayload::TapOne {
+            filter,
+            tap_display: TapOneDisplay::from_filter(filter),
+        }
+        .serialize(serializer)
     }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
@@ -170,10 +185,25 @@ mod replicate_codec_tests {
         let filter = TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Subtype("Dalek".into())).controller(ControllerRef::You),
         );
+        let creature_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
         for (keyword, payload) in [
             (
                 Keyword::Replicate(ReplicateCost::TapOne(Box::new(filter.clone()))),
-                json!({"type": "TapOne", "filter": filter}),
+                json!({
+                    "type": "TapOne",
+                    "filter": filter,
+                    "tap_display": {"type": "ControlledSubtype", "subtype": "Dalek"},
+                }),
+            ),
+            (
+                Keyword::Replicate(ReplicateCost::TapOne(Box::new(creature_filter.clone()))),
+                json!({
+                    "type": "TapOne",
+                    "filter": creature_filter,
+                    "tap_display": {"type": "Creature"},
+                }),
             ),
             (
                 Keyword::Replicate(ReplicateCost::PayEnergy(ReplicateEnergy::new(3).unwrap())),
@@ -194,6 +224,22 @@ mod replicate_codec_tests {
         ] {
             assert!(serde_json::from_value::<Keyword>(json!({"Replicate": payload})).is_err());
         }
+    }
+
+    #[test]
+    fn generic_tap_payment_gains_a_display_descriptor_on_round_trip() {
+        let legacy = json!({
+            "type": "TapCreatures",
+            "count": 1,
+            "filter": {"type": "Typed", "type_filters": ["Creature"], "controller": "You"}
+        });
+        let cost: AbilityCost = serde_json::from_value(legacy).unwrap();
+        let payment = serde_json::to_value(&cost).unwrap();
+        assert_eq!(payment["tap_display"], json!({"type": "Creature"}));
+        assert_eq!(
+            serde_json::from_value::<AbilityCost>(payment).unwrap(),
+            cost
+        );
     }
 
     #[test]

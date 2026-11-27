@@ -2,7 +2,7 @@ use engine::game::engine::{apply, EngineError};
 use engine::game::mana_sources::activatable_mana_source_selections;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AdditionalCost, AdditionalCostOrigin, QuantityExpr, QuantityModification,
+    AbilityCost, AdditionalCostOrigin, ChosenAttribute, QuantityModification,
     ReplacementDefinition, TapCreaturesSelectionMode, TargetRef,
 };
 use engine::types::actions::GameAction;
@@ -29,6 +29,18 @@ const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
 const GRAND_ARCHITECT: &str = "Other blue creatures you control get +1/+1.\n{U}: Target artifact creature becomes blue until end of turn.\nTap an untapped blue creature you control: Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.";
 const PILI_PALA: &str = "Flying\n{2}, {Q}: Add one mana of any color. ({Q} is the untap symbol.)";
 const MASKWOOD_NEXUS: &str = "Creatures you control are every creature type. The same is true for creature spells you control and creature cards you own that aren't on the battlefield.\n{3}, {T}: Create a 2/2 blue Shapeshifter creature token with changeling. (It is every creature type.)";
+const PARADISE_MANTLE: &str =
+    "Equipped creature has \"{T}: Add one mana of any color.\"\nEquip {1}";
+const DALEK_SQUADRON: &str = "Menace\nMyriad (Whenever this creature attacks, for each opponent other than defending player, you may create a token copy that's tapped and attacking that player or a planeswalker they control. Exile the tokens at end of combat.)";
+const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
+const HUDDLE_UP: &str = "Assist (Another player can pay up to {2} of this spell's cost.)\nTwo target players each draw a card.";
+const DJINN_ILLUMINATUS: &str = "({U/R} can be paid with either {U} or {R}.)\nFlying\nEach instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
+
+const KILLIAN: &str = "Lifelink\nMenace (This creature can't be blocked except by two or more creatures.)\nSpells you cast that target a creature cost {2} less to cast.";
+
+const PYROMATICS: &str = "Replicate {1}{R} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nPyromatics deals 1 damage to any target.";
+
+const PAINTER: &str = "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.";
 
 fn act(runner: &mut GameRunner, action: GameAction) -> Vec<GameEvent> {
     runner
@@ -215,54 +227,79 @@ struct DalekBoard {
 fn dalek_board(spare_mana: bool, conspire_helpers: Option<usize>) -> DalekBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
     let mana_dalek = scenario
-        .add_creature_from_oracle(P0, "Dalek mana source", 2, 2, "{T}: Add {B}.")
-        .with_subtypes(vec!["Dalek"])
-        .with_color(vec![ManaColor::Red])
+        .add_creature_from_oracle(P0, "Leaden Myr", 1, 1, "{T}: Add {B}.")
+        .as_artifact_creature()
+        .with_subtypes(vec!["Myr"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
         .id();
     let sick_dalek = scenario
-        .add_creature(P0, "Newly controlled Dalek", 2, 2)
+        .add_creature_from_oracle(P0, "Dalek Squadron", 3, 3, DALEK_SQUADRON)
+        .as_artifact_creature()
         .with_subtypes(vec!["Dalek"])
-        .with_color(vec![ManaColor::Red])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
         .with_summoning_sickness()
         .id();
     let tapped_dalek = scenario
-        .add_creature(P0, "Tapped Dalek", 2, 2)
+        .add_creature_from_oracle(P0, "Dalek Squadron", 3, 3, DALEK_SQUADRON)
+        .as_artifact_creature()
         .with_subtypes(vec!["Dalek"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
         .id();
     let opponent_dalek = scenario
-        .add_creature(P1, "Opponent's Dalek", 2, 2)
+        .add_creature_from_oracle(P1, "Dalek Squadron", 3, 3, DALEK_SQUADRON)
+        .as_artifact_creature()
         .with_subtypes(vec!["Dalek"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
         .id();
-    let original_target = scenario.add_creature(P1, "Opponent's victim", 2, 2).id();
-    let new_target = scenario.add_creature(P0, "Caster's victim", 2, 2).id();
+    let original_target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let new_target = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let swamp = spare_mana.then(|| scenario.add_basic_land(P0, ManaColor::Black));
     pool(&mut scenario, ManaType::Colorless, 2);
     let mut helpers = Vec::new();
-    if let Some(count) = conspire_helpers {
-        scenario.add_creature_from_oracle(P0, "Wort, the Raidmother", 3, 3, WORT);
-        for i in 0..count {
+    let conspire = conspire_helpers.map(|count| {
+        let wort = scenario
+            .add_creature_from_oracle(P0, "Wort, the Raidmother", 3, 3, WORT)
+            .with_mana_cost(parse_mtgjson_mana_cost("{4}{R/G}{R/G}"))
+            .id();
+        let painter = scenario
+            .add_creature_from_oracle(P1, "Painter's Servant", 1, 3, PAINTER)
+            .as_artifact_creature()
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+            .id();
+        for _ in 0..count {
             helpers.push(
                 scenario
-                    .add_creature(P0, &format!("Red Goblin {i}"), 1, 1)
-                    .with_color(vec![ManaColor::Red])
+                    .add_creature(P0, "Mons's Goblin Raiders", 1, 1)
+                    .with_mana_cost(parse_mtgjson_mana_cost("{R}"))
                     .id(),
             );
         }
-    }
-    let mut spell = scenario.add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE);
-    spell.with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"));
-    if conspire_helpers.is_some() {
-        spell.with_color(vec![ManaColor::Black, ManaColor::Red]);
-    }
-    let spell = spell.id();
+        (wort, painter)
+    });
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
     let mut runner = scenario.build();
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&tapped_dalek)
-        .unwrap()
-        .tapped = true;
+    runner.state_mut().all_creature_types = ["Dalek", "Myr", "Goblin", "Warrior", "Bear"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for id in [tapped_dalek, new_target] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
+    if let Some((wort, painter)) = conspire {
+        runner.state_mut().objects.get_mut(&wort).unwrap().tapped = true;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&painter)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::Color(ManaColor::Red));
+    }
     DalekBoard {
         runner,
         spell,
@@ -275,6 +312,68 @@ fn dalek_board(spare_mana: bool, conspire_helpers: Option<usize>) -> DalekBoard 
         swamp,
         helpers,
     }
+}
+
+#[test]
+fn exterminate_tap_cost_display_round_trips_through_client_adapters() {
+    use engine::game::derived_views::{ClientGameState, ClientGameStateRef};
+    use engine::game::visibility::{filter_state_for_viewer, HandDisclosure};
+    use engine::types::game_state::GameState;
+    use serde_json::{json, Value};
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(
+            P0,
+            "Dalek Drone",
+            3,
+            3,
+            "Flying, menace\nExterminate! — When this creature enters, destroy target creature an opponent controls. That player loses 3 life.",
+        )
+        .with_subtypes(vec!["Dalek"]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    pool(&mut scenario, ManaType::Colorless, 2);
+    pool(&mut scenario, ManaType::Black, 1);
+    let mut runner = scenario.build();
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+
+    let assert_display = |wire: &Value| {
+        let display = json!({"type": "ControlledSubtype", "subtype": "Dalek"});
+        let keywords = wire["objects"][spell.0.to_string()]["keywords"]
+            .as_array()
+            .expect("the caster sees their spell's keywords");
+        assert!(
+            keywords
+                .iter()
+                .any(|keyword| keyword["Replicate"]["tap_display"] == display),
+            "expected the Dalek display descriptor on Replicate, got {keywords:?}"
+        );
+        assert_eq!(
+            wire["waiting_for"]["data"]["cost"]["data"]["cost"]["tap_display"],
+            display
+        );
+    };
+
+    let state = runner.state();
+    let local = serde_json::to_value(ClientGameStateRef::wrap_with_hand_disclosure(
+        state,
+        P0,
+        HandDisclosure::Rules,
+    ))
+    .unwrap();
+    assert_display(&local["state"]);
+    let local: ClientGameState = serde_json::from_value(local).unwrap();
+    assert_display(&serde_json::to_value(local.state).unwrap());
+
+    let remote = serde_json::to_value(filter_state_for_viewer(state, P0)).unwrap();
+    assert_display(&remote);
+    let remote: GameState = serde_json::from_value(remote).unwrap();
+    assert_display(&serde_json::to_value(remote).unwrap());
 }
 
 fn reject_tap(runner: &mut GameRunner, id: ObjectId) {
@@ -525,6 +624,466 @@ fn exterminate_reserved_pili_pala_can_tap_and_untap_for_mana() {
 }
 
 #[test]
+fn exterminate_can_reserve_a_dalek_beyond_the_preview_budget() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
+    // Seed the battlefield with the tokens Nexus produces. Their age does
+    // not affect payment, which uses no tap symbol (CR 302.6).
+    let tokens: Vec<_> = (0..70)
+        .map(|_| {
+            scenario
+                .add_creature(P0, "Shapeshifter", 2, 2)
+                .with_subtypes(vec!["Shapeshifter"])
+                .with_color(vec![ManaColor::Blue])
+                .with_keyword(engine::types::keywords::Keyword::Changeling)
+                .id()
+        })
+        .collect();
+    let myr = scenario
+        .add_creature_from_oracle(P0, "Leaden Myr", 1, 1, "{T}: Add {B}.")
+        .as_artifact_creature()
+        .with_subtypes(vec!["Myr"])
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    pool(&mut scenario, ManaType::Colorless, 2);
+    let mut runner = scenario.build();
+    for id in tokens {
+        runner.state_mut().objects.get_mut(&id).unwrap().is_token = true;
+    }
+    runner.state_mut().all_creature_types =
+        ["Dalek", "Myr"].into_iter().map(str::to_string).collect();
+    cast(&mut runner, spell, CastPaymentMode::Auto);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    let choices = tap_choices(&runner, 1);
+    assert_eq!(choices.len(), 71);
+    assert_eq!(
+        choices[70], myr,
+        "the only black source is offered after the probe budget"
+    );
+    let chosen = choices[69];
+    let choices = choices.to_vec();
+    let pending = runner
+        .state()
+        .waiting_for
+        .pending_cast_ref()
+        .unwrap()
+        .clone();
+    let mana = runner.state().players[0].mana_pool.clone();
+    reject_tap(&mut runner, myr);
+    assert_eq!(tap_choices(&runner, 1), choices);
+    assert_eq!(
+        runner.state().waiting_for.pending_cast_ref(),
+        Some(&pending)
+    );
+    assert!(records(&runner, spell).is_empty());
+    assert!(!runner.state().objects[&myr].tapped);
+    assert_eq!(runner.state().players[0].mana_pool, mana);
+    act(&mut runner, select(&[chosen]));
+    offer(&runner, AdditionalCostOrigin::Replicate, 1);
+    decide(&mut runner, false);
+    target_prompt(&runner);
+    act(&mut runner, target(victim));
+    // CR 601.2h: The selected creature pays only when the spell commits.
+    assert!(runner.state().objects[&chosen].tapped);
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    pass_to_prompt(&mut runner);
+    let copy = copy_prompt(&runner, victim);
+    act(&mut runner, GameAction::KeepAllCopyTargets);
+    assert_spell_target(&runner, copy, victim);
+    finish(&mut runner);
+}
+
+#[test]
+fn exterminate_offers_pili_pala_when_its_tap_untap_pays_for_the_spell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
+    let pili = scenario
+        .add_creature_from_oracle(P0, "Pili-Pala", 1, 1, PILI_PALA)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Scarecrow"])
+        .id();
+    let mantle = scenario
+        .add_artifact_from_oracle(P0, "Paradise Mantle", PARADISE_MANTLE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    pool(&mut scenario, ManaType::Colorless, 4);
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = ["Dalek", "Scarecrow"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    engine::game::effects::attach::attach_to(runner.state_mut(), mantle, pili);
+
+    cast(&mut runner, spell, CastPaymentMode::Auto);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    assert_eq!(tap_choices(&runner, 1), [pili]);
+    act(&mut runner, select(&[pili]));
+    target_prompt(&runner);
+    act(&mut runner, target(victim));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    let activate = |ability_index| GameAction::ActivateAbility {
+        source_id: pili,
+        ability_index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    // CR 601.2g-h + CR 107.6: Tap with the Mantle grant, then untap for mana
+    // so Pili-Pala can still pay Replicate at commit.
+    for index in [1, 0] {
+        act(&mut runner, activate(index));
+        act(
+            &mut runner,
+            GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+        );
+    }
+    assert!(!runner.state().objects[&pili].tapped);
+    act(&mut runner, GameAction::PassPriority);
+    assert!(runner.state().objects[&pili].tapped);
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    pass_to_prompt(&mut runner);
+    let copy = copy_prompt(&runner, victim);
+    act(&mut runner, GameAction::KeepAllCopyTargets);
+    assert_spell_target(&runner, copy, victim);
+    finish(&mut runner);
+}
+
+#[test]
+fn exterminate_can_reserve_pili_pala_after_it_attacks() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS);
+    let pili = scenario
+        .add_creature_from_oracle(P0, "Pili-Pala", 1, 1, PILI_PALA)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Scarecrow"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}"))
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = ["Dalek", "Scarecrow"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(pili, engine::game::combat::AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..16 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => {
+                pass(&mut runner);
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).unwrap();
+            }
+            ref other => panic!("unexpected combat prompt {other:?}"),
+        }
+    }
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
+    assert!(runner.state().objects[&pili].tapped);
+    for selection in activatable_mana_source_selections(runner.state(), P0) {
+        if selection.source.object_id != pili {
+            act(&mut runner, GameAction::TapLandForMana { selection });
+        }
+    }
+    cast(&mut runner, spell, CastPaymentMode::Auto);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    assert_eq!(tap_choices(&runner, 1), [pili]);
+    act(&mut runner, select(&[pili]));
+    act(&mut runner, target(victim));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    assert!(
+        runner.act(GameAction::PassPriority).is_err(),
+        "a still-tapped Pili-Pala cannot pay"
+    );
+    assert!(runner.state().objects[&pili].tapped);
+    act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: pili,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    act(
+        &mut runner,
+        GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Black),
+            count: 1,
+        },
+    );
+    assert!(!runner.state().objects[&pili].tapped);
+    act(&mut runner, GameAction::PassPriority);
+    assert!(runner.state().objects[&pili].tapped);
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    pass_to_prompt(&mut runner);
+    let copy = copy_prompt(&runner, victim);
+    act(&mut runner, GameAction::KeepAllCopyTargets);
+    assert_spell_target(&runner, copy, victim);
+}
+
+#[test]
+fn exterminate_restores_a_stale_reservation_but_only_cancellation_can_finish_it() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nexus = scenario
+        .add_artifact_from_oracle(P0, "Maskwood Nexus", MASKWOOD_NEXUS)
+        .id();
+    let ironworks = scenario
+        .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+        .id();
+    let bears = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let victim = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exterminate!", false, EXTERMINATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}"))
+        .id();
+    pool(&mut scenario, ManaType::Black, 3);
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types =
+        ["Dalek", "Bear"].into_iter().map(str::to_string).collect();
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    assert_eq!(tap_choices(&runner, 1), [bears]);
+    act(&mut runner, select(&[bears]));
+    target_prompt(&runner);
+    act(&mut runner, target(victim));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: ironworks,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PayCost {
+            player: P0,
+            kind: PayCostKind::Sacrifice,
+            ..
+        }
+    ));
+    act(&mut runner, select(&[nexus]));
+    assert_eq!(runner.state().objects[&nexus].zone, Zone::Graveyard);
+    let mut restored = round_trip(&runner);
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ));
+    // CR 601.2h: the Bears can no longer pay the selected Dalek cost.
+    assert!(matches!(
+        restored.act(GameAction::PassPriority),
+        Err(EngineError::ActionNotAllowed(message)) if message.contains("can no longer pay it")
+    ));
+    act(&mut restored, GameAction::CancelCast);
+    assert_eq!(restored.state().objects[&spell].zone, Zone::Hand);
+    assert!(!restored.state().objects[&bears].tapped);
+    assert!(restored.state().stack.is_empty());
+    assert!(matches!(
+        restored.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+}
+
+#[test]
+fn pyromatics_can_declare_replicate_before_killians_target_discount() {
+    for creature_target in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let killian = scenario
+            .add_creature_from_oracle(P0, "Killian, Ink Duelist", 2, 2, KILLIAN)
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}{B}"))
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Pyromatics", true, PYROMATICS)
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{R}"))
+            .id();
+        pool(&mut scenario, ManaType::Red, 2);
+        let mut runner = scenario.build();
+        let mana = runner.state().players[0].mana_pool.clone();
+        cast(&mut runner, spell, CastPaymentMode::Auto);
+        offer(&runner, AdditionalCostOrigin::Replicate, 0);
+        decide(&mut runner, true);
+        // A conservative declaration can offer another payment; settlement
+        // must still price the selected targets and enforce the locked cost.
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ) {
+            decide(&mut runner, false);
+        }
+        if !creature_target {
+            target_prompt(&runner);
+            let result = runner.act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            });
+            if let Ok(result) = result {
+                assert!(!result.events.iter().any(|event| matches!(
+                    event, GameEvent::SpellCast { object_id, .. } if *object_id == spell
+                )));
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ManaPayment { player: P0, .. }
+                ) {
+                    assert!(runner.act(GameAction::PassPriority).is_err());
+                } else {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { player: P0 }
+                    ));
+                }
+            }
+            assert!(records(&runner, spell).is_empty());
+            if let Some(pending) = runner
+                .state()
+                .waiting_for
+                .pending_cast_ref()
+                .or(runner.state().pending_cast.as_deref())
+            {
+                assert_eq!(pending.object_id, spell);
+                act(&mut runner, GameAction::CancelCast);
+            }
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+            assert!(runner.state().players[0].hand.contains(&spell));
+            assert_eq!(runner.state().players[0].mana_pool, mana);
+            assert!(records(&runner, spell).is_empty());
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().pending_cast.is_none());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+            continue;
+        }
+        act(&mut runner, target(killian));
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(records(&runner, spell), [(0, 1)]);
+        pass_to_prompt(&mut runner);
+        let copy = copy_prompt(&runner, killian);
+        act(&mut runner, GameAction::KeepAllCopyTargets);
+        assert_spell_target(&runner, copy, killian);
+    }
+}
+
+#[test]
+fn huddle_up_can_assist_the_total_with_replicate_from_djinn_illuminatus() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P0, "Djinn Illuminatus", 3, 5, DJINN_ILLUMINATUS)
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}{U/R}{U/R}"));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Huddle Up", false)
+        .from_oracle_text_with_keywords(&["Assist"], HUDDLE_UP)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{U}"))
+        .id();
+    for player in [P0, P1] {
+        scenario.with_library_top(player, &["Island", "Island", "Island"]);
+    }
+    pool(&mut scenario, ManaType::Blue, 2);
+    scenario.with_mana_pool(
+        P1,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 4],
+    );
+    let mut runner = scenario.build();
+    cast(&mut runner, spell, CastPaymentMode::Manual);
+    offer(&runner, AdditionalCostOrigin::Replicate, 0);
+    decide(&mut runner, true);
+    for player in [P0, P1] {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            act(
+                &mut runner,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Player(player)),
+                },
+            );
+        }
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::AssistChoosePlayer { player: P0, .. }
+    ));
+    act(
+        &mut runner,
+        GameAction::ChooseAssistPlayer { player: Some(P1) },
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::AssistPayment { .. }
+    ));
+    // CR 702.132a: Assist can cover the generic mana in the entire total.
+    act(&mut runner, GameAction::CommitAssistPayment { generic: 4 });
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player: P0, .. }
+    ) {
+        act(&mut runner, GameAction::PassPriority);
+    }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    assert_eq!(records(&runner, spell), [(0, 1)]);
+    pass(&mut runner);
+    pass(&mut runner);
+    let WaitingFor::CopyRetarget { copy_id, .. } = runner.state().waiting_for else {
+        panic!(
+            "expected Huddle Up copy, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    act(&mut runner, GameAction::KeepAllCopyTargets);
+    assert!(runner.state().stack.iter().any(|entry| entry.id == copy_id));
+    finish(&mut runner);
+    for player in [P0, P1] {
+        assert_eq!(runner.state().players[player.0 as usize].library.len(), 1);
+    }
+}
+
+#[test]
 fn exterminate_revalidates_a_stale_singleton_choice() {
     let mut board = dalek_board(true, None);
     let runner = &mut board.runner;
@@ -755,6 +1314,18 @@ fn exterminate_conspire_uses_only_unreserved_helpers() {
             helpers,
             ..
         } = dalek_board(true, Some(helper_count));
+        let wort = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| object.name == "Wort, the Raidmother")
+            .expect("Wort grants Conspire");
+        assert_eq!(wort.base_color, [ManaColor::Red, ManaColor::Green]);
+        assert_eq!(
+            runner.state().objects[&spell].base_color,
+            [ManaColor::Black]
+        );
+        assert!(wort.tapped, "only the designated helpers can pay Conspire");
         cast(&mut runner, spell, CastPaymentMode::Auto);
         offer(&runner, AdditionalCostOrigin::Replicate, 0);
         decide(&mut runner, true);
@@ -762,6 +1333,8 @@ fn exterminate_conspire_uses_only_unreserved_helpers() {
         offer(&runner, AdditionalCostOrigin::Replicate, 1);
         decide(&mut runner, true);
         act(&mut runner, select(&[sick_dalek]));
+        offer(&runner, AdditionalCostOrigin::Replicate, 2);
+        decide(&mut runner, false);
         if helper_count == 2 {
             offer(&runner, AdditionalCostOrigin::Conspire, 0);
             decide(&mut runner, true);
@@ -903,8 +1476,13 @@ fn exterminate_restore_rejects_a_missing_previously_selected_dalek() {
 fn bolt_scenario(oracle: &str, mana_cost: &str) -> (GameScenario, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let name = if oracle == REITERATING_BOLT && mana_cost == "{1}{R}" {
+        "Reiterating Bolt"
+    } else {
+        "Synthetic energy Replicate spell"
+    };
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Reiterating Bolt", false, oracle)
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
         .with_mana_cost(parse_mtgjson_mana_cost(mana_cost))
         .id();
     let creature = scenario.add_creature(P1, "Ancient Brontodon", 9, 9).id();
@@ -1021,35 +1599,13 @@ fn reiterating_bolt_rejects_acceptance_when_an_outstanding_offer_loses_its_budge
 
 // CR 601.2b + CR 107.14 + CR 118.3: the optional election must leave enough
 // energy for the mandatory part of the same spell's total cost.
-#[test]
-fn reiterating_bolt_composes_replicate_with_mandatory_energy() {
-    for (energy, repeats) in [(4, 0), (5, 1), (7, 1), (8, 2)] {
-        let (mut runner, spell, creature, _) = bolt_board(energy);
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&spell)
-            .unwrap()
-            .additional_cost = Some(AdditionalCost::Required(AbilityCost::PayEnergy {
-            amount: QuantityExpr::Fixed { value: 2 },
-        }));
-        cast(&mut runner, spell, CastPaymentMode::Auto);
-        for paid in 0..repeats {
-            offer(&runner, AdditionalCostOrigin::Replicate, paid);
-            decide(&mut runner, true);
-        }
-        target_prompt(&runner);
-        act(&mut runner, target(creature));
-        assert_eq!(records(&runner, spell), vec![(0, 1); repeats as usize]);
-        assert_eq!(runner.state().players[0].energy, energy - 2 - 3 * repeats);
-    }
-}
-
 // CR 601.2h + CR 107.4f + CR 616.1: paying the Phyrexian shard pauses
 // the commit while the Replicate energy obligation is still outstanding.
 #[test]
 fn reiterating_bolt_settles_replicate_on_uninterrupted_phyrexian_payment() {
-    // Dismember is the printed analogue for the synthetic black Phyrexian shard.
+    // Synthetic exception: no printed energy Replicate spell has a Phyrexian
+    // shard. Reiterating Bolt and Dismember supply the nearest printed shapes.
+    // Combining them exercises settlement after interactive life payment.
     let (scenario, spell, creature, _) = bolt_scenario(REITERATING_BOLT, "{1}{R}{B/P}");
     let mut runner = scenario.build();
     start_bolt_phyrexian_payment(&mut runner, spell, creature);
@@ -1065,8 +1621,9 @@ fn reiterating_bolt_settles_replicate_on_uninterrupted_phyrexian_payment() {
 
 #[test]
 fn reiterating_bolt_settles_replicate_at_deferred_sacrifice_commit() {
-    // Village Rites supplies the printed additional-cost clause for this
-    // synthetic combination with Reiterating Bolt's printed Replicate.
+    // Synthetic exception: no printed energy Replicate spell requires a
+    // sacrifice. Reiterating Bolt and Village Rites supply the nearest shapes.
+    // Combining them exercises settlement before a deferred sacrifice resumes.
     let oracle = format!(
         "As an additional cost to cast this spell, sacrifice a creature.\n{REITERATING_BOLT}"
     );
@@ -1105,9 +1662,13 @@ fn reiterating_bolt_settles_replicate_at_deferred_sacrifice_commit() {
 
 #[test]
 fn reiterating_bolt_settles_replicate_once_after_a_replacement_pause() {
-    // Dismember is the printed analogue for the synthetic black Phyrexian shard.
+    // Synthetic exception: no printed energy Replicate spell has a Phyrexian
+    // shard. Reiterating Bolt and Dismember supply the nearest printed shapes.
+    // Combining them exercises settlement after interactive life payment.
     let (mut scenario, spell, creature, _) = bolt_scenario(REITERATING_BOLT, "{1}{R}{B/P}");
-    // Bloodletter of Aclazotz is the printed analogue for doubling life loss.
+    // Synthetic exception: no printed life-loss replacement adds one to the
+    // same event in this shape. Competing replacements exercise resumable
+    // settlement. Bloodletter of Aclazotz is the analogue for doubling life loss.
     // Forsaken Wastes adds a separate one-life loss. The synthetic +1 modifier
     // folds that extra loss into the same event so the two replacements can compete.
     scenario

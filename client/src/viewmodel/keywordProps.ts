@@ -447,7 +447,7 @@ export function getKeywordDetail(kw: Keyword): string | null {
   const val = kw[key];
 
   if (key === "Replicate") {
-    if (val?.type === "TapOne") return formatTapOneCost(val.filter);
+    if (val?.type === "TapOne") return formatTapOneCost(val.tap_display);
     if (val?.type === "PayEnergy") return formatEnergyCost(val.amount);
     return formatKeywordManaCost(val);
   }

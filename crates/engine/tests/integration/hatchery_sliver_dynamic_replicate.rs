@@ -2,7 +2,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{
-    AbilityCost, AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability,
+    AbilityCondition, AbilityCost, AdditionalCost, AdditionalCostOrigin,
+    AdditionalCostRepeatability,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
@@ -268,8 +269,31 @@ fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
     runner
         .act(GameAction::OrderTriggers { order: vec![1, 0] })
         .expect("order the independent Replicate triggers");
-    let mut copy_counts = Vec::new();
+    let mut resolved_ordinals = [false; 2];
     for _ in 0..2 {
+        let trigger = runner.state().stack.last().expect("next Replicate trigger");
+        let StackEntryKind::TriggeredAbility { description, .. } = &trigger.kind else {
+            panic!("expected a Replicate trigger");
+        };
+        let expected_ordinal = match description.as_deref() {
+            Some("Replicate") => 1, // Granted by the other Hatchery Sliver.
+            Some(
+                "Replicate \u{2014} copy this spell once for each time its replicate cost was paid",
+            ) => 0,
+            other => panic!("unexpected Replicate trigger description {other:?}"),
+        };
+        let Some(AbilityCondition::AdditionalCostPaid {
+            origin: Some(AdditionalCostOrigin::Replicate),
+            origin_ordinal: Some(ordinal),
+            ..
+        }) = trigger.ability().expect("trigger ability").condition
+        else {
+            panic!("expected an ordinal-bound Replicate trigger");
+        };
+        assert_eq!(
+            ordinal, expected_ordinal,
+            "printed and granted instances retain their payment ordinals"
+        );
         for _ in 0..2 {
             runner
                 .act(GameAction::PassPriority)
@@ -283,15 +307,16 @@ fn printed_and_granted_replicate_instances_each_copy_only_their_own_payments() {
                 entry.id != cast_hatchery && matches!(entry.kind, StackEntryKind::Spell { .. })
             })
             .count();
-        copy_counts.push(copies);
+        // CR 702.56b: each trigger copies only for payments of its own instance.
+        assert_eq!(copies, [2, 3][ordinal as usize], "ordinal {ordinal}");
+        resolved_ordinals[ordinal as usize] = true;
         for _ in 0..(2 * copies) {
             runner
                 .act(GameAction::PassPriority)
                 .expect("resolve the copies before the next trigger");
         }
     }
-    copy_counts.sort_unstable();
-    assert_eq!(copy_counts, [2, 3]);
+    assert_eq!(resolved_ordinals, [true; 2]);
     runner.advance_until_stack_empty();
     let hatchery_tokens = runner
         .state()

@@ -59,9 +59,11 @@ describe("Replicate keyword payloads", () => {
     expect(getKeywordDetail({
       Replicate: {
         type: "TapOne",
-        filter: { type: "Typed", type_filters: [{ Subtype: "Horror" }], controller: "You" },
+        tap_display: { type: "ControlledSubtype", subtype: "Horror" },
       },
     })).toBe("Tap an untapped Horror you control");
+    expect(getKeywordDetail({ Replicate: { type: "TapOne", tap_display: { type: "Creature" } } }))
+      .toBe("Tap an untapped creature");
   });
 });
 

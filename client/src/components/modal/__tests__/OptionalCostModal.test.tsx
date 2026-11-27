@@ -42,12 +42,7 @@ describe("OptionalCostModalContent (issue #454)", () => {
       times: 0,
       cost: {
         type: "TapCreatures",
-        requirement: { requirement: "count", count: 1 },
-        filter: {
-          type: "Typed",
-          type_filters: [{ Subtype: "Dalek" }],
-          controller: "You",
-        },
+        tap_display: { type: "ControlledSubtype" as const, subtype: "Dalek" },
       },
       title: "Pay the replicate cost?",
       pay: "Tap an untapped Dalek you control",
