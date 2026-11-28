@@ -282,7 +282,9 @@ fn parse_search_result_put_onto_battlefield_restatement(
     Ok((input, (agreement, referent, tapped.is_some())))
 }
 
-pub(super) fn inherited_search_delivery_counter(source: &str) -> Option<CounterType> {
+pub(super) fn inherited_search_delivery_counters(
+    source: &str,
+) -> Option<Vec<(CounterType, QuantityExpr)>> {
     let lower = source
         .trim()
         .trim_end_matches('.')
@@ -299,10 +301,7 @@ pub(super) fn inherited_search_delivery_counter(source: &str) -> Option<CounterT
     ))
     .parse(rest)
     .ok()?;
-    let [(counter, QuantityExpr::Fixed { value: 1 })] = counters.as_slice() else {
-        return None;
-    };
-    Some(counter.clone())
+    Some(counters)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -5825,7 +5824,7 @@ pub(super) fn apply_clause_continuation(
             reveal,
             attach_host,
             actor,
-            entry_counter,
+            entry_counters,
         } => {
             // CR 110.2a: fail closed before touching either representation of
             // the put step. Search lowering may already have installed a
@@ -5897,10 +5896,7 @@ pub(super) fn apply_clause_continuation(
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters: entry_counter
-                    .map(|counter| (counter, QuantityExpr::Fixed { value: 1 }))
-                    .into_iter()
-                    .collect(),
+                enter_with_counters: entry_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
                 enters_modified_if: None,
@@ -8324,7 +8320,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 reveal: *reveal,
                 attach_host,
                 actor: Default::default(),
-                entry_counter: None,
+                entry_counters: Vec::new(),
             })
         }
         _ => None,

@@ -431,8 +431,10 @@ pub(crate) enum ContinuationAst {
         attach_host: Option<TargetFilter>,
         #[serde(skip_serializing_if = "LibraryInstructionActor::is_controller")]
         actor: LibraryInstructionActor,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        entry_counter: Option<CounterType>,
+        /// CR 122.6: counters the searched card enters with, each with its
+        /// parsed quantity; lowered unchanged into `ChangeZone.enter_with_counters`.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        entry_counters: Vec<(CounterType, QuantityExpr)>,
     },
     RevealHandFilter {
         card_filter: Option<TargetFilter>,

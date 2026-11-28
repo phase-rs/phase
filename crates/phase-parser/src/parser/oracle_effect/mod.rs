@@ -51510,10 +51510,10 @@ fn plural_hand_search_owner(
                 reveal: true,
                 attach_host: None,
                 actor: crate::types::ability::LibraryInstructionActor::Controller,
-                entry_counter: None,
+                ref entry_counters,
             }),
             followup: None,
-        }
+        } if entry_counters.is_empty()
     ) {
         return None;
     }
@@ -51548,7 +51548,8 @@ struct SearchActorCarry {
 struct SearchDeliveryEvidence {
     ordinal: usize,
     actor: SearchActorCarry,
-    counter: Option<CounterType>,
+    /// The put's parsed entry counters; empty for the search and the shuffle.
+    entry_counters: Vec<(CounterType, QuantityExpr)>,
 }
 
 fn plain_search_delivery_clause(clause: &ClauseIr) -> bool {
@@ -51599,9 +51600,10 @@ fn commit_inherited_search_delivery(
         ) else {
             continue;
         };
-        let Some(counter) = move_read.counter.as_ref() else {
+        let counters = &move_read.entry_counters;
+        if counters.is_empty() {
             continue;
-        };
+        }
         if owner.ordinal + 1 != move_read.ordinal
             || move_read.ordinal + 1 != shuffle_read.ordinal
             || owner.actor.search != search.id
@@ -51657,7 +51659,7 @@ fn commit_inherited_search_delivery(
                     ref conditional_enter_with_counters,
                     face_down_profile: None,
                     enters_modified_if: None,
-                } if enter_with_counters.as_slice() == [(counter.clone(), QuantityExpr::Fixed { value: 1 })]
+                } if enter_with_counters == counters
                     && conditional_enter_with_counters.is_empty()
             )
             || !matches!(
@@ -51678,17 +51680,20 @@ fn commit_inherited_search_delivery(
                     reveal: false,
                     attach_host: None,
                     actor: actor @ LibraryInstructionActor::Controller,
-                    entry_counter: entry_counter @ None,
+                    entry_counters,
                 }),
             followup: None,
         } = &mut search.disposition
         else {
             continue;
         };
+        if !entry_counters.is_empty() {
+            continue;
+        }
         *actor = LibraryInstructionActor::Player {
             player: TargetFilter::ParentTarget,
         };
-        *entry_counter = Some(counter.clone());
+        entry_counters.clone_from(counters);
         put.disposition = ClauseDisposition::Continue {
             continuation: Some(ContinuationAst::SearchResultClauseHandled),
         };
@@ -58397,22 +58402,22 @@ fn parse_effect_chain_ir_body(
                             SearchDeliveryEvidence {
                                 ordinal: chunk_idx,
                                 actor,
-                                counter: None,
+                                entry_counters: Vec::new(),
                             },
                         );
                     } else if let Some(actor) = inherited_search_actor {
-                        let counter = sequence::inherited_search_delivery_counter(source);
+                        let entry_counters = sequence::inherited_search_delivery_counters(source);
                         let bare_shuffle =
                             all_consuming(tag_no_case::<_, _, OracleError<'_>>("shuffles"))
                                 .parse(source.trim_end_matches('.').trim_end())
                                 .is_ok();
-                        if counter.is_some() || bare_shuffle {
+                        if entry_counters.is_some() || bare_shuffle {
                             search_delivery_evidence.insert(
                                 pushed.id,
                                 SearchDeliveryEvidence {
                                     ordinal: chunk_idx,
                                     actor,
-                                    counter,
+                                    entry_counters: entry_counters.unwrap_or_default(),
                                 },
                             );
                         }

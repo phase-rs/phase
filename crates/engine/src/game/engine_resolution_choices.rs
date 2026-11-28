@@ -12722,8 +12722,19 @@ mod tests {
     use crate::types::resolution::{MultiDrawFrame, ResolutionFrame};
 
     fn inherited_delivery_frame() -> (GameState, ObjectId, PendingContinuation) {
-        use crate::types::ability::LibraryInstructionActor;
         use crate::types::counter::CounterType;
+
+        inherited_delivery_frame_entering(
+            EtbTapState::Tapped,
+            vec![(CounterType::Stun, QuantityExpr::Fixed { value: 1 })],
+        )
+    }
+
+    fn inherited_delivery_frame_entering(
+        entry_tap: EtbTapState,
+        entry_counters: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
+    ) -> (GameState, ObjectId, PendingContinuation) {
+        use crate::types::ability::LibraryInstructionActor;
 
         let (mut state, found) = standard_delivery_state();
         let mut pending = state
@@ -12749,8 +12760,8 @@ mod tests {
         };
         *destination = Zone::Battlefield;
         *target = TargetFilter::Any;
-        *enter_tapped = EtbTapState::Tapped;
-        enter_with_counters.push((CounterType::Stun, QuantityExpr::Fixed { value: 1 }));
+        *enter_tapped = entry_tap;
+        *enter_with_counters = entry_counters;
         let competing = TargetRef::Player(PlayerId(1));
         delivery.set_unpinned_targets(vec![competing.clone()]);
         delivery.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
@@ -12769,8 +12780,30 @@ mod tests {
 
     #[test]
     fn inherited_search_delivery_rebinds_active_frame_for_survivor_and_empty_result() {
-        for choose in [false, true] {
-            let (mut state, found, pending) = inherited_delivery_frame();
+        use crate::types::counter::CounterType;
+
+        // The binder keys on the delivery's actor and shuffle, not on how the
+        // card enters: Hellkite's tapped single stun counter, and a counted
+        // list without the tapped rider that no printed card has on this delivery.
+        let entries = [
+            (
+                EtbTapState::Tapped,
+                vec![(CounterType::Stun, QuantityExpr::Fixed { value: 1 })],
+            ),
+            (
+                EtbTapState::Unspecified,
+                vec![
+                    (CounterType::Stun, QuantityExpr::Fixed { value: 2 }),
+                    (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                ],
+            ),
+        ];
+        for ((entry_tap, entry_counters), choose) in entries
+            .into_iter()
+            .flat_map(|entry| [false, true].map(|choose| (entry.clone(), choose)))
+        {
+            let (mut state, found, pending) =
+                inherited_delivery_frame_entering(entry_tap, entry_counters.clone());
             state.park_ability_continuation(pending);
             assert!(state.active_ability_continuation().is_some());
             let chosen = if choose {
@@ -12788,6 +12821,16 @@ mod tests {
                     Zone::Library
                 }
             );
+            if choose {
+                let entered = &state.objects[&found];
+                assert_eq!(entered.tapped, entry_tap.is_tapped());
+                for (counter, quantity) in &entry_counters {
+                    let QuantityExpr::Fixed { value } = quantity else {
+                        unreachable!("fixture counters are fixed");
+                    };
+                    assert_eq!(entered.counters.get(counter).copied(), Some(*value as u32));
+                }
+            }
             let shuffles: Vec<_> = events
                 .iter()
                 .filter_map(|event| match event {

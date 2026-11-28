@@ -89,6 +89,51 @@ fn magmatic_hellkite_has_one_tapped_stun_delivery_before_shuffle() {
 }
 
 #[test]
+fn inherited_battlefield_search_carries_the_parsed_counter_list() {
+    // SHAPE: no printed card has another counter list on this delivery, so the
+    // Hellkite body is spliced with a counted and a two-element list.
+    for (rider, expected) in [
+        (
+            "with two stun counters on it",
+            vec![(CounterType::Stun, QuantityExpr::Fixed { value: 2 })],
+        ),
+        (
+            "with a stun counter and a +1/+1 counter on it",
+            vec![
+                (CounterType::Stun, QuantityExpr::Fixed { value: 1 }),
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+            ],
+        ),
+    ] {
+        let body = HELLKITE_BODY.replace("with a stun counter on it", rider);
+        let ir = parse_effect_chain_ir_ability_root(
+            &body,
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let [_, search, put, _] = ir.clauses.as_slice() else {
+            panic!("destroy, search, put, shuffle: {:?}", ir.clauses);
+        };
+        assert!(matches!(
+            put.parsed.effect,
+            Effect::ChangeZone { ref enter_with_counters, .. } if *enter_with_counters == expected
+        ));
+        assert!(matches!(
+            search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { entry_counters, .. }) if *entry_counters == expected
+        ));
+        let lowered = lower_effect_chain_ir(&ir);
+        let delivery = std::iter::successors(Some(&lowered), |def| def.sub_ability.as_deref())
+            .nth(2)
+            .expect("found-card delivery");
+        assert!(matches!(
+            delivery.effect.as_ref(),
+            Effect::ChangeZone { enter_with_counters, .. } if *enter_with_counters == expected
+        ));
+    }
+}
+
+#[test]
 fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery() {
     let parse = |body: &str| {
         parse_effect_chain_ir_ability_root(body, AbilityKind::Spell, &mut ParseContext::default())
@@ -106,9 +151,9 @@ fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery()
     assert!(matches!(
         search.disposition.intrinsic(),
         Some(ContinuationAst::SearchDestination {
-            entry_counter: Some(CounterType::Stun),
+            entry_counters,
             ..
-        })
+        }) if entry_counters.as_slice() == [(CounterType::Stun, QuantityExpr::Fixed { value: 1 })]
     ));
     let span = put.source.span();
     assert_eq!(
@@ -137,7 +182,7 @@ fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery()
             panic!("search and put must reach the gate: {:?}", ir.clauses);
         };
         assert!(matches!(search.disposition.intrinsic(),
-            Some(ContinuationAst::SearchDestination { destination: Zone::Battlefield, entry_counter: None, .. })
+            Some(ContinuationAst::SearchDestination { destination: Zone::Battlefield, entry_counters, .. }) if entry_counters.is_empty()
         ));
         assert!(matches!(put.parsed.effect, Effect::ChangeZone { destination: Zone::Battlefield, .. }));
         assert!(matches!(put.disposition, ClauseDisposition::Emit { followup: None, intrinsic: None }));
@@ -269,9 +314,9 @@ fn assert_uncommitted_battlefield_search(search: &ClauseIr, put: &ClauseIr, shuf
                 reveal: false,
                 attach_host: None,
                 actor: LibraryInstructionActor::Controller,
-                entry_counter: None,
+                ref entry_counters,
             }),
-        }
+        } if entry_counters.is_empty()
     ));
     assert!(matches!(
         put.parsed.effect,
@@ -1689,7 +1734,7 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
             reveal: false,
             attach_host: None,
             actor: Default::default(),
-            entry_counter: None,
+            entry_counters: Vec::new(),
         })
     };
     folded

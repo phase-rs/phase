@@ -28053,9 +28053,11 @@ fn plain_search_delivery_node(node: &ResolvedAbility) -> bool {
         && node.unless_pay.is_none()
 }
 
+// The binder reads only the delivery's explicit player actor and the sequential
+// shuffle of that player's library; how the card enters (tapped, counters) is
+// the delivery's own resolution and does not bear on who performs it.
 fn has_inherited_search_delivery(delivery: &ResolvedAbility) -> bool {
     use crate::types::ability::LibraryInstructionActor;
-    use crate::types::zones::EtbTapState;
 
     plain_search_delivery_node(delivery)
         && matches!(
@@ -28069,15 +28071,14 @@ fn has_inherited_search_delivery(delivery: &ResolvedAbility) -> bool {
                 library_shuffle: LibraryShuffleMode::PerObject,
                 enter_transformed: false,
                 enters_under: None,
-                enter_tapped: EtbTapState::Tapped,
+                enter_tapped: _,
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters,
+                enter_with_counters: _,
                 conditional_enter_with_counters,
                 face_down_profile: None,
                 enters_modified_if: None,
-            } if matches!(enter_with_counters.as_slice(), [(_, QuantityExpr::Fixed { value: 1 })])
-                && conditional_enter_with_counters.is_empty()
+            } if conditional_enter_with_counters.is_empty()
         )
         && delivery.sub_ability.as_deref().is_some_and(|shuffle| {
             plain_search_delivery_node(shuffle)
