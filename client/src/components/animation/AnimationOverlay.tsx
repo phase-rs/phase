@@ -83,6 +83,8 @@ interface ActiveCastArc {
   to: { x: number; y: number };
   snapshot: AnimationImageSnapshot | null;
   mode: "cast" | "resolve-permanent" | "resolve-spell";
+  /** Fixed when the arc spawns, so a later pace change cannot retime it mid-flight. */
+  timeScale: number;
 }
 
 interface ActiveMillReveal {
@@ -91,6 +93,7 @@ interface ActiveMillReveal {
   startIndex: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
+  timeScale: number;
 }
 
 interface ActiveMeldForge {
@@ -686,7 +689,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 const id = ++castArcIdCounter;
                 setActiveCastArcs((previous) => [
                   ...previous,
-                  { id, from: pos, to: stackPos, snapshot, mode: "cast" },
+                  { id, from: pos, to: stackPos, snapshot, mode: "cast", timeScale: Math.min(1, speedMultiplier) },
                 ]);
               }
             }
@@ -724,6 +727,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                       to: pos,
                       snapshot,
                       mode: "resolve-permanent",
+                      timeScale: Math.min(1, speedMultiplier),
                     },
                   ]);
                 }
@@ -742,6 +746,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   to: stackPos,
                   snapshot,
                   mode: "resolve-spell",
+                  timeScale: Math.min(1, speedMultiplier),
                 },
               ]);
             }
@@ -778,6 +783,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   id,
                   cards: [card],
                   startIndex: Math.max(startIndex, 0),
+                  timeScale: Math.min(1, speedMultiplier),
                   from: libRect ? rectCenter(libRect) : hudFallback,
                   to: gyRect ? rectCenter(gyRect) : hudFallback,
                 },
@@ -1091,6 +1097,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           to={arc.to}
           snapshot={arc.snapshot}
           mode={arc.mode}
+          timeScale={arc.timeScale}
           onComplete={() => handleCastArcComplete(arc.id)}
         />
       ))}
@@ -1104,6 +1111,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`mill-${mill.id}`}
           cards={mill.cards}
           startIndex={mill.startIndex}
+          timeScale={mill.timeScale}
           from={mill.from}
           to={mill.to}
           onComplete={() => handleMillRevealComplete(mill.id)}
