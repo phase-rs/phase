@@ -5,14 +5,16 @@
 //! `{2}` mana leg, and CR 601.2h + CR 602.2b require the TOTAL cost to be
 //! payable — each branch is judged with the sibling mana leg, never alone.
 
+use crate::support::shared_card_db;
 use engine::game::casting::can_activate_ability_now;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -423,4 +425,94 @@ fn camellia_forage_ai_legal_actions_match_engine_branches() {
     let costs = activate(&mut runner, source);
     assert_eq!(costs.len(), 1);
     assert_eq!(ai_branch_indices(&runner), vec![0]);
+}
+
+fn add_camellia_and_foods(scenario: &mut GameScenario, count: usize) -> Vec<ObjectId> {
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Camellia, the Seedmiser", 3, 3)
+        .with_subtypes(vec!["Squirrel", "Warlock"])
+        .from_oracle_text(CAMELLIA_ORACLE);
+    let db = shared_card_db().expect("Golden Egg is in the integration fixture");
+    (0..count)
+        .map(|_| scenario.add_real_card(P0, "Golden Egg", Zone::Battlefield, db))
+        .collect()
+}
+
+fn squirrel_tokens(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[*id];
+            obj.controller == P0
+                && obj.is_token
+                && obj.card_types.subtypes.iter().any(|s| s == "Squirrel")
+        })
+        .count()
+}
+
+fn activate_printed_ability(runner: &mut GameRunner, source_id: ObjectId, ability_index: usize) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate the printed ability");
+}
+
+#[test]
+fn camellia_food_batch_peregrin_three_foods_one_squirrel() {
+    let mut scenario = GameScenario::new();
+    let foods = add_camellia_and_foods(&mut scenario, 3);
+    let peregrin = scenario.add_creature_from_oracle(P0, "Peregrin Took", 2, 3,
+        "If one or more tokens would be created under your control, those tokens plus an additional Food token are created instead.\nSacrifice three Foods: Draw a card.").id();
+    scenario.with_library_top(P0, &["Forest"]);
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[0].hand.len();
+    activate_printed_ability(&mut runner, peregrin, 0);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayCost {
+                kind: PayCostKind::Sacrifice,
+                count: 3,
+                ..
+            }
+        ),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: foods.clone(),
+        })
+        .expect("sacrifice three Foods together");
+    runner.advance_until_stack_empty();
+    assert!(foods
+        .iter()
+        .all(|id| !runner.state().battlefield.contains(id)));
+    assert_eq!(runner.state().players[0].hand.len(), hand_before + 1);
+    assert_eq!(squirrel_tokens(&runner), 1, "one simultaneous sacrifice");
+}
+
+#[test]
+fn camellia_food_batch_two_food_activations_two_squirrels() {
+    let mut scenario = GameScenario::new();
+    let foods = add_camellia_and_foods(&mut scenario, 2);
+    scenario.with_mana_pool(P0, colorless(4));
+    let mut runner = scenario.build();
+    let starting_life = runner.state().players[0].life;
+    for (index, food) in foods.into_iter().enumerate() {
+        activate_printed_ability(&mut runner, food, 1);
+        runner.advance_until_stack_empty();
+        assert!(!runner.state().battlefield.contains(&food));
+        assert_eq!(
+            runner.state().players[0].life,
+            starting_life + 3 * (index as i32 + 1)
+        );
+        assert_eq!(squirrel_tokens(&runner), index + 1);
+    }
 }
