@@ -33982,22 +33982,22 @@ fn bind_chosen_target_list_readers(clauses: &mut [ClauseIr]) {
         .is_some()
     }
 
-    for index in 0..clauses.len() {
-        let reader = &clauses[index];
-        if reader.reads_chosen_clause.is_some()
-            || !clause_refs_parent_target(reader)
-            || !reads_plural_chosen_object(reader.source.fragment().unwrap_or_default())
-        {
-            continue;
+    let mut nearest_declaration = None;
+    for clause in clauses.iter_mut() {
+        let reads_group = clause.reads_chosen_clause.is_none()
+            && clause_refs_parent_target(clause)
+            && reads_plural_chosen_object(clause.source.fragment().unwrap_or_default());
+        if reads_group {
+            if let Some(group) = nearest_declaration {
+                clause.reads_chosen_clause = Some(group);
+            }
         }
-        let Some(group) = clauses[..index]
-            .iter()
-            .rev()
-            .find_map(|clause| clause.declares_chosen_clause)
-        else {
-            continue;
-        };
-        clauses[index].reads_chosen_clause = Some(group);
+        // Keep this update after the reader check: a guard-failed declaration
+        // still establishes the nearest group for the following clauses, but
+        // must not bind its own plural reader to itself.
+        if let Some(group) = clause.declares_chosen_clause {
+            nearest_declaration = Some(group);
+        }
     }
 }
 

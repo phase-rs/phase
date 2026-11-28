@@ -23,20 +23,20 @@ fn chosen_group_member_matches(
     object_id: ObjectId,
     filter: &TargetFilter,
 ) -> bool {
-    match filter {
-        TargetFilter::ParentTarget => true,
-        TargetFilter::And { filters } => filters
+    match filter.chosen_group_member_matcher() {
+        crate::types::ability::ChosenGroupMemberMatcher::ParentTarget => true,
+        crate::types::ability::ChosenGroupMemberMatcher::And(filters) => filters
             .iter()
             .all(|filter| chosen_group_member_matches(state, ability, object_id, filter)),
-        TargetFilter::Or { filters } => filters
+        crate::types::ability::ChosenGroupMemberMatcher::Or(filters) => filters
             .iter()
             .any(|filter| chosen_group_member_matches(state, ability, object_id, filter)),
-        TargetFilter::Not { filter } => {
+        crate::types::ability::ChosenGroupMemberMatcher::Not(filter) => {
             !chosen_group_member_matches(state, ability, object_id, filter)
         }
-        other => {
+        crate::types::ability::ChosenGroupMemberMatcher::Shared(filter) => {
             let ctx = crate::game::filter::FilterContext::from_ability(ability);
-            crate::game::filter::matches_target_filter(state, object_id, other, &ctx)
+            crate::game::filter::matches_target_filter(state, object_id, filter, &ctx)
         }
     }
 }
@@ -204,7 +204,10 @@ fn resolve_single(
     if prompt_resolution_tap_untap_choice(state, ability, target, effect_kind, events) {
         return Ok(());
     }
-    let target_ids = tap_untap_target_ids(state, ability, target);
+    let mut seen = HashSet::new();
+    let target_ids = tap_untap_target_ids(state, ability, target)
+        .into_iter()
+        .filter(|object_id| seen.insert(*object_id));
     for obj_id in target_ids {
         let outcome = match change {
             TapStateChange::Tap => process_one_tap(state, obj_id, ability.source_id, events)?,

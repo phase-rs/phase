@@ -30967,7 +30967,86 @@ pub enum VoteVisibility {
     Secret,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChosenGroupMemberMatcher<'a> {
+    ParentTarget,
+    And(&'a [TargetFilter]),
+    Or(&'a [TargetFilter]),
+    Not(&'a TargetFilter),
+    Shared(&'a TargetFilter),
+}
+
 impl TargetFilter {
+    /// Classify the filter legs used by a chosen-group reader. The recursive
+    /// logical forms are evaluated against each bound occurrence; every other
+    /// filter delegates to the shared live target matcher.
+    pub fn chosen_group_member_matcher(&self) -> ChosenGroupMemberMatcher<'_> {
+        match self {
+            TargetFilter::ParentTarget => ChosenGroupMemberMatcher::ParentTarget,
+            TargetFilter::And { filters } => ChosenGroupMemberMatcher::And(filters),
+            TargetFilter::Or { filters } => ChosenGroupMemberMatcher::Or(filters),
+            TargetFilter::Not { filter } => ChosenGroupMemberMatcher::Not(filter),
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => ChosenGroupMemberMatcher::Shared(self),
+        }
+    }
+
     /// CR 702.6a: the target of ordinary equip is a creature you control.
     pub fn equip_target() -> Self {
         Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
