@@ -727,7 +727,7 @@ fn take_stack_trigger_firing(state: &mut GameState, entry: &StackEntry) -> Optio
 /// The single authority for every one-entry stack removal — the CR 405.5
 /// resolution pop and the drain loops (batched resolution, inert no-op batches,
 /// CR 724.1b stack exile) via [`pop_top_stack_entry`], the CR 701.6a counter,
-/// and the CR 601.2a / CR 601.2i cast rollbacks. Each call removes exactly one
+/// and the CR 733.1 cast rollbacks. Each call removes exactly one
 /// object, so a drain of N entries is N removals rather than one bulk mutation.
 ///
 /// Both side tables are dropped here rather than by the callers because they are

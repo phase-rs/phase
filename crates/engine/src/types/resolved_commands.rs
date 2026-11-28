@@ -1640,7 +1640,7 @@ pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
 /// Recorded by `stack::remove_stack_entry_at`, the single authority behind every
 /// one-entry stack removal: the CR 405.5 resolution pop, the drain loops
 /// (batched resolution, inert no-op batches, CR 724.1b stack exile), the
-/// CR 701.6a counter, and the CR 601.2a/601.2i cast rollbacks.
+/// CR 701.6a counter, and the CR 733.1 cast rollbacks.
 ///
 /// PARAMETERIZED BY `index` RATHER THAN SPLIT INTO POP/REMOVE-AT SIBLINGS. A
 /// top-of-stack pop is exactly the removal at `index == resulting_depth`, so a

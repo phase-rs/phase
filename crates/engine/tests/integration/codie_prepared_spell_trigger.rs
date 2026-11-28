@@ -1548,7 +1548,7 @@ fn codie_activation_then_prepared_cast_copies_and_retargets() {
     );
 }
 
-/// CR 601.2i + CR 722.3c: backing out of the prepared cast at its target
+/// CR 601.2 + CR 733.1 + CR 722.3c: backing out of the prepared cast at its target
 /// prompt restores the designation and leaves the same copy waiting in exile,
 /// through the state-based actions, for a later cast.
 #[test]
@@ -1582,7 +1582,7 @@ fn codie_activation_then_cancelled_prepared_cast_keeps_the_same_copy() {
     assert!(state.stack.is_empty());
     assert!(
         state.objects[&emeritus].prepared.is_some(),
-        "CR 601.2i: the cancelled cast restores the prepared designation"
+        "CR 601.2 + CR 733.1: the cancelled cast restores the prepared designation"
     );
     assert_eq!(
         exact_linked_copy(state, emeritus, P0, "Swords to Plowshares"),

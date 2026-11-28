@@ -1145,7 +1145,7 @@ fn pitch_full_casting_flow() {
     );
 }
 
-/// CR 601.2i: `CancelCast` from `ExileForCost` (Hand) rolls the cast back —
+/// CR 601.2 + CR 733.1: `CancelCast` from `ExileForCost` (Hand) rolls the cast back —
 /// no cards exiled, spell back in hand, priority restored.
 #[test]
 fn pitch_cancel_returns_to_priority() {

@@ -342,7 +342,7 @@ fn targeted_loyalty_activation_records_once_across_target_selection() {
     );
 }
 
-/// CR 606.3 + CR 601.2i: Cancelling a targeted loyalty activation before its
+/// CR 606.3 + CR 733.1: Cancelling a targeted loyalty activation before its
 /// target is locked in does not count as activating that planeswalker's loyalty
 /// ability for the turn.
 #[test]

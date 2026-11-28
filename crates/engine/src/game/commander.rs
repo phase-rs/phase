@@ -1660,7 +1660,7 @@ mod tests {
         assert_eq!(
             state.stack.len(),
             stack_len_before,
-            "CR 601.2i: cancelled cast must not leave the spell on the stack"
+            "CR 601.2 + CR 733.1: cancelled cast must not leave the spell on the stack"
         );
         assert_eq!(
             state.objects[&cmd_id].zone,

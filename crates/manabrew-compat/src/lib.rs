@@ -5843,7 +5843,7 @@ mod tests {
     }
 
     /// Sibling of the above. `ChooseBoardTargets` is built from two engine
-    /// states, and only one of them can be cancelled: CR 601.2i rollback
+    /// states, and only one of them can be cancelled: CR 733.1 rollback
     /// withdraws a pending *cast*, and a triggered ability has none
     /// (`WaitingFor::TriggerTargetSelection` carries no `PendingCast`, so
     /// `allows_cancel_cast` is false and no `CancelCast` candidate is
