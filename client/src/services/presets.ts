@@ -36,8 +36,16 @@ const DEFAULT_PRESETS: GamePreset[] = [
 export function loadPresets(): GamePreset[] {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return DEFAULT_PRESETS;
-  const saved = JSON.parse(raw) as GamePreset[];
-  return saved.length > 0 ? saved : DEFAULT_PRESETS;
+  // Corrupt/partial storage must not throw — every sibling loader falls back to
+  // a default. Without this guard, a malformed value crashes loadPresets and,
+  // through it, savePreset/deletePreset (both call it first), taking down the
+  // game-setup preset UI.
+  try {
+    const saved = JSON.parse(raw) as GamePreset[];
+    return saved.length > 0 ? saved : DEFAULT_PRESETS;
+  } catch {
+    return DEFAULT_PRESETS;
+  }
 }
 
 export function savePreset(preset: GamePreset): void {
