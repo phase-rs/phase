@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Solo para hechizos del color {{color}}.",
       "onlyForSpellFromZone": "Solo para hechizos {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "No se puede gastar para lanzar hechizos desde {{zone}}.",
+      "cannotCastSpellsOutsideType": "No se puede gastar para lanzar hechizos que no sean del tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Solo para hechizos boca abajo.",
       "onlyForAny": "Solo para uno de estos usos: {{restrictions}}",
       "onlyForSpecialAction": "Solo para la acción especial {{action}}.",
@@ -2179,6 +2180,14 @@
     "attachments": "Con {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "¿Pagar el coste de reproducir?",
+      "again": "¿Volver a pagar el coste de reproducir? (Pagado {{times}} veces)",
+      "decline": "Listo",
+      "tapSubtype": "Gira un {{subtype}} enderezado que controlas",
+      "tapCreature": "Gira una criatura enderezada",
+      "payEnergy": "Paga {{amount}} de energía"
+    },
     "gift": {
       "title": "¿Prometer un regalo?",
       "pay": "Prometer {{gift}}",

@@ -2641,6 +2641,21 @@ pub(super) fn attack_firings(
             .find_map(|(attacker_id, target)| (*attacker_id == id).then_some(*target))
             .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player))
     };
+    let matches_declaration_ordinal = |id| {
+        trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+            let source = source_context.identity.reference;
+            let incarnation = if source.object_id == id {
+                Some(source.incarnation)
+            } else {
+                state.objects.get(&id).map(|object| object.incarnation)
+            };
+            declaration_records.iter().any(|record| {
+                record.object_id == id
+                    && record.incarnation == incarnation
+                    && record.ordinal_this_turn == Some(ordinal)
+            })
+        })
+    };
     let player_scope = trigger
         .valid_source
         .as_ref()
@@ -2668,7 +2683,8 @@ pub(super) fn attack_firings(
                 continue;
             };
             let target = attack_target_of(id);
-            if !player_matches_filter(filter, state, actor, source_context)
+            if !matches_declaration_ordinal(id)
+                || !player_matches_filter(filter, state, actor, source_context)
                 || !attack_target_matches(trigger, state, target, *defending_player, source_context)
             {
                 continue;
@@ -2730,8 +2746,9 @@ pub(super) fn attack_firings(
     let accepted: Vec<(ObjectId, crate::game::combat::AttackTarget, PlayerId)> = attacker_ids
         .iter()
         .filter_map(|id| {
-            if player_scope.is_none()
-                && !attack_declaration_attacker_matches(trigger, state, *id, source_context)
+            if !matches_declaration_ordinal(*id)
+                || (player_scope.is_none()
+                    && !attack_declaration_attacker_matches(trigger, state, *id, source_context))
             {
                 return None;
             }
@@ -2833,6 +2850,7 @@ fn attack_declaration_attacker_matches(
 /// per attacker, so such a trigger answers false. A `valid_target` beside an
 /// attacker-side filter ("whenever this creature attacks the player with the
 /// most life") is checked per attacker like any other.
+/// A declaration ordinal is checked against this attacker's next declaration.
 pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -2855,7 +2873,11 @@ pub fn attack_trigger_matches_attack(
         return false;
     };
     let source_context = super::triggers::trigger_source_context_for_latch(state, source);
-    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+    trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+        state.objects.get(&attacker).is_some_and(|object| {
+            super::combat::next_attack_declaration_ordinal(state, object) == ordinal
+        })
+    }) && attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
         && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 

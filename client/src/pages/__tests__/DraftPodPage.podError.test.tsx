@@ -7,7 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DraftPodPage } from "../DraftPodPage";
 import { classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 
-const { draftState } = vi.hoisted(() => ({
+const { draftState, podState } = vi.hoisted(() => ({
+  podState: {
+    retireHostedPodRecoveryFailure: vi.fn(),
+  },
   draftState: {
     phase: "pairing",
     sideboardPrompt: null,
@@ -50,10 +53,16 @@ vi.mock("../../stores/multiplayerDraftStore", async (importOriginal) => ({
 // literal here would be a second copy of the same fact.
 vi.mock("../../stores/draftPodStore", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../stores/draftPodStore")>()),
-  useDraftPodStore: (selector: (state: { reset: () => void; resumeHostedPod: () => void; enterKind: () => void }) => unknown) => selector({
+  useDraftPodStore: (selector: (state: {
+    reset: () => void;
+    resumeHostedPod: () => void;
+    enterKind: () => void;
+    retireHostedPodRecoveryFailure: () => void;
+  }) => unknown) => selector({
     reset: vi.fn(),
     resumeHostedPod: vi.fn(),
     enterKind: vi.fn(),
+    retireHostedPodRecoveryFailure: podState.retireHostedPodRecoveryFailure,
   }),
 }));
 
@@ -84,6 +93,7 @@ describe("DraftPodPage pod error banner", () => {
     draftState.clearError.mockClear();
     draftState.resumeDraft.mockClear();
     draftState.leave.mockClear();
+    podState.retireHostedPodRecoveryFailure.mockClear();
   });
 
   it("surfaces the store error in the pairing phase", () => {
@@ -162,6 +172,10 @@ describe("DraftPodPage pod error banner", () => {
     expect(screen.getByText("Host is still coming back online")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Try Reconnecting" }));
     expect(draftState.resumeDraft).toHaveBeenCalledOnce();
+    // The retry retires the pod store's own pending entry attempt before it resumes.
+    expect(podState.retireHostedPodRecoveryFailure).toHaveBeenCalledOnce();
+    expect(podState.retireHostedPodRecoveryFailure.mock.invocationCallOrder[0])
+      .toBeLessThan(draftState.resumeDraft.mock.invocationCallOrder[0]!);
   });
 
   it("does not offer retry for an incompatible recovery failure", () => {

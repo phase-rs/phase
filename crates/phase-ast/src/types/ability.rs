@@ -4467,10 +4467,8 @@ pub enum ManaSpendRestriction {
     /// "Spend this mana only to cast a creature spell of the chosen type."
     /// Resolved at runtime from the source's `chosen_creature_type()`.
     ChosenCreatureType,
-    /// CR 106.6: "Spend this mana only to cast creature spells or activate abilities of creatures."
-    /// Combined restriction with OR semantics: allowed for spells of `spell_type` OR ability
-    /// activations described by `ability` — `OfSpellType` restricts to abilities of permanents
-    /// of `spell_type`, `Any` permits any ability ("… or to activate an ability").
+    /// CR 106.6: Allows spells of `spell_type` and non-spell payments described
+    /// by `ability`. `AnyNonSpellPayment` represents a prohibition affecting casts only.
     SpellTypeOrAbilityActivation {
         spell_type: String,
         ability: AbilityActivationScope,
@@ -20336,6 +20334,49 @@ impl BlightCount {
     }
 }
 
+/// Localizable description of a fixed cost to tap one untapped creature.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub(super) enum TapOneDisplay<'a> {
+    ControlledSubtype { subtype: &'a str },
+    Creature,
+}
+
+impl<'a> TapOneDisplay<'a> {
+    pub(super) fn from_filter(filter: &'a TargetFilter) -> Self {
+        match filter {
+            TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => typed
+                .get_subtype()
+                .map_or(Self::Creature, |subtype| Self::ControlledSubtype {
+                    subtype,
+                }),
+            _ => Self::Creature,
+        }
+    }
+}
+
+fn serialize_tap_creatures<S: serde::Serializer>(
+    requirement: &TapCreaturesRequirement,
+    filter: &TargetFilter,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        requirement: &'a TapCreaturesRequirement,
+        filter: &'a TargetFilter,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tap_display: Option<TapOneDisplay<'a>>,
+    }
+
+    Payload {
+        requirement,
+        filter,
+        tap_display: matches!(requirement, TapCreaturesRequirement::Count { count: 1 })
+            .then(|| TapOneDisplay::from_filter(filter)),
+    }
+    .serialize(serializer)
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20439,6 +20480,7 @@ pub enum AbilityCost {
     /// constraint (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Legacy JSON
     /// that carries a bare `count` field (no `requirement` discriminant)
     /// deserializes into `Count { count }` via `deserialize_tap_creatures_requirement`.
+    #[serde(serialize_with = "serialize_tap_creatures")]
     TapCreatures {
         #[serde(
             default,
@@ -21788,6 +21830,7 @@ pub enum AdditionalCostOrigin {
     Offspring,
     Squad,
     Replicate,
+    Conspire,
     /// CR 702.166a: Bargain's optional sacrifice of an artifact, enchantment,
     /// or token. A dedicated origin prevents an unrelated additional cost from
     /// satisfying an "if it was bargained" rider.
@@ -31026,7 +31069,86 @@ pub enum VoteVisibility {
     Secret,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChosenGroupMemberMatcher<'a> {
+    ParentTarget,
+    And(&'a [TargetFilter]),
+    Or(&'a [TargetFilter]),
+    Not(&'a TargetFilter),
+    Shared(&'a TargetFilter),
+}
+
 impl TargetFilter {
+    /// Classify the filter legs used by a chosen-group reader. The recursive
+    /// logical forms are evaluated against each bound occurrence; every other
+    /// filter delegates to the shared live target matcher.
+    pub fn chosen_group_member_matcher(&self) -> ChosenGroupMemberMatcher<'_> {
+        match self {
+            TargetFilter::ParentTarget => ChosenGroupMemberMatcher::ParentTarget,
+            TargetFilter::And { filters } => ChosenGroupMemberMatcher::And(filters),
+            TargetFilter::Or { filters } => ChosenGroupMemberMatcher::Or(filters),
+            TargetFilter::Not { filter } => ChosenGroupMemberMatcher::Not(filter),
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(_)
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => ChosenGroupMemberMatcher::Shared(self),
+        }
+    }
+
     /// CR 702.6a: the target of ordinary equip is a creature you control.
     pub fn equip_target() -> Self {
         Self::Typed(TypedFilter::creature().controller(ControllerRef::You))
@@ -41458,9 +41580,13 @@ pub enum TriggerCondition {
         min_count: u32,
     },
 
-    /// "if it's attacking" — true when the trigger source object is currently an attacker.
-    /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
-    SourceIsAttacking,
+    /// CR 506.3 + CR 508.1k + CR 603.4: the source is attacking. If a
+    /// player predicate is supplied, its current destination must be a player
+    /// who satisfies that predicate.
+    SourceIsAttacking {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player: Option<Box<PlayerFilter>>,
+    },
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
     /// cost was paid this turn". True when the source permanent entered via the
@@ -41993,7 +42119,7 @@ impl TriggerCondition {
             | TriggerCondition::WasCast { .. }
             | TriggerCondition::WasPlayed
             | TriggerCondition::AdditionalCostPaid { .. }
-            | TriggerCondition::SourceIsAttacking
+            | TriggerCondition::SourceIsAttacking { .. }
             | TriggerCondition::CastVariantPaid { .. }
             | TriggerCondition::CastVariantPaidPersistent { .. }
             | TriggerCondition::ActivatedAbilityIsNonMana
@@ -42849,6 +42975,9 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 508.3a: Required attack declaration ordinal for the attacking creature this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_declaration_ordinal: Option<u32>,
     /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
     /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
     /// When `Some`, the trigger fires once for an attacker whose matching
@@ -43817,6 +43946,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
@@ -50898,6 +51028,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            attack_declaration_ordinal: None,
             blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,

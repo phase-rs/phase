@@ -1205,7 +1205,7 @@ export type KeywordKind = string;
 
 export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
 
-export type AbilityActivationScope = "OfSpellType" | "Any";
+export type AbilityActivationScope = "OfSpellType" | "Any" | "AnyNonSpellPayment";
 
 export type AbilityTag = {
   type:
@@ -1239,7 +1239,8 @@ export type SpecialAction =
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
   | "EndContinuousEffect"
   // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
-  | "Foretell";
+  | "Foretell"
+  | "Suspend";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -2601,12 +2602,16 @@ export interface PendingCast {
   ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
+  // Engine marker that `cost` holds the mana leg and `activation_cost` holds
+  // the unpaid tail. The default `None` is omitted on the wire.
+  activation_residual?: "XMana" | "ManaLeg";
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 601.2b + CR 601.2h: creatures selected before targets for a spell tap
   // cost, tapped at the payment commit. Absent when none.
-  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost }[];
+  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost; replicate_ordinal?: number }[];
+  unpaid_replicate_energy?: number;
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2785,7 +2790,11 @@ export type AdditionalCost =
   | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
-export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+export type SerializedAbilityCost = { type: string; tap_display?: TapOneDisplay; [key: string]: unknown };
+
+export type TapOneDisplay =
+  | { type: "ControlledSubtype"; subtype: string }
+  | { type: "Creature" };
 
 /**
  * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in

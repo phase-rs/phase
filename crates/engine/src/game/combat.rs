@@ -7224,6 +7224,19 @@ fn validate_declaration_core(
     Ok(())
 }
 
+pub(super) fn next_attack_declaration_ordinal(state: &GameState, attacker: &GameObject) -> u32 {
+    let previous_declarations = state
+        .attacker_declarations_this_turn
+        .iter()
+        .filter(|record| {
+            record.object_id == attacker.id && record.incarnation == Some(attacker.incarnation)
+        })
+        .count();
+    u32::try_from(previous_declarations)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1)
+}
+
 pub fn declare_attackers_with_bands(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -7398,10 +7411,11 @@ pub(super) fn commit_attack_declaration(
     let attacker_declarations: Vec<_> = attacker_ids
         .iter()
         .filter_map(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+            state.objects.get(id).map(|obj| {
+                let mut declaration = obj.snapshot_for_attack_declaration(*id);
+                declaration.ordinal_this_turn = Some(next_attack_declaration_ordinal(state, obj));
+                declaration
+            })
         })
         .collect();
 
@@ -9223,7 +9237,10 @@ fn attack_target_referent(
     )?)
 }
 
-fn live_attack_destination(state: &GameState, attacker: ObjectId) -> Option<AttackDestination> {
+pub(super) fn live_attack_destination(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<AttackDestination> {
     state
         .combat
         .as_ref()?

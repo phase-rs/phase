@@ -3054,6 +3054,9 @@ pub struct AttackDeclarationRecord {
     /// legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<u64>,
+    /// CR 508.3a: This incarnation's declaration ordinal within the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal_this_turn: Option<u32>,
     pub lki: LKISnapshot,
     /// CR 111.1: Token identity at declaration time.
     #[serde(default)]
@@ -12486,6 +12489,8 @@ pub enum DeferredSpellSacrifice {
 pub struct DeferredSpellTap {
     pub object_ids: Vec<ObjectId>,
     pub cost: AbilityCost,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_ordinal: Option<u32>,
 }
 
 impl DeferredSpellSacrifice {
@@ -12924,6 +12929,9 @@ pub struct PendingCast {
     /// held for that payment until then (`holds_tap_reservation`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_tapped_permanents: Vec<DeferredSpellTap>,
+    /// Energy already declared for Replicate, held until spell payment.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub unpaid_replicate_energy: u32,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -14019,6 +14027,7 @@ impl PendingCast {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             deferred_tapped_permanents: Vec::new(),
+            unpaid_replicate_energy: 0,
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -14098,6 +14107,12 @@ impl PendingCast {
         self.deferred_tap_ids().any(|held| held == id)
     }
 
+    pub(crate) fn holds_replicate_tap_reservation(&self, id: ObjectId) -> bool {
+        self.deferred_tapped_permanents
+            .iter()
+            .any(|tap| tap.replicate_ordinal.is_some() && tap.object_ids.contains(&id))
+    }
+
     /// Every permanent held for this spell's deferred tap costs.
     pub fn deferred_tap_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
         self.deferred_tapped_permanents
@@ -14112,6 +14127,7 @@ impl PendingCast {
         !self.deferred_sacrificed_permanents.is_empty()
             || self.deferred_hand_discard_cost.is_some()
             || !self.deferred_tapped_permanents.is_empty()
+            || self.unpaid_replicate_energy != 0
     }
 }
 
@@ -36669,6 +36685,16 @@ pub struct DrawSequenceFrame {
     /// the working copy of the seat `player`; the dealer holds the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dealer: Option<DrawDealer>,
+    /// CR 608.2c + CR 121.6b + CR 614.6: the "… this way" zone-change ledger in force
+    /// when this draw instruction began, held only when the instruction is directly
+    /// followed by a "… this way" head naming an earlier instruction
+    /// (`effects::keeps_this_way_ledger_for_following_head`). An action replacing one
+    /// of its draws (Dredge's mill-and-return, Notion Thief's draw) runs as its own
+    /// chain and publishes its own ledger; completion restores this one, so the head
+    /// reads its antecedent whether each draw was performed, replaced at once, or
+    /// replaced after a choice. Omitted when absent; older payloads decode as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_way_antecedent_ledger: Option<Vec<ObjectId>>,
 }
 
 /// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
@@ -36876,6 +36902,7 @@ impl DrawSequenceStack {
             capture_next_child_delivery: false,
             accumulated: 0,
             dealer: None,
+            this_way_antecedent_ledger: None,
         });
         debug_assert!(
             self.validate().is_ok(),
@@ -43696,6 +43723,34 @@ impl GameState {
         // to exist.
         let live: HashSet<ObjectId> = clone.objects.keys().copied().collect();
         clone.last_created_token_ids.retain(|id| live.contains(id));
+        // CR 508.3a + CR 732.2a: a declaration ordinal gates trigger matching.
+        // Once a firing is on the stack, its retained events are resolution
+        // context and never run the attack matcher again.
+        let clear_matched_attack_ordinal = |event: &mut GameEvent| {
+            if let GameEvent::AttackersDeclared {
+                declaration_records,
+                ..
+            } = event
+            {
+                for record in declaration_records {
+                    record.ordinal_this_turn = None;
+                }
+            }
+        };
+        for entry in clone.stack.iter_mut() {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &mut entry.kind
+            {
+                clear_matched_attack_ordinal(event);
+            }
+        }
+        clone
+            .stack_trigger_event_batches
+            .values_mut()
+            .flatten()
+            .for_each(clear_matched_attack_ordinal);
         clone.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
                 if let Some(cards) = record
@@ -62851,6 +62906,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: Some(named),
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62864,6 +62920,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: None,
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62963,6 +63020,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         declaration_records: vec![AttackDeclarationRecord {
                             object_id: x,
                             incarnation: Some(named),
+                            ordinal_this_turn: None,
                             lki,
                             is_token: false,
                             is_commander: false,
@@ -69260,6 +69318,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
                 deferred_tapped_permanents: Vec::new(),
+                unpaid_replicate_energy: 0,
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -69966,6 +70025,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             deferred_tapped_permanents: Vec::new(),
+            unpaid_replicate_energy: 0,
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

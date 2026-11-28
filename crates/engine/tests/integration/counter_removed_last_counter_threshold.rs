@@ -610,9 +610,12 @@ fn riftmarked_knight_last_time_counter_casts_it_and_creates_token() {
         })
         .expect("Riftmarked Knight offers its Suspend activation from hand");
     runner
-        .activate(knight, suspend_idx)
-        .target_object(knight)
-        .resolve();
+        .act(GameAction::ActivateAbility {
+            source_id: knight,
+            ability_index: suspend_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("take the indexed Suspend action");
     assert_eq!(runner.state().objects[&knight].zone, Zone::Exile);
     assert_eq!(counters(runner.state(), knight, &CounterType::Time), 3);
 

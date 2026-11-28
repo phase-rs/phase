@@ -2704,6 +2704,9 @@ pub(crate) fn finalize_persisted_restore(
     recovered_terminal_rest: bool,
 ) -> Result<(), PersistedRestoreError> {
     finalize_rules_state(state);
+    super::casting_costs::restore_conspire_payment_origin(state);
+    super::casting_costs::validate_restored_replicate_payment(state)
+        .map_err(PersistedRestoreError::InvalidPaymentTransaction)?;
     restore_engine_derived_retarget_prompts(state)?;
     let recovered_terminal_rest =
         recovered_terminal_rest || recover_terminal_resolution_rest_on_restore(state)?;
@@ -6553,10 +6556,11 @@ fn submit_ordinary_phyrexian_choices(
                 Some(spell_object),
                 Some(&activation_ctx),
             );
-            let permissions = super::static_abilities::build_cost_permission_context(
+            let permissions = super::static_abilities::build_cost_permission_context_for_payment(
                 state,
                 player,
                 mana_spend_permission,
+                Some(&activation_ctx),
             );
             mana_payment::compute_phyrexian_shards(
                 &player_pool,
@@ -9766,11 +9770,14 @@ fn drain_pending_deferred_life_cost_resume(
                         "Deferred life payment is missing its cast or activation root".to_string(),
                     )
                 })?;
+                let pay_life = if super::casting::pending_suspend(&pending, player).is_some() {
+                    super::life_costs::pay_life_as_cost
+                } else {
+                    super::life_costs::pay_life_as_cast_or_activation_cost
+                };
                 let mut remaining = remaining_life_payments.into_iter();
                 while let Some(amount) = remaining.next() {
-                    match super::life_costs::pay_life_as_cast_or_activation_cost(
-                        state, player, amount, events,
-                    ) {
+                    match pay_life(state, player, amount, events) {
                         super::life_costs::PayLifeCostResult::Paid { .. } => {}
                         super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution {
                             ..

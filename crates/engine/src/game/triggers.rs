@@ -9493,10 +9493,15 @@ fn collect_pending_triggers_with_collection(
                         .iter()
                         .find(|entry| entry.id == *cast_obj_id)
                         .is_some_and(|entry| {
-                            entry
-                                .ability()
-                                .is_some_and(|ability| ability.context.additional_cost_paid)
+                            entry.ability().is_some_and(|ability| {
+                                ability.context.instance_payment_count_for_ordinal(
+                                    AdditionalCostOrigin::Conspire,
+                                    0,
+                                ) > 0
+                            })
                         });
+                    // CR 702.78a + CR 603.4: A paid Conspire instance
+                    // triggers; an unpaid one does not.
                     paid.then_some(obj.controller)
                 })
                 .map(|controller| {
@@ -23144,11 +23149,26 @@ fn evaluate_trigger_condition_with_source(
             }
         }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
-        TriggerCondition::SourceIsAttacking => source_context.is_some_and(|source| {
+        TriggerCondition::SourceIsAttacking { player } => source_context.is_some_and(|source| {
+            let id = source.identity.reference.object_id;
             let read = source.source_read(state);
-            read.is_exact_live()
-                && eval_source_is_attacking(state, source.identity.reference.object_id)
-                || !read.is_exact_live() && source.combat_status.attacking
+            if let Some(filter) = player {
+                // CR 506.3 + CR 506.4 + CR 603.4: this predicate reads a
+                // current attack against an actual player by the exact source.
+                return read.is_exact_live()
+                    && super::combat::live_attack_destination(state, id)
+                        .and_then(|(target, _)| super::combat::attacked_player_for_target(target))
+                        .is_some_and(|player| {
+                            super::effects::matches_player_scope(
+                                state, player, filter, controller, id,
+                            )
+                        });
+            }
+            if read.is_exact_live() {
+                eval_source_is_attacking(state, id)
+            } else {
+                source.combat_status.attacking
+            }
         }),
         // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid
         // this turn". Negation ("unless it escaped") wraps via `Not`.
@@ -29206,7 +29226,7 @@ pub mod tests {
     fn stack_condition_strips_event_time_gates_but_keeps_intervening_if() {
         let intervening_if = TriggerCondition::SourceEnteredThisTurn;
         let event_time = TriggerCondition::EventTime {
-            condition: Box::new(TriggerCondition::SourceIsAttacking),
+            condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
         };
         for mode in [TriggerMode::Attacks, TriggerMode::SpellCast] {
             let trigger = make_trigger(mode.clone());
@@ -51205,7 +51225,9 @@ pub mod tests {
             Zone::Battlefield,
         );
         let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+            keyword: Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                ManaCost::SelfManaCost,
+            )),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Subtype("Sliver".into())).controller(ControllerRef::You),
@@ -51545,7 +51567,11 @@ pub mod tests {
         // CR 702.78a: the conspire cost was paid — surfaced on the cast spell's
         // stack-entry context, which the granted-Conspire block reads to gate
         // the copy trigger.
-        ability.context.additional_cost_paid = true;
+        ability.context.record_additional_cost_instance_payment(
+            AdditionalCostOrigin::Conspire,
+            0,
+            1,
+        );
         state.stack.push_back(StackEntry {
             id: spell,
             source_id: spell,
@@ -65437,7 +65463,7 @@ pub mod tests {
             assert_eq!(
                 trigger.condition,
                 Some(TriggerCondition::EventTime {
-                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                    condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
                 }),
                 "precondition: the parsed trigger must carry the event-time SourceIsAttacking gate"
             );

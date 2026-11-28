@@ -635,6 +635,18 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
 
   type Observed = { type: string; snapshot?: { state: GameState }; state?: GameState };
 
+  /** The correlated result of the create written on `socket`, carrying that frame's own id. */
+  function draftCreated(socket: IntegrationSocket, seat: { draft_code: string; player_token: string; seat_index: number }) {
+    const setup = socket.sent
+      .map((raw) => JSON.parse(raw) as { type?: string; data?: { request_id?: unknown } })
+      .filter((frame) => frame.type === "CreateDraftWithSettings")
+      .pop();
+    return JSON.stringify({
+      type: "DraftCommandAccepted",
+      data: { request_id: setup?.data?.request_id, result: { type: "Created", data: seat } },
+    });
+  }
+
   function newNormalAdapter(runtime: StateCodecRuntime, sessions: SessionStats[] = []) {
     vi.stubGlobal("WebSocket", IntegrationSocket);
     IntegrationSocket.last = null;
@@ -715,10 +727,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       podSize: 8,
     });
     const draftSocket = await handshakeSocket("CreateDraftWithSettings");
-    draftSocket.deliver(JSON.stringify({
-      type: "DraftCreated",
-      data: { draft_code: "INTEG1", player_token: "integration-draft", seat_index: 0 },
-    }));
+    draftSocket.deliver(draftCreated(draftSocket, { draft_code: "INTEG1", player_token: "integration-draft", seat_index: 0 }));
     await created;
     draftSocket.deliver(JSON.stringify({
       type: "DraftMatchStart",
@@ -923,10 +932,7 @@ describe.skipIf(!ENABLED)("stateCodec — native / real WASM portability", () =>
       tournamentFormat: "Swiss", podPolicy: "Competitive", podSize: 8,
     });
     const socket = await handshakeSocket("CreateDraftWithSettings");
-    socket.deliver(JSON.stringify({
-      type: "DraftCreated",
-      data: { draft_code: "INTEG2", player_token: "integration-draft", seat_index: 0 },
-    }));
+    socket.deliver(draftCreated(socket, { draft_code: "INTEG2", player_token: "integration-draft", seat_index: 0 }));
     await created;
     socket.deliver(JSON.stringify({
       type: "DraftMatchStart",

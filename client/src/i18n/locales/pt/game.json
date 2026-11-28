@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Apenas para mágicas da cor {{color}}.",
       "onlyForSpellFromZone": "Apenas para mágicas {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Não pode ser gasto para conjurar mágicas de {{zone}}.",
+      "cannotCastSpellsOutsideType": "Não pode ser gasto para conjurar mágicas que não sejam do tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Apenas para mágicas viradas para baixo.",
       "onlyForAny": "Apenas para um destes usos: {{restrictions}}",
       "onlyForSpecialAction": "Apenas para a ação especial {{action}}.",
@@ -2179,6 +2180,14 @@
     "attachments": "Com {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Pagar o custo de replicar?",
+      "again": "Pagar o custo de replicar novamente? (Pago {{times}} vezes)",
+      "decline": "Concluir",
+      "tapSubtype": "Vire um {{subtype}} desvirado que você controla",
+      "tapCreature": "Vire uma criatura desvirada",
+      "payEnergy": "Pague {{amount}} de energia"
+    },
     "gift": {
       "title": "Prometer um presente?",
       "pay": "Prometer {{gift}}",

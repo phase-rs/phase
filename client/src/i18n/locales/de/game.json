@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Nur für Zaubersprüche der Farbe {{color}}.",
       "onlyForSpellFromZone": "Nur für Zaubersprüche {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Kann nicht für Zaubersprüche aus {{zone}} ausgegeben werden.",
+      "cannotCastSpellsOutsideType": "Dieses Mana kann nicht zum Wirken von Zaubersprüchen ausgegeben werden, die nicht den Typ {{spellType}} haben.",
       "onlyForFaceDownSpell": "Nur für verdeckte Zaubersprüche.",
       "onlyForAny": "Nur für eine dieser Verwendungen: {{restrictions}}",
       "onlyForSpecialAction": "Nur für die Sonderaktion {{action}}.",
@@ -2179,6 +2180,14 @@
     "attachments": "Mit {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Reproduktion bezahlen?",
+      "again": "Reproduktion erneut bezahlen? ({{times}}× bezahlt)",
+      "decline": "Fertig",
+      "tapSubtype": "Tappe einen ungetappten {{subtype}}, den du kontrollierst",
+      "tapCreature": "Tappe eine ungetappte Kreatur",
+      "payEnergy": "Bezahle {{amount}} Energie"
+    },
     "gift": {
       "title": "Ein Geschenk versprechen?",
       "pay": "{{gift}} versprechen",

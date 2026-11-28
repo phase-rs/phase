@@ -5320,6 +5320,7 @@ mod tests {
         djinn: ObjectId,
         spell: ObjectId,
         food_chain: Option<(ObjectId, ObjectId)>,
+        untapped_land: Option<ObjectId>,
     }
 
     fn djinn_manamorphose_board() -> (GameScenario, ObjectId, ObjectId) {
@@ -5343,8 +5344,10 @@ mod tests {
         g: usize,
         c: usize,
         food_chain: bool,
+        extra_land: Option<ManaColor>,
     ) -> DjinnManamorphoseFixture {
         let (mut scenario, djinn, spell) = djinn_manamorphose_board();
+        let untapped_land = extra_land.map(|color| scenario.add_basic_land(P0, color));
         let food_chain = food_chain.then(|| {
             let chain = scenario
                 .add_enchantment_from_oracle(P0, "Food Chain", FOOD_CHAIN_ORACLE)
@@ -5373,10 +5376,16 @@ mod tests {
             djinn,
             spell,
             food_chain,
+            untapped_land,
         }
     }
 
-    fn multi_producer_djinn_manamorphose(r: usize, g: usize, c: usize) -> DjinnManamorphoseFixture {
+    fn multi_producer_djinn_manamorphose(
+        r: usize,
+        g: usize,
+        c: usize,
+        extra_land: Option<ManaColor>,
+    ) -> DjinnManamorphoseFixture {
         let order: Vec<_> = [
             (ManaType::Red, r),
             (ManaType::Green, g),
@@ -5385,10 +5394,13 @@ mod tests {
         .into_iter()
         .flat_map(|(color, count)| std::iter::repeat_n(color, count))
         .collect();
-        ordered_multi_producer_djinn_manamorphose(&order)
+        ordered_multi_producer_djinn_manamorphose(&order, extra_land)
     }
 
-    fn ordered_multi_producer_djinn_manamorphose(order: &[ManaType]) -> DjinnManamorphoseFixture {
+    fn ordered_multi_producer_djinn_manamorphose(
+        order: &[ManaType],
+        extra_land: Option<ManaColor>,
+    ) -> DjinnManamorphoseFixture {
         let (mut scenario, djinn, spell) = djinn_manamorphose_board();
         let mut producers = Vec::new();
         for &color in order {
@@ -5404,6 +5416,7 @@ mod tests {
             };
             producers.push((source, color));
         }
+        let untapped_land = extra_land.map(|color| scenario.add_basic_land(P0, color));
         let mut runner = scenario.build();
         for &(source, color) in &producers {
             if color == ManaType::Colorless {
@@ -5457,15 +5470,18 @@ mod tests {
         assert!(producers
             .iter()
             .all(|&(source, _)| runner.state().objects[&source].tapped));
-        assert!(
+        let available: Vec<_> =
             crate::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
-                .is_empty()
-        );
+                .into_iter()
+                .map(|selection| selection.source.object_id)
+                .collect();
+        assert_eq!(available, untapped_land.into_iter().collect::<Vec<_>>());
         DjinnManamorphoseFixture {
             runner,
             djinn,
             spell,
             food_chain: None,
+            untapped_land,
         }
     }
 
@@ -5537,7 +5553,7 @@ mod tests {
             })
             .expect("the payable printed base must enter the real announcement");
         // CR 702.56a + CR 702.56b + CR 601.2b + CR 601.2f: each declaration repeats the recipient's
-        // full printed cost, then decline the next offer before paying the total.
+        // full printed cost, then decline the next offer if another repetition fits.
         for paid in 0..n {
             let WaitingFor::OptionalCostChoice {
                 player,
@@ -5548,10 +5564,13 @@ mod tests {
                 ..
             } = &runner.state().waiting_for
             else {
-                panic!(
-                    "expected P0 replicate offer, got {:?}",
-                    runner.state().waiting_for
+                assert_eq!(
+                    paid + 1,
+                    n,
+                    "expected P0 replicate offer before the final repetition, got {:?}",
+                    runner.state().waiting_for,
                 );
+                break;
             };
             assert_eq!(*player, P0);
             assert_eq!(*times_kicked, paid as u32);
@@ -5593,6 +5612,13 @@ mod tests {
         );
         assert!(!runner.state().objects[&fixture.spell].mana_spent_to_cast);
         assert_uncommitted_manamorphose_announcement(fixture);
+        if let Some(land) = fixture.untapped_land {
+            // Set up the same short-pool payment probe after a legal
+            // announcement. The added source has produced no mana.
+            let land = fixture.runner.state_mut().objects.get_mut(&land).unwrap();
+            assert!(!land.tapped);
+            land.tapped = true;
+        }
         cost
     }
 
@@ -5802,6 +5828,13 @@ mod tests {
     ) {
         let state = fixture.runner.state();
         // CR 601.2h: a refused final payment must not spend a partial cost.
+        let land = fixture
+            .untapped_land
+            .expect("a mana source made declaration legal");
+        assert!(
+            state.objects[&land].tapped,
+            "the payment probe has no spare source"
+        );
         assert_eq!(
             fingerprint(&state.players[0].mana_pool.units().collect::<Vec<_>>()),
             before
@@ -5921,15 +5954,15 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_payable_repeatable_hybrids_have_bounded_work_homogeneous_n4() {
-        let mut ordinary = homogeneous_djinn_manamorphose(2, 2, 4, false);
+        let mut ordinary = homogeneous_djinn_manamorphose(2, 2, 4, false, None);
         let cost = announce_manamorphose(&mut ordinary, 4);
         finish_payable_manamorphose(&mut ordinary, 4, &cost);
 
-        let mut decline = homogeneous_djinn_manamorphose(1, 0, 1, false);
+        let mut decline = homogeneous_djinn_manamorphose(1, 0, 1, false, None);
         let cost = announce_manamorphose(&mut decline, 1);
         finish_payable_manamorphose(&mut decline, 1, &cost);
 
-        let mut restricted = homogeneous_djinn_manamorphose(2, 2, 4, true);
+        let mut restricted = homogeneous_djinn_manamorphose(2, 2, 4, true, None);
         let cost = announce_manamorphose(&mut restricted, 4);
         let chain = activate_food_chain_for_manamorphose(&mut restricted);
         finish_payable_manamorphose(&mut restricted, 4, &cost);
@@ -5942,7 +5975,7 @@ mod tests {
         assert_eq!(remainder.len(), 3);
         assert!(chain.iter().all(|unit| remainder.contains(unit)));
 
-        let mut pinned = homogeneous_djinn_manamorphose(2, 2, 5, true);
+        let mut pinned = homogeneous_djinn_manamorphose(2, 2, 5, true, None);
         let cost = announce_manamorphose(&mut pinned, 4);
         let pin = pinned.runner.state().players[0]
             .mana_pool
@@ -5988,14 +6021,14 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_payable_repeatable_hybrids_have_bounded_work_homogeneous_n8() {
-        let mut fixture = homogeneous_djinn_manamorphose(4, 4, 8, false);
+        let mut fixture = homogeneous_djinn_manamorphose(4, 4, 8, false, None);
         let cost = announce_manamorphose(&mut fixture, 8);
         finish_payable_manamorphose(&mut fixture, 8, &cost);
     }
 
     #[test]
     fn djinn_manamorphose_payable_repeatable_hybrids_have_bounded_work_multi_producer_n8() {
-        let mut fixture = multi_producer_djinn_manamorphose(4, 4, 8);
+        let mut fixture = multi_producer_djinn_manamorphose(4, 4, 8, None);
         let cost = announce_manamorphose(&mut fixture, 8);
         finish_payable_manamorphose(&mut fixture, 8, &cost);
         assert!(fixture.runner.state().players[0].mana_pool.is_empty());
@@ -6003,11 +6036,11 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_failing_generic_suffix_is_rejected_with_bounded_work_homogeneous_n4() {
-        let mut payable = homogeneous_djinn_manamorphose(2, 2, 4, false);
+        let mut payable = homogeneous_djinn_manamorphose(2, 2, 4, false, None);
         let cost = announce_manamorphose(&mut payable, 4);
         finish_payable_manamorphose(&mut payable, 4, &cost);
 
-        let mut short = homogeneous_djinn_manamorphose(2, 2, 3, false);
+        let mut short = homogeneous_djinn_manamorphose(2, 2, 3, false, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut short, 4);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6035,7 +6068,7 @@ mod tests {
 
         // Keep all Food Chain operations after this body's designated public
         // B+1 discriminator and supplement, including on the bfd36 comparison.
-        let mut chain_payable = homogeneous_djinn_manamorphose(2, 2, 4, true);
+        let mut chain_payable = homogeneous_djinn_manamorphose(2, 2, 4, true, None);
         let cost = announce_manamorphose(&mut chain_payable, 4);
         let produced = activate_food_chain_for_manamorphose(&mut chain_payable);
         finish_payable_manamorphose(&mut chain_payable, 4, &cost);
@@ -6047,7 +6080,7 @@ mod tests {
         );
         assert!(produced.iter().all(|unit| remainder.contains(unit)));
 
-        let mut chain_short = homogeneous_djinn_manamorphose(2, 2, 3, true);
+        let mut chain_short = homogeneous_djinn_manamorphose(2, 2, 3, true, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut chain_short, 4);
         activate_food_chain_for_manamorphose(&mut chain_short);
         let before = fingerprint(
@@ -6095,11 +6128,11 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_failing_generic_suffix_is_rejected_with_bounded_work_homogeneous_n8() {
-        let mut payable = homogeneous_djinn_manamorphose(4, 4, 8, false);
+        let mut payable = homogeneous_djinn_manamorphose(4, 4, 8, false, None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = homogeneous_djinn_manamorphose(4, 4, 7, false);
+        let mut short = homogeneous_djinn_manamorphose(4, 4, 7, false, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6128,11 +6161,11 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_failing_generic_suffix_is_rejected_with_bounded_work_multi_producer_n8() {
-        let mut payable = multi_producer_djinn_manamorphose(4, 4, 8);
+        let mut payable = multi_producer_djinn_manamorphose(4, 4, 8, None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = multi_producer_djinn_manamorphose(4, 4, 7);
+        let mut short = multi_producer_djinn_manamorphose(4, 4, 7, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6161,11 +6194,11 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_equivalent_hybrid_failures_are_reused_homogeneous_n8() {
-        let mut payable = homogeneous_djinn_manamorphose(4, 4, 8, false);
+        let mut payable = homogeneous_djinn_manamorphose(4, 4, 8, false, None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = homogeneous_djinn_manamorphose(4, 3, 9, false);
+        let mut short = homogeneous_djinn_manamorphose(4, 3, 9, false, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6195,11 +6228,11 @@ mod tests {
 
     #[test]
     fn djinn_manamorphose_equivalent_hybrid_failures_are_reused_multi_producer_n8() {
-        let mut payable = multi_producer_djinn_manamorphose(4, 4, 8);
+        let mut payable = multi_producer_djinn_manamorphose(4, 4, 8, None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = multi_producer_djinn_manamorphose(4, 3, 9);
+        let mut short = multi_producer_djinn_manamorphose(4, 3, 9, Some(ManaColor::Red));
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6299,11 +6332,14 @@ mod tests {
     #[test]
     fn djinn_manamorphose_failing_generic_suffix_is_rejected_with_bounded_work_interleaved_n8() {
         let mut payable =
-            ordered_multi_producer_djinn_manamorphose(&interleaved_generic_payable_order());
+            ordered_multi_producer_djinn_manamorphose(&interleaved_generic_payable_order(), None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = ordered_multi_producer_djinn_manamorphose(&INTERLEAVED_GENERIC_SHORT);
+        let mut short = ordered_multi_producer_djinn_manamorphose(
+            &INTERLEAVED_GENERIC_SHORT,
+            Some(ManaColor::Red),
+        );
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6333,11 +6369,14 @@ mod tests {
     #[test]
     fn djinn_manamorphose_equivalent_hybrid_failures_are_reused_interleaved_n8() {
         let mut payable =
-            ordered_multi_producer_djinn_manamorphose(&interleaved_hybrid_payable_order());
+            ordered_multi_producer_djinn_manamorphose(&interleaved_hybrid_payable_order(), None);
         let cost = announce_manamorphose(&mut payable, 8);
         finish_payable_manamorphose(&mut payable, 8, &cost);
 
-        let mut short = ordered_multi_producer_djinn_manamorphose(&INTERLEAVED_HYBRID_SHORT);
+        let mut short = ordered_multi_producer_djinn_manamorphose(
+            &INTERLEAVED_HYBRID_SHORT,
+            Some(ManaColor::Red),
+        );
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6370,7 +6409,7 @@ mod tests {
             interleaved_generic_payable_order(),
             interleaved_hybrid_payable_order(),
         ] {
-            let mut payable = ordered_multi_producer_djinn_manamorphose(&order);
+            let mut payable = ordered_multi_producer_djinn_manamorphose(&order, None);
             let cost = announce_manamorphose(&mut payable, 8);
             finish_payable_manamorphose(&mut payable, 8, &cost);
             assert!(payable.runner.state().players[0].mana_pool.is_empty());
@@ -6378,7 +6417,7 @@ mod tests {
 
         let mut order = interleaved_generic_payable_order();
         order.push(ManaType::Colorless);
-        let mut pinned = ordered_multi_producer_djinn_manamorphose(&order);
+        let mut pinned = ordered_multi_producer_djinn_manamorphose(&order, None);
         let cost = announce_manamorphose(&mut pinned, 8);
         let before = fingerprint(
             &pinned.runner.state().players[0]
@@ -6420,12 +6459,15 @@ mod tests {
     #[test]
     fn djinn_manamorphose_selector_generic_short_interleaved_n8() {
         let mut payable =
-            ordered_multi_producer_djinn_manamorphose(&interleaved_generic_payable_order());
+            ordered_multi_producer_djinn_manamorphose(&interleaved_generic_payable_order(), None);
         let cost = announce_manamorphose(&mut payable, 8);
         assert_payable_manamorphose_selector(&payable, &cost);
         cancel_manamorphose(&mut payable);
 
-        let mut short = ordered_multi_producer_djinn_manamorphose(&INTERLEAVED_GENERIC_SHORT);
+        let mut short = ordered_multi_producer_djinn_manamorphose(
+            &INTERLEAVED_GENERIC_SHORT,
+            Some(ManaColor::Red),
+        );
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6444,12 +6486,15 @@ mod tests {
     #[test]
     fn djinn_manamorphose_selector_hybrid_short_interleaved_n8() {
         let mut payable =
-            ordered_multi_producer_djinn_manamorphose(&interleaved_hybrid_payable_order());
+            ordered_multi_producer_djinn_manamorphose(&interleaved_hybrid_payable_order(), None);
         let cost = announce_manamorphose(&mut payable, 8);
         assert_payable_manamorphose_selector(&payable, &cost);
         cancel_manamorphose(&mut payable);
 
-        let mut short = ordered_multi_producer_djinn_manamorphose(&INTERLEAVED_HYBRID_SHORT);
+        let mut short = ordered_multi_producer_djinn_manamorphose(
+            &INTERLEAVED_HYBRID_SHORT,
+            Some(ManaColor::Red),
+        );
         let cost = announce_manamorphose(&mut short, 8);
         let before = fingerprint(
             &short.runner.state().players[0]
@@ -6966,7 +7011,7 @@ mod tests {
         // Snow/Z and Food Chain restrictions remain properties of actual units.
         // Convoke uses Chief Engineer's neighboring primitive; this fixture
         // makes no new printed ability or public convoke-path support claim.
-        let fixture = homogeneous_djinn_manamorphose(1, 0, 1, false);
+        let fixture = homogeneous_djinn_manamorphose(1, 0, 1, false, None);
         let meta =
             crate::game::casting::build_spell_meta(fixture.runner.state(), P0, fixture.spell)
                 .unwrap();
@@ -9707,60 +9752,65 @@ mod tests {
         ));
     }
 
-    /// CR 106.6: Hydraulic Helper — "{T}: Add {U}. This mana can't be spent to
-    /// cast a nonartifact spell." End-to-end through the production payment gate:
-    /// the real Oracle phrasing is parsed, lowered through `resolve_restrictions`,
-    /// loaded into a `ManaPool`, and spent via `can_pay_for_spell` (which funnels
-    /// through `ManaRestriction::allows`). The restriction governs only which
-    /// SPELLS the mana may cast; ability activation must stay UNRESTRICTED.
-    ///
-    /// Discriminating: with the buggy `SpellType("Artifact")` lowering
-    /// (`OnlyForSpellType`), `allows_activation` returns false and assertion (b)
-    /// fails. Only the fix's `SpellTypeOrAbilityActivation { ability: Any }`
-    /// (→ `OnlyForTypeSpellsOrAbilities { ability: Any }`) lets the {U} pay for an
-    /// ability while still rejecting a nonartifact spell.
+    /// CR 106.6: Hydraulic Helper restricts casts only. Guidelight Optimizer
+    /// names the same spell type and allows any activation. Legacy saved mana
+    /// and producer definitions with `Any` retain that positive interpretation.
     #[test]
     fn hydraulic_helper_restricted_mana_pays_artifacts_and_any_ability() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         use crate::types::ability::ManaSpendRestriction;
-        use crate::types::mana::AbilityActivationScope;
+        use crate::types::mana::{AbilityActivationScope, SpecialAction};
 
-        // Parser fix under test: the negative phrasing must lower to the OR variant.
-        let (ast, _grants) = crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
-            "this mana can't be spent to cast a nonartifact spell",
-        )
-        .expect("Hydraulic Helper's spend restriction must parse");
-        assert_eq!(
-            ast,
-            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
-                spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
-            }],
-            "negative nonartifact restriction must keep ability activation unrestricted"
-        );
-
-        // Lower through the real runtime resolver (state-independent for this variant).
         let state = GameState::new_two_player(42);
-        let runtime = crate::game::effects::mana::resolve_restrictions(&ast, &state, ObjectId(1));
-
-        // The produced {U} carries the lowered restriction.
-        let mut pool = ManaPool::default();
-        pool.add(ManaUnit {
-            color: ManaType::Blue,
-            source_id: ObjectId(1),
-            pip_id: crate::types::mana::ManaPipId(0),
-            supertype: None,
-            source_could_produce_two_or_more_colors: false,
-            restrictions: runtime,
-            grants: vec![],
-            expiry: None,
-        });
+        let source = ObjectId(1);
+        let legacy_definition: ManaSpendRestriction = serde_json::from_str(
+            r#"{"SpellTypeOrAbilityActivation":{"spell_type":"Artifact","ability":"Any"}}"#,
+        )
+        .unwrap();
+        let legacy_unit: ManaUnit = serde_json::from_str(
+            r#"{"color":"Blue","source_id":1,"restrictions":[{"OnlyForTypeSpellsOrAbilities":{"spell_type":"Artifact","ability":"Any"}}]}"#,
+        )
+        .unwrap();
+        let mut units = Vec::new();
+        for (text, scope) in [
+            (
+                "this mana can't be spent to cast a nonartifact spell",
+                AbilityActivationScope::AnyNonSpellPayment,
+            ),
+            (
+                "spend this mana only to cast an artifact spell or activate an ability",
+                AbilityActivationScope::Any,
+            ),
+        ] {
+            let (ast, _) = parse_mana_spend_restriction(text).expect("printed spend restriction");
+            assert_eq!(
+                ast,
+                vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type: "Artifact".to_string(),
+                    ability: scope,
+                }],
+            );
+            let restrictions =
+                crate::game::effects::mana::resolve_restrictions(&ast, &state, source);
+            let unit = ManaUnit::new(ManaType::Blue, source, false, restrictions);
+            let json = serde_json::to_value(&unit).unwrap();
+            assert_eq!(
+                json["restrictions"][0]["OnlyForTypeSpellsOrAbilities"]["ability"],
+                serde_json::to_value(scope).unwrap()
+            );
+            assert_eq!(serde_json::from_value::<ManaUnit>(json).unwrap(), unit);
+            units.push((unit, scope == AbilityActivationScope::AnyNonSpellPayment));
+        }
+        let restored_restrictions =
+            crate::game::effects::mana::resolve_restrictions(&[legacy_definition], &state, source);
+        assert_eq!(legacy_unit.restrictions, units[1].0.restrictions);
+        assert_eq!(restored_restrictions, units[1].0.restrictions);
+        units.push((legacy_unit, false));
 
         let one_blue = ManaCost::Cost {
             shards: vec![ManaCostShard::Blue],
             generic: 0,
         };
-
-        // (a) Casting a nonartifact spell with this mana is rejected.
         let instant = SpellMeta {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
@@ -9775,37 +9825,6 @@ mod tests {
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
         };
-        assert!(
-            !can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Spell(&instant)),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "a nonartifact (instant) spell must not be payable with artifact-restricted mana"
-        );
-
-        // (b) DISCRIMINATING: activating an ability with this mana is allowed,
-        //     regardless of the activating permanent's types.
-        let creature_types = vec!["Creature".to_string()];
-        let no_subtypes: Vec<String> = vec![];
-        assert!(
-            can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Activation {
-                    source_types: &creature_types,
-                    source_subtypes: &no_subtypes,
-                    ability_tag: None,
-                    mana_color_constraint:
-                        crate::types::mana::ActivationManaColorConstraint::Unrestricted,
-                }),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "ability activation must remain payable — the restriction governs spells only"
-        );
-
-        // Sanity: an artifact spell IS payable.
         let artifact = SpellMeta {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
@@ -9820,15 +9839,37 @@ mod tests {
             spend_only_on_x_colors: None,
             spend_only_on_x_generic_count: 0,
         };
-        assert!(
-            can_pay_for_spell(
-                &pool,
-                &one_blue,
-                Some(&PaymentContext::Spell(&artifact)),
-                crate::types::mana::CostPermissionContext::default(),
-            ),
-            "an artifact spell must be payable with the artifact-restricted mana"
-        );
+        let creature_types = ["Creature".to_string()];
+        let activation = PaymentContext::Activation {
+            source_types: &creature_types,
+            source_subtypes: &[],
+            ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
+        };
+        for (unit, allows_other_payments) in units {
+            let mut pool = ManaPool::default();
+            pool.add(unit);
+            let can_pay = |context: PaymentContext<'_>| {
+                can_pay_for_spell(
+                    &pool,
+                    &one_blue,
+                    Some(&context),
+                    crate::types::mana::CostPermissionContext::default(),
+                )
+            };
+            assert!(can_pay(PaymentContext::Spell(&artifact)));
+            assert!(!can_pay(PaymentContext::Spell(&instant)));
+            assert!(can_pay(activation));
+            assert_eq!(can_pay(PaymentContext::Effect), allows_other_payments);
+            assert_eq!(
+                can_pay(PaymentContext::SpecialAction(SpecialAction::UnlockDoor)),
+                allows_other_payments,
+            );
+            assert_eq!(
+                can_pay(PaymentContext::SpecialAction(SpecialAction::TurnFaceUp)),
+                allows_other_payments,
+            );
+        }
     }
 
     /// CR 106.6: Hydraulic Helper end-to-end through GameScenario + GameRunner —
@@ -9843,8 +9884,8 @@ mod tests {
     /// Discriminating: with the buggy `OnlyForSpellType("Artifact")` lowering,
     /// `allows_activation` returns false, `PassPriority` errors, and the driver's
     /// `.expect("finalizing the ability's mana payment must be accepted")` panics
-    /// — the test fails. Only the fix's `OnlyForTypeSpellsOrAbilities { ability:
-    /// Any }` lets the ability resolve and gain the life this asserts.
+    /// — the test fails. The legacy `Any` scope used in this fixture still lets
+    /// the ability resolve and gain the life this asserts.
     #[test]
     fn hydraulic_helper_restricted_mana_activates_ability_through_pipeline() {
         use crate::game::scenario::GameScenario;
@@ -9857,8 +9898,7 @@ mod tests {
         let sink = scenario
             .add_creature_from_oracle(p0, "Mana Sink", 1, 1, "{U}: You gain 1 life.")
             .id();
-        // Seed Hydraulic Helper's restricted {U} into P0's pool (the lowered form
-        // of "this mana can't be spent to cast a nonartifact spell").
+        // Seed the legacy form of Hydraulic Helper's restricted {U} into P0's pool.
         scenario.with_mana_pool(
             p0,
             vec![ManaUnit {

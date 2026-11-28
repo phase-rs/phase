@@ -3415,13 +3415,15 @@ export function manaRestrictionLabel(
   restriction: InteractionManaRestriction,
 ): string {
   switch (restriction.type) {
-    case "onlyForTypeSpellsOrAbilities":
-      return t(
-        restriction.data.ability === "ofSpellType"
-          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
-          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
-        { spellType: restriction.data.spellType },
-      );
+    case "onlyForTypeSpellsOrAbilities": {
+      const { ability, spellType } = restriction.data;
+      const labelKeys = {
+        ofSpellType: "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType",
+        any: "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        anyNonSpellPayment: "gamePage.manaRestrictions.cannotCastSpellsOutsideType",
+      } as const;
+      return t(labelKeys[ability], { spellType });
+    }
     case "onlyForSpell":
       return t("gamePage.manaRestrictions.onlyForSpell");
     case "onlyForActivation":

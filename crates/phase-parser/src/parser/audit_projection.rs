@@ -79,6 +79,7 @@ const TRIGGER_KEYS: &[&str] = &[
     "gotcha_condition",
     "expend_threshold",
     "attack_target_filter",
+    "attack_declaration_ordinal",
     "player_actions",
     "scry_bottom_count",
     "damage_amount",

@@ -1,14 +1,16 @@
 //! GitHub issue #3300 — Countering an opponent's spell must remove it from the stack.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::Effect;
+use engine::types::ability::{is_mana_ability, AbilityCost, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
-use engine::types::identifiers::CardId;
-use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const COUNTERSPELL_ORACLE: &str = "Counter target spell.";
@@ -89,19 +91,28 @@ fn counterspell_counters_opponent_spell_on_stack() {
     );
 }
 
+fn add_mana_leak(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario.add_basic_land(player, ManaColor::Blue);
+    scenario.add_basic_land(player, ManaColor::Blue);
+    scenario
+        .add_spell_to_hand_from_oracle(
+            player,
+            "Mana Leak",
+            true,
+            "Counter target spell unless its controller pays {3}.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .id()
+}
+
 #[test]
 fn mana_leak_counters_when_opponent_declines_to_pay() {
-    const MANA_LEAK: &str = "Counter target spell unless its controller pays {3}.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let mut leak = scenario.add_spell_to_hand_from_oracle(P0, "Mana Leak", true, MANA_LEAK);
-    leak.with_mana_cost(ManaCost::Cost {
-        generic: 1,
-        shards: vec![ManaCostShard::Blue],
-    });
-    let mana_leak = leak.id();
-    scenario.add_basic_land(P0, ManaColor::Blue);
-    scenario.add_basic_land(P0, ManaColor::Blue);
+    let mana_leak = add_mana_leak(&mut scenario, P0);
 
     let mut runner = scenario.build();
     let opponent_spell = put_instant_on_stack(&mut runner, P1);
@@ -132,6 +143,127 @@ fn mana_leak_counters_when_opponent_declines_to_pay() {
         runner.state().objects.get(&opponent_spell).map(|o| o.zone),
         Some(Zone::Graveyard)
     );
+}
+
+/// CR 106.6 + CR 118.12a: a restriction on casting nonartifact spells permits
+/// Mana Leak's resolution cost. A cast-or-activation permission excludes it.
+#[test]
+fn mana_leak_unless_payment_respects_spell_restriction_polarity() {
+    for (name, oracle, toughness, pays) in [
+        (
+            "Guidelight Optimizer",
+            "{T}: Add {U}. Spend this mana only to cast an artifact spell or activate an ability.",
+            1,
+            false,
+        ),
+        (
+            "Hydraulic Helper",
+            "Defender
+{T}: Add {U}. This mana can't be spent to cast a nonartifact spell.",
+            3,
+            true,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mana_leak = add_mana_leak(&mut scenario, P0);
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P1, "Shock", true, "Shock deals 2 damage to any target.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        let producer = scenario
+            .add_creature(P1, name, 2, toughness)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Robot"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .from_oracle_text(oracle)
+            .id();
+        scenario.with_mana_pool(
+            P1,
+            [ManaType::Red, ManaType::Colorless, ManaType::Colorless]
+                .into_iter()
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P0 passes to P1");
+        runner.cast(shock).target_player(P0).commit();
+        runner
+            .act(GameAction::PassPriority)
+            .expect("P1 passes over Shock");
+        runner.cast(mana_leak).target_object(shock).commit();
+        for player in [P0, P1] {
+            assert_eq!(runner.state().waiting_for, WaitingFor::Priority { player });
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass over Mana Leak");
+        }
+
+        let prompt = runner.state().waiting_for.clone();
+        assert!(
+            matches!(
+                &prompt,
+                WaitingFor::UnlessPayment { player: P1, cost: AbilityCost::Mana { cost },
+                    affected_object: Some(target), .. }
+                if *cost == ManaCost::generic(3) && *target == shock
+            ),
+            "expected Mana Leak's {{3}} prompt for Shock's controller, got {prompt:?}"
+        );
+        let ability_index = runner.state().objects[&producer]
+            .abilities
+            .iter()
+            .position(is_mana_ability)
+            .expect("printed mana ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: producer,
+                ability_index,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("activate the Robot during Mana Leak's payment");
+        assert_eq!(runner.state().waiting_for, prompt);
+        assert!(runner.state().objects[&producer].tapped);
+        let pool = &runner.state().players[1].mana_pool;
+        assert_eq!(pool.total(), 3);
+        assert_eq!(pool.count_where(|unit| unit.restrictions.is_empty()), 2);
+        assert_eq!(
+            pool.count_where(|unit| unit.source_id == producer
+                && unit.color == ManaType::Blue
+                && !unit.restrictions.is_empty()),
+            1
+        );
+
+        let result = runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("attempt to pay {{3}}");
+        let state = runner.state();
+        let stack: Vec<_> = state.stack.iter().map(|entry| entry.id).collect();
+        assert_eq!(
+            stack.as_slice(),
+            pays.then_some(shock).as_slice(),
+            "{name}: stack after payment"
+        );
+        let (shock_zone, mana_left) = if pays {
+            (Zone::Stack, 0)
+        } else {
+            (Zone::Graveyard, 3)
+        };
+        assert_eq!(state.objects[&shock].zone, shock_zone);
+        assert_eq!(state.players[1].mana_pool.total(), mana_left);
+        assert_eq!(result.events.iter().filter(|event| matches!(event,
+            GameEvent::SpellCountered { object_id, countered_by, countered_by_controller: P0 }
+            if *object_id == shock && *countered_by == mana_leak
+        )).count(), usize::from(!pays));
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    }
 }
 
 /// CR 117.7 + CR 701.6a: Counterspell cast in response must counter the

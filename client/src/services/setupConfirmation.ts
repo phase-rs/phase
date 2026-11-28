@@ -13,8 +13,9 @@ import { frameType } from "./stateCodecSocket";
  * interval: a delivered bootstrap confirms, and a terminal `decodeFailure`
  * closes the candidate with its failure recorded for the episode. A game
  * reconnect can decode its bootstrap `Full` inside the interval; a draft
- * reattach is answered by a plain frame first (`DraftMatchStart`,
- * `DraftStateUpdate`), so with this server no decode is in flight there.
+ * reattach is answered by a plain frame first (`DraftMatchStart`, or its own
+ * `DraftCommandAccepted` or `DraftCommandRefused`), so with this server no
+ * decode is in flight there.
  */
 export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
 
@@ -76,7 +77,7 @@ export const SETUP_BUFFER_MAX_TEXT_BYTES = 16 * 1024 * 1024;
  */
 const BOOTSTRAP_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
   game: new Set(["GameStarted", "StateUpdate"]),
-  draft: new Set(["GameStarted", "DraftStateUpdate", "DraftJoined"]),
+  draft: new Set(["GameStarted", "DraftStateUpdate", "DraftCommandAccepted"]),
 };
 
 /**
@@ -138,10 +139,10 @@ export type SetupFrameClass =
   /** `Error`: the server refused the setup and installed nothing. Settles the interval. */
   | { readonly kind: "refusal"; readonly refusal: SetupRefusal; readonly message: SetupFrameMessage }
   /**
-   * Draft `DraftActionRejected`: the server's answer on the candidate, which may
-   * already hold the draft seat (see {@link classifySetupFrame}). It adopts the
-   * candidate exactly as the merge base did, and the rejection then replays to
-   * reject the reattach.
+   * Draft `DraftCommandRefused` carrying the reattach's own id: the server's
+   * answer on the candidate, which may already hold the draft seat (see
+   * {@link classifySetupFrame}). It adopts the candidate, and the refusal is
+   * then dispatched there to reject the reattach.
    */
   | { readonly kind: "answered"; readonly message: SetupFrameMessage }
   /** Anything else: neither adopts nor refuses; kept in order for the adopted socket. */
@@ -161,30 +162,53 @@ export type SetupFrameClass =
  * Refusal, game: `Error` only (:10563-10583, the `ReconnectOutcome::Err` reply
  * at :10840-10843, and the mode, wire and authority gates at :10062-10090).
  *
- * Positive bootstrap, draft: `DraftStateUpdate` (`attach_current_draft_match`
- * :2644, :2678, :2753, :2767, :2785, :2815) and `DraftMatchStart` (:2795).
- * Refusal, draft: `Error` from the mode and wire gates (:10062-10076), which
- * run before dispatch, so nothing was installed.
- * Answered, draft: `DraftActionRejected`. It cannot tell the client who owns
- * the seat: the handler sends it for refusals before anything is installed
- * (:13037, :13049, and `reconnect_draft_seat` errors before :2584, answered at
- * :13100), for failures of `attach_current_draft_match` AFTER
- * `reconnect_draft_seat` installed the candidate as the seat's sender (:2584)
- * and bound its identity (:2597-2599), answered alone at :13089-13093, and right
- * before the `DraftStateUpdate` of a reattach that succeeded (:2750-2753,
- * :2764-2767, :2782-2785). Retiring the candidate would drop a seat the server
- * gave it, and nothing retries a reattach, so the candidate is adopted as the
- * merge base adopted it, and the replayed rejection rejects the reattach.
+ * Draft: a reattach is answered by its own correlated result, sent only to the
+ * requesting socket. A reattach into an active match is answered
+ * `DraftMatchStart`, `GameStarted`, then `DraftCommandAccepted` (`Reconnected`);
+ * one with no match by that result alone; one whose match cannot attach by
+ * `DraftCommandRefused` after the seat was already installed, then an
+ * unsolicited `DraftStateUpdate`. Every refusal of the reattach, before or in
+ * dispatch, is that correlated refusal.
+ * Positive bootstrap, draft: `DraftCommandAccepted` carrying the reattach's own
+ * id whose result is `Reconnected`, the reattach's own kind, and
+ * `DraftMatchStart`, which is sent only to the seat's current sender and
+ * so proves the seat is routed to the candidate (it settles nothing: the
+ * reattach still waits for its result).
+ * Answered, draft: `DraftCommandRefused` carrying the reattach's own id. It
+ * cannot tell the client whether the server installed the candidate, so
+ * retiring it could drop a seat the server gave it, and nothing retries a
+ * reattach: the candidate is adopted, and the dispatched refusal rejects the
+ * reattach.
+ * A `DraftStateUpdate` is never the reattach's answer, a result carrying
+ * another id answers another command, and an accepted result of another kind,
+ * or one without a result, is not the reattach's: each is `other`, so the
+ * bound still runs.
+ * Refusal, draft: `Error`, which answers only a frame the server could not
+ * decode, so nothing was installed.
  *
  * Any other frame (pings, slot updates, lobby fan-out) is neither: it is kept
  * in order for the adopted socket and does not settle the interval.
  */
 const POSITIVE_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
   game: new Set(["GameStarted", "GameCreated", "SessionAttached"]),
-  draft: new Set(["DraftStateUpdate", "DraftMatchStart"]),
+  draft: new Set(["DraftMatchStart", "DraftCommandAccepted"]),
 };
 
-export function classifySetupFrame(surface: "game" | "draft", text: unknown): SetupFrameClass {
+/**
+ * Draft results that settle the interval only when they carry the reattach's own id
+ * (an acceptance only when its result is `Reconnected`).
+ */
+const CORRELATED_DRAFT_RESULTS: ReadonlySet<string> = new Set(["DraftCommandAccepted", "DraftCommandRefused"]);
+
+/**
+ * `draftRequestId` is the draft reattach's own request id: a draft result
+ * classifies only when it carries it. The game surface passes none.
+ */
+export function classifySetupFrame(
+  surface: "game" | "draft",
+  text: unknown,
+  draftRequestId?: number,
+): SetupFrameClass {
   if (typeof text !== "string") return { kind: "other" };
   // The tag comes from the canonical type-first envelope without materializing
   // the frame, so an unrelated frame is never parsed here. A frame whose tag can
@@ -194,7 +218,7 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
   // dispatches after adoption, so the bootstrap is still materialized once.
   const type = frameType(text);
   const settling = POSITIVE_FRAMES[surface].has(type)
-    || (surface === "draft" && type === "DraftActionRejected")
+    || (surface === "draft" && type === "DraftCommandRefused")
     || type === "Error"
     || (surface === "game" && type === "StateWithheld");
   if (!settling) return { kind: "other" };
@@ -208,8 +232,16 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
     return { kind: "other" };
   }
   const message = parsed as SetupFrameMessage;
+  if (surface === "draft" && CORRELATED_DRAFT_RESULTS.has(type)) {
+    const requestId = (message.data as { request_id?: unknown } | null | undefined)?.request_id;
+    if (draftRequestId === undefined || requestId !== draftRequestId) return { kind: "other" };
+    if (type === "DraftCommandAccepted"
+      && (message.data as { result?: { type?: unknown } } | null | undefined)?.result?.type !== "Reconnected") {
+      return { kind: "other" };
+    }
+  }
   if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive", message };
-  if (type === "DraftActionRejected") return { kind: "answered", message };
+  if (type === "DraftCommandRefused") return { kind: "answered", message };
   const data = (message.data ?? {}) as { message?: unknown; code?: unknown; withheld?: unknown };
   if (type === "StateWithheld") {
     const withheld = data.withheld as { type?: unknown } | null | undefined;
@@ -233,14 +265,15 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
  * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
  * neither the incumbent nor the candidate is known to own the seat. The
  * candidate is adopted on its positive bootstrap (or, for a draft, on the
- * server's `DraftActionRejected` answer); an `Error` refusal, a close, the
- * bound or an abort first retires both sockets.
+ * server's correlated refusal of the reattach); an `Error` refusal, a close,
+ * the bound or an abort first retires both sockets.
  *
  * `SetupConfirmation` is the single owner of that interval for both server
  * adapters. It settles exactly once, with whichever of these happens first:
  *
  *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set,
- *    or a draft candidate the server's answer (see {@link classifySetupFrame});
+ *    or a draft candidate the server's refusal of the reattach (see
+ *    {@link classifySetupFrame});
  *  - `refused`: the candidate delivered the server's `Error` answer to the
  *    setup (the server installed nothing, but the incumbent's standing is no
  *    longer known either, so it is treated like a close that carries a reason);
@@ -253,8 +286,9 @@ export function classifySetupFrame(surface: "game" | "draft", text: unknown): Se
  *    release the interval's gate at once, and the receipt's fate (bounded by
  *    this owner's timeout) still decides the incumbent.
  *
- * A draft `DraftActionRejected` also confirms: it is the server's answer on a
- * candidate that may already hold the seat (see {@link classifySetupFrame}).
+ * A draft `DraftCommandRefused` carrying the reattach's id also confirms: it is
+ * the server's answer on a candidate that may already hold the seat (see
+ * {@link classifySetupFrame}).
  */
 export class SetupConfirmation {
   /** Resolves once, with the first outcome. Never rejects. */
@@ -304,12 +338,13 @@ export class SetupConfirmation {
    * Feeds one frame the candidate received during the interval. Returns the
    * envelope it parsed to settle the interval, which the adapter must dispatch
    * instead of parsing the frame again; `undefined` when it parsed nothing.
+   * A draft reattach passes its own request id (see {@link classifySetupFrame}).
    */
-  observe(surface: "game" | "draft", data: unknown): SetupFrameMessage | undefined {
+  observe(surface: "game" | "draft", data: unknown, draftRequestId?: number): SetupFrameMessage | undefined {
     // A settled interval classifies nothing more: later frames only wait, in
     // order, for the adopted socket's own handler.
     if (this.outcome !== null) return undefined;
-    const frame = classifySetupFrame(surface, data);
+    const frame = classifySetupFrame(surface, data, draftRequestId);
     switch (frame.kind) {
       case "positive":
       case "answered":

@@ -16,7 +16,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::identifiers::TrackedSetId;
-use crate::types::keywords::{CompanionCondition, Keyword};
+use crate::types::keywords::{CompanionCondition, Keyword, ReplicateCost, ReplicateEnergy};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -5239,16 +5239,6 @@ fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
-/// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
-/// the `{T}: Add {U}` mana ability carries the negative spend restriction
-/// ("This mana can't be spent to cast a nonartifact spell") lowered to
-/// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
-/// "Artifact", ability: Any }`. The restriction governs only what *spells*
-/// the mana may cast (artifact spells); it must leave ability activation
-/// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
-/// lowering would wrongly forbid paying for any ability, so the `ability: Any`
-/// scope is exactly what keeps ability activation payable.
 /// CR 613.4c + CR 701.10a: Tifa's Limit Break (Tiered) — all three tiers
 /// parse with zero Unimplemented. Somersault → `Pump`, Meteor Strikes →
 /// `DoublePT factor:2`, Final Heaven → `DoublePT factor:3`. The discriminating
@@ -5379,6 +5369,8 @@ fn crew_history_quantity_guard_is_typed_and_position_independent() {
     );
 }
 
+/// CR 106.6 + CR 702.3a: Hydraulic Helper parses Defender and retains its
+/// nonartifact spell prohibition as `AnyNonSpellPayment` on the mana ability.
 #[test]
 fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
     use crate::types::ability::{ManaProduction, ManaSpendRestriction};
@@ -5421,10 +5413,9 @@ fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
         restrictions,
         &[ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
-        "negative nonartifact restriction must lower to \
-             SpellTypeOrAbilityActivation so ability activation stays unrestricted"
+        "negative nonartifact restriction must leave all non-spell payments eligible"
     );
 }
 
@@ -11819,7 +11810,7 @@ fn jetfire_front_face_activated_ability() {
         restrictions,
         &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
         "the following sentence must fold in the 'nonartifact' spend restriction"
     );
@@ -21512,10 +21503,8 @@ fn mana_spend_restriction_spell_only() {
 #[test]
 fn mana_spend_restriction_negative_nonartifact() {
     // CR 106.6: "this mana can't be spent to cast nonartifact spells" (Karn,
-    // Legacy Reforged) restricts spell-casting to artifact spells but leaves
-    // ability activation unrestricted — so it lowers to the OR variant with
-    // `ability: Any`, NOT a spells-only `SpellType` (which would wrongly
-    // forbid paying for abilities).
+    // Legacy Reforged) restricts spell-casting to artifact spells and leaves
+    // all non-spell payments eligible.
     use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
     use crate::types::ability::ManaSpendRestriction;
     use crate::types::mana::AbilityActivationScope;
@@ -21526,7 +21515,7 @@ fn mana_spend_restriction_negative_nonartifact() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21545,7 +21534,7 @@ fn mana_spend_restriction_negative_article_singular_nonartifact() {
         Some(
             crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::Any,
+                ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
             }
         )
     );
@@ -21565,7 +21554,7 @@ fn mana_spend_restriction_negative_noncreature() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Creature".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21592,7 +21581,7 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
         if let Effect::Mana { restrictions, .. } = effect {
             if restrictions.contains(&ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }) {
                 *found = true;
             }
@@ -31747,6 +31736,161 @@ fn t123_kicker_family_valid_lines_still_route() {
         "Replicate {{2}} must yield a Replicate keyword, got {:?}",
         replicate.extracted_keywords
     );
+}
+
+#[test]
+fn printed_non_mana_replicate_extracts_the_cost_and_keeps_the_spell() {
+    let reminder = "(When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
+    for (name, subtype, effect, expected_effects) in [
+        (
+            "Exterminate!",
+            Some("Dalek"),
+            "Destroy target creature. Its controller loses 3 life.",
+            &["Destroy", "LoseLife"][..],
+        ),
+        (
+            "Psionic Ritual",
+            Some("Horror"),
+            "Exile target instant or sorcery card from a graveyard and copy it. You may cast the copy without paying its mana cost.\nExile Psionic Ritual.",
+            &["ChangeZone", "CastCopyOfCard", "ChangeZone"][..],
+        ),
+        (
+            "Reiterating Bolt",
+            None,
+            "Reiterating Bolt deals 3 damage to target creature or planeswalker.",
+            &["DealDamage"][..],
+        ),
+    ] {
+        let (cost_text, expected) = match subtype {
+            Some(subtype) => (
+                format!("Tap an untapped {subtype} you control"),
+                ReplicateCost::TapOne(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype(subtype.into()))
+                        .controller(ControllerRef::You),
+                ))),
+            ),
+            None => (
+                "Pay {E}{E}{E}".into(),
+                ReplicateCost::PayEnergy(ReplicateEnergy::new(3).unwrap()),
+            ),
+        };
+        let text = format!("Replicate—{cost_text}. {reminder}\n{effect}");
+        let parsed =
+            parse_oracle_text(&text, name, &["replicate".into()], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.extracted_keywords, [Keyword::Replicate(expected)], "{name}");
+        let effects: Vec<_> = parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| std::iter::successors(Some(ability), |def| def.sub_ability.as_deref()))
+            .map(|ability| crate::types::ability::effect_variant_name(&ability.effect))
+            .collect();
+        assert!(!effects.contains(&"Unimplemented"), "{name}: {parsed:#?}");
+        assert_eq!(effects, expected_effects, "{name}");
+    }
+}
+
+#[test]
+fn unsupported_replicate_costs_stay_strict_gaps_even_with_keyword_metadata() {
+    for declaration in [
+        "Replicate",
+        "Replicate—Tap an untapped Dalek you control, Discard a card.",
+        "Replicate—Tap X untapped Daleks you control.",
+        "Replicate—Tap two untapped Daleks you control.",
+        "Replicate—Tap an untapped Wug you control.",
+        "Replicate—Tap an untapped Dalek you control if it attacked.",
+        "Replicate—Pay X {E}.",
+        "Replicate—Pay three energy {E}.",
+        "Replicate—Pay {E}{E}{E} and discard a card.",
+        "Replicate {1}{R} and discard a card.",
+        "Replicate {4294967295}{1}",
+    ] {
+        let parsed = t123_parse(declaration, &["replicate"], &["Sorcery"]);
+        t123_assert_not_swallowed(declaration, &parsed);
+        assert!(parsed.extracted_keywords.is_empty(), "{declaration}");
+    }
+}
+
+#[test]
+fn printed_and_granted_mana_replicate_keep_their_individual_prices() {
+    for (name, oracle, keywords, types, subtypes, printed, granted) in [
+        (
+            "Pyromatics",
+            "Replicate {1}{R} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nPyromatics deals 1 damage to any target.",
+            &[][..],
+            &["Instant"][..],
+            &[][..],
+            Some("{1}{R}"),
+            None,
+        ),
+        (
+            "Djinn Illuminatus",
+            "({U/R} can be paid with either {U} or {R}.)\nFlying\nEach instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Djinn"][..],
+            None,
+            Some(ManaCost::SelfManaCost),
+        ),
+        (
+            "Hatchery Sliver",
+            "Replicate {1}{G} (When you cast this spell, copy it for each time you paid its replicate cost.)\nEach Sliver spell you cast has replicate. The replicate cost is equal to its mana cost. (A copy of a permanent spell becomes a token.)",
+            &[][..],
+            &["Creature"][..],
+            &["Sliver"][..],
+            Some("{1}{G}"),
+            Some(ManaCost::SelfManaCost),
+        ),
+        (
+            "Hugh, First of Many",
+            "Artifact spells you cast have replicate {2}{U}. (Whenever you cast an artifact spell, copy it for each time you paid its replicate cost. Each copy becomes a token.)",
+            &[][..],
+            &["Creature"][..],
+            &["Human"][..],
+            None,
+            Some(crate::types::mana::parse_mtgjson_mana_cost("{2}{U}")),
+        ),
+        (
+            "Threefold Signal",
+            "When this artifact enters, scry 3.\nEach spell you cast that's exactly three colors has replicate {3}. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies. A copy of a permanent spell becomes a token.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            None,
+            Some(crate::types::mana::parse_mtgjson_mana_cost("{3}")),
+        ),
+    ] {
+        let parsed = parse(oracle, name, keywords, types, subtypes);
+        assert_eq!(t123_unimplemented_count(&parsed), 0, "{name}: {parsed:#?}");
+        let prices: Vec<_> = parsed
+            .extracted_keywords
+            .iter()
+            .filter_map(|keyword| {
+                let Keyword::Replicate(ReplicateCost::Mana(price)) = keyword else {
+                    return None;
+                };
+                Some(price.clone())
+            })
+            .collect();
+        assert_eq!(
+            prices,
+            printed.map(crate::types::mana::parse_mtgjson_mana_cost).as_slice(),
+            "{name}"
+        );
+        let grants: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter_map(|definition| {
+                let StaticMode::CastWithKeyword {
+                    keyword: Keyword::Replicate(ReplicateCost::Mana(price)),
+                } = &definition.mode
+                else {
+                    return None;
+                };
+                Some(price.clone())
+            })
+            .collect();
+        assert_eq!(grants, granted.as_slice(), "{name}");
+    }
 }
 
 /// THE SHADOW witness (priority 1b). This is the finding the census did not

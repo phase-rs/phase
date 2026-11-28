@@ -1290,6 +1290,7 @@
       "onlyForSpellColor": "Tylko na czary w kolorze {{color}}.",
       "onlyForSpellFromZone": "Tylko na czary {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Nie można wydać na rzucanie czarów z {{zone}}.",
+      "cannotCastSpellsOutsideType": "Nie można wydać tej many na rzucanie czarów, które nie są typu {{spellType}}.",
       "onlyForFaceDownSpell": "Tylko na czary zakryte.",
       "onlyForAny": "Tylko do jednego z tych zastosowań: {{restrictions}}",
       "onlyForSpecialAction": "Tylko do specjalnej akcji {{action}}.",
@@ -2179,6 +2180,14 @@
     "attachments": "Z: {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Zapłacić koszt replikacji?",
+      "again": "Ponownie zapłacić koszt replikacji? (Zapłacono {{times}} razy)",
+      "decline": "Gotowe",
+      "tapSubtype": "Przekręć nieprzekręconą istotę typu {{subtype}}, którą kontrolujesz",
+      "tapCreature": "Przekręć nieprzekręconą istotę",
+      "payEnergy": "Zapłać {{amount}} energii"
+    },
     "gift": {
       "title": "Obiecać prezent?",
       "pay": "Obiecaj {{gift}}",

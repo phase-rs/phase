@@ -6,7 +6,7 @@ use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
-use nom::sequence::{pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_cost::parse_fixed_blight;
@@ -179,19 +179,27 @@ fn strip_search_result_subject(lower: &str) -> &str {
 }
 
 fn is_search_result_reveal_clause(lower: &str) -> bool {
-    all_consuming((
+    search_result_reveal_number(lower).is_some()
+}
+
+pub(super) fn search_result_reveal_number(lower: &str) -> Option<AnaphorNumber> {
+    all_consuming(delimited(
         tag::<_, _, OracleError<'_>>("reveal "),
         alt((
-            tag("that card"),
-            tag("those cards"),
-            tag("the card"),
-            tag("them"),
-            tag("it"),
+            value(
+                AnaphorNumber::Singular,
+                alt((tag("that card"), tag("the card"), tag("it"))),
+            ),
+            value(
+                AnaphorNumber::Plural,
+                alt((tag("those cards"), tag("them"))),
+            ),
         )),
         opt(tag(".")),
     ))
     .parse(lower.trim())
-    .is_ok()
+    .ok()
+    .map(|(_, number)| number)
 }
 
 /// CR 701.23a + CR 406.3: compose the optional continuation connector, the
@@ -225,14 +233,31 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
-fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
+#[derive(Clone, Copy)]
+pub(super) enum SearchResultReferent {
+    ThatCard,
+    It,
+    Them,
+    ThoseCards,
+}
+
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, SearchResultReferent> {
     alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
+        value(SearchResultReferent::ThatCard, tag("that card ")),
+        value(SearchResultReferent::It, tag("it ")),
+        value(SearchResultReferent::Them, tag("them ")),
+        value(SearchResultReferent::ThoseCards, tag("those cards ")),
     ))
     .parse(input)
+}
+
+pub(super) fn parse_put_into_your_hand_prefix(
+    input: &str,
+) -> OracleResult<'_, SearchResultReferent> {
+    let (input, _) = tag("put ").parse(input)?;
+    let (input, referent) = parse_search_result_referent(input)?;
+    let (input, _) = tag("into your hand").parse(input)?;
+    Ok((input, referent))
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
