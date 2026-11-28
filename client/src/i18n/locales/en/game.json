@@ -2221,6 +2221,14 @@
     "attachments": "With {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Pay the replicate cost?",
+      "again": "Pay the replicate cost again? (Paid {{times}}×)",
+      "decline": "Done",
+      "tapSubtype": "Tap an untapped {{subtype}} you control",
+      "tapCreature": "Tap an untapped creature",
+      "payEnergy": "Pay {{amount}} energy"
+    },
     "gift": {
       "title": "Promise a gift?",
       "pay": "Promise {{gift}}",

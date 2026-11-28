@@ -20334,6 +20334,49 @@ impl BlightCount {
     }
 }
 
+/// Localizable description of a fixed cost to tap one untapped creature.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub(super) enum TapOneDisplay<'a> {
+    ControlledSubtype { subtype: &'a str },
+    Creature,
+}
+
+impl<'a> TapOneDisplay<'a> {
+    pub(super) fn from_filter(filter: &'a TargetFilter) -> Self {
+        match filter {
+            TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => typed
+                .get_subtype()
+                .map_or(Self::Creature, |subtype| Self::ControlledSubtype {
+                    subtype,
+                }),
+            _ => Self::Creature,
+        }
+    }
+}
+
+fn serialize_tap_creatures<S: serde::Serializer>(
+    requirement: &TapCreaturesRequirement,
+    filter: &TargetFilter,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Payload<'a> {
+        requirement: &'a TapCreaturesRequirement,
+        filter: &'a TargetFilter,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tap_display: Option<TapOneDisplay<'a>>,
+    }
+
+    Payload {
+        requirement,
+        filter,
+        tap_display: matches!(requirement, TapCreaturesRequirement::Count { count: 1 })
+            .then(|| TapOneDisplay::from_filter(filter)),
+    }
+    .serialize(serializer)
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20437,6 +20480,7 @@ pub enum AbilityCost {
     /// constraint (Crew CR 702.122a / Saddle CR 702.171a / Teamwork). Legacy JSON
     /// that carries a bare `count` field (no `requirement` discriminant)
     /// deserializes into `Count { count }` via `deserialize_tap_creatures_requirement`.
+    #[serde(serialize_with = "serialize_tap_creatures")]
     TapCreatures {
         #[serde(
             default,
@@ -21786,6 +21830,7 @@ pub enum AdditionalCostOrigin {
     Offspring,
     Squad,
     Replicate,
+    Conspire,
     /// CR 702.166a: Bargain's optional sacrifice of an artifact, enchantment,
     /// or token. A dedicated origin prevents an unrelated additional cost from
     /// satisfying an "if it was bargained" rider.

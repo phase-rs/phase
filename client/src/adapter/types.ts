@@ -2610,7 +2610,8 @@ export interface PendingCast {
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 601.2b + CR 601.2h: creatures selected before targets for a spell tap
   // cost, tapped at the payment commit. Absent when none.
-  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost }[];
+  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost; replicate_ordinal?: number }[];
+  unpaid_replicate_energy?: number;
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2789,7 +2790,11 @@ export type AdditionalCost =
   | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
-export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+export type SerializedAbilityCost = { type: string; tap_display?: TapOneDisplay; [key: string]: unknown };
+
+export type TapOneDisplay =
+  | { type: "ControlledSubtype"; subtype: string }
+  | { type: "Creature" };
 
 /**
  * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in

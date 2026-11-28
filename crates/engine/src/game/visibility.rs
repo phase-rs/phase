@@ -9517,6 +9517,7 @@ mod tests {
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
             deferred_tapped_permanents: Vec::new(),
+            unpaid_replicate_energy: 0,
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

@@ -2189,6 +2189,14 @@
     "viewBoardThenTarget": "查看{{name}}的战场（再次点击以{{name}}为目标）"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "支付复诵费用？",
+      "again": "再次支付复诵费用？（已支付{{times}}次）",
+      "decline": "完成",
+      "tapSubtype": "横置一个由你操控且未横置的{{subtype}}",
+      "tapCreature": "横置一个未横置的生物",
+      "payEnergy": "支付{{amount}}点能量"
+    },
     "gift": {
       "decline": "不承诺施放",
       "kind": {

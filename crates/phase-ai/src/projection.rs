@@ -19,7 +19,8 @@ use engine::game::combat::AttackTarget;
 use engine::game::engine::{apply_interaction_for_simulation, EngineError};
 use engine::game::priority;
 use engine::game::turn_control;
-use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
+use engine::types::ability::{AbilityCost, AdditionalCost, AdditionalCostOrigin};
+use engine::types::game_state::{CostResume, ManaChoice, ManaChoicePrompt};
 use engine::types::{
     CoreType, GameAction, GameState, ObjectId, PayCostKind, Phase, PlayerId, WaitingFor,
 };
@@ -493,6 +494,24 @@ fn resolve_choice(
                 })?
         }
 
+        // CR 118.3 + CR 702.56a: reserve the engine-issued singleton for the
+        // Replicate cost currently being announced.
+        WaitingFor::PayCost {
+            kind: PayCostKind::TapCreatures { .. },
+            resume: CostResume::Spell { spell } | CostResume::SpellCost { spell, .. },
+            ..
+        } if spell
+            .additional_cost_queue
+            .first()
+            .is_some_and(|instance| instance.origin == AdditionalCostOrigin::Replicate) =>
+        {
+            actions
+                .iter()
+                .find(|action| matches!(action, GameAction::SelectCards { .. }))
+                .cloned()
+                .ok_or(BailReason::NoLegalManaPayment)?
+        }
+
         // CR 118.3 + CR 605.3b: ReturnToHand, Behold, and TapCreatures cost
         // payments project as "first legal payment" (matching the pre-collapse
         // behavior — Discard / Sacrifice / Exile / RemoveCounter PayCost kinds
@@ -559,6 +578,182 @@ fn resolve_choice(
             .last()
             .cloned()
             .ok_or(BailReason::NoLegalManaPayment)?,
+
+        // CR 702.56a: project an issued non-mana Replicate election.
+        WaitingFor::OptionalCostChoice {
+            origin: AdditionalCostOrigin::Replicate,
+            cost:
+                AdditionalCost::Optional {
+                    cost: AbilityCost::TapCreatures { .. } | AbilityCost::PayEnergy { .. },
+                    ..
+                },
+            ..
+        } => actions
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::DecideOptionalCost { index } => Some((*index, action)),
+                GameAction::PassPriority
+                | GameAction::ChooseMeldPair { .. }
+                | GameAction::ChooseEntryAttackTarget { .. }
+                | GameAction::PlayLand { .. }
+                | GameAction::CastSpell { .. }
+                | GameAction::Foretell { .. }
+                | GameAction::ActivateAbility { .. }
+                | GameAction::DeclareAttackers { .. }
+                | GameAction::DeclareBlockers { .. }
+                | GameAction::ChooseUntap { .. }
+                | GameAction::ChooseExert { .. }
+                | GameAction::ChooseEnlist { .. }
+                | GameAction::ChooseClashOpponent { .. }
+                | GameAction::ChooseZoneOpponentChooser { .. }
+                | GameAction::ChoosePileOpponent { .. }
+                | GameAction::ChooseAnnouncingOpponent { .. }
+                | GameAction::ChooseGiftRecipient { .. }
+                | GameAction::ChooseAssistPlayer { .. }
+                | GameAction::CommitAssistPayment { .. }
+                | GameAction::MulliganDecision { .. }
+                | GameAction::ReorderHand { .. }
+                | GameAction::TapLandForMana { .. }
+                | GameAction::ActivateManaSource { .. }
+                | GameAction::BackToManaPayment
+                | GameAction::UntapLandForMana { .. }
+                | GameAction::SpendPoolMana { .. }
+                | GameAction::UnspendPoolMana { .. }
+                | GameAction::SelectCards { .. }
+                | GameAction::ChooseRemoveCounterCostDistribution { .. }
+                | GameAction::SelectCoinFlips { .. }
+                | GameAction::SelectDieRolls { .. }
+                | GameAction::ChooseOutsideGameCards { .. }
+                | GameAction::SelectTargets { .. }
+                | GameAction::ChooseTarget { .. }
+                | GameAction::ChooseReplacement { .. }
+                | GameAction::ChooseReplacementAndRemember { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::ChooseEntryController { .. }
+                | GameAction::OrderTriggers { .. }
+                | GameAction::OrderCostReductions { .. }
+                | GameAction::CancelCast
+                | GameAction::Equip { .. }
+                | GameAction::CrewVehicle { .. }
+                | GameAction::ActivateStation { .. }
+                | GameAction::SaddleMount { .. }
+                | GameAction::Transform { .. }
+                | GameAction::PlayFaceDown { .. }
+                | GameAction::TurnFaceUp { .. }
+                | GameAction::SubmitSideboard { .. }
+                | GameAction::ChoosePlayDraw { .. }
+                | GameAction::ChooseStartingPlayer { .. }
+                | GameAction::ChooseOption { .. }
+                | GameAction::SubmitVoteCandidate { .. }
+                | GameAction::SubmitSpellbookDraft { .. }
+                | GameAction::SubmitPilePartition { .. }
+                | GameAction::ChoosePile { .. }
+                | GameAction::ChooseBranch { .. }
+                | GameAction::SubmitLifeRedistribution { .. }
+                | GameAction::ChooseDamageSource { .. }
+                | GameAction::SelectModes { .. }
+                | GameAction::ChooseAdventureFace { .. }
+                | GameAction::ChooseModalFace { .. }
+                | GameAction::ChooseAlternativeCast { .. }
+                | GameAction::ChooseCastingVariant { .. }
+                | GameAction::KeepAllCopyTargets
+                | GameAction::ChoosePermanentTypeSlot { .. }
+                | GameAction::ActivateNinjutsu { .. }
+                | GameAction::CastSpellAsSneak { .. }
+                | GameAction::CastSpellAsWebSlinging { .. }
+                | GameAction::CastSpellForFree { .. }
+                | GameAction::CastSpellAsMiracle { .. }
+                | GameAction::CastSpellAsMadness { .. }
+                | GameAction::DecideOptionalEffect { .. }
+                | GameAction::ChooseResolutionOptionalPaymentBranch { .. }
+                | GameAction::RespondToSpliceOffer { .. }
+                | GameAction::DecideOptionalEffectAndRemember { .. }
+                | GameAction::PayUnlessCost { .. }
+                | GameAction::ChooseUnlessCostBranch { .. }
+                | GameAction::ChooseActivationCostBranch { .. }
+                | GameAction::PayCombatTax { .. }
+                | GameAction::ChooseRingBearer { .. }
+                | GameAction::ChoosePair { .. }
+                | GameAction::ChooseDungeon { .. }
+                | GameAction::ChooseDungeonRoom { .. }
+                | GameAction::UnlockRoomDoor { .. }
+                | GameAction::RollPlanarDie
+                | GameAction::ChooseRoomDoor { .. }
+                | GameAction::TapForConvoke { .. }
+                | GameAction::HarmonizeTap { .. }
+                | GameAction::ChooseSecretAgendaNames { .. }
+                | GameAction::DeclareCompanion { .. }
+                | GameAction::CompanionToHand
+                | GameAction::DiscoverChoice { .. }
+                | GameAction::GraveyardPaidCastChoice { .. }
+                | GameAction::CascadeChoice { .. }
+                | GameAction::RippleChoice { .. }
+                | GameAction::FreeCastWindowChoice { .. }
+                | GameAction::ChooseTopOrBottom { .. }
+                | GameAction::ChooseMutateMergeSide { .. }
+                | GameAction::CipherEncode { .. }
+                | GameAction::ChooseLegend { .. }
+                | GameAction::ChooseBattleProtector { .. }
+                | GameAction::SetAutoPass { .. }
+                | GameAction::CancelAutoPass
+                | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
+                | GameAction::SetPriorityYield { .. }
+                | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::UnAction { .. }
+                | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::AssignCombatDamage { .. }
+                | GameAction::AssignBlockerDamage { .. }
+                | GameAction::DistributeAmong { .. }
+                | GameAction::ChooseCounterMoveDistribution { .. }
+                | GameAction::ChooseCountersToRemove { .. }
+                | GameAction::SubmitPayAmount { .. }
+                | GameAction::RetargetSpell { .. }
+                | GameAction::LearnDecision { .. }
+                | GameAction::SelectCategoryPermanents { .. }
+                | GameAction::ChooseKeptCreatures { .. }
+                | GameAction::ChooseKeptPermanents { .. }
+                | GameAction::ChooseX { .. }
+                | GameAction::SubmitPhyrexianChoices { .. }
+                | GameAction::ChooseManaColor { .. }
+                | GameAction::PayManaAbilityMana { .. }
+                | GameAction::CastPreparedCopy { .. }
+                | GameAction::ChooseSpecializeColor { .. }
+                | GameAction::CastParadigmCopy { .. }
+                | GameAction::PassParadigmOffer
+                | GameAction::Debug(..)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+                | GameAction::Concede { .. }
+                | GameAction::DeclareShortcut { .. }
+                | GameAction::RespondToShortcut { .. }
+                | GameAction::DeclineShortcut
+                | GameAction::PrecastCopyShortcut { .. }
+                | GameAction::EndContinuousEffect { .. }
+                | GameAction::BeginResolveAll { .. }
+                | GameAction::RespondResolveAllConsent { .. }
+                | GameAction::RevokeResolveAllConsent { .. } => None,
+            })
+            .min_by_key(|(index, _)| *index)
+            .map(|(_, action)| action.clone())
+            .ok_or(BailReason::NoLegalManaPayment)?,
+
+        // CR 601.2c: finish announcing targets after reserving a Replicate cost.
+        WaitingFor::TargetSelection { pending_cast, .. }
+            if pending_cast.unpaid_replicate_energy > 0
+                || pending_cast
+                    .deferred_tapped_permanents
+                    .iter()
+                    .any(|tap| tap.replicate_ordinal.is_some()) =>
+        {
+            actions
+                .iter()
+                .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
+                .cloned()
+                .ok_or_else(|| BailReason::NoLegalAction {
+                    waiting_for: format!("{:?}", state.waiting_for),
+                })?
+        }
 
         WaitingFor::ResolutionOptionalPaymentChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }
@@ -1419,6 +1614,114 @@ mod tests {
             projected.waiting_for,
             WaitingFor::ResolutionOptionalPaymentChoice { .. }
         ));
+    }
+
+    #[test]
+    fn projects_printed_tap_replicate_through_the_fixed_selection() {
+        use engine::types::game_state::CastPaymentMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Black);
+        }
+        let dalek = scenario
+            .add_creature(P0, "Dalek", 1, 1)
+            .with_subtypes(vec!["Dalek"])
+            .id();
+        scenario.add_creature(PlayerId(1), "Opponent's creature", 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Exterminate!",
+                false,
+                "Replicate—Tap an untapped Dalek you control. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nDestroy target creature. Its controller loses 3 life.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let (payer, pay, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(pay, GameAction::DecideOptionalCost { index: 0 });
+        runner.act(pay).unwrap();
+
+        let (payer, selection, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(selection, GameAction::SelectCards { cards: vec![dalek] });
+        runner.act(selection).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        assert!(!runner.state().objects[&dalek].tapped);
+    }
+
+    #[test]
+    fn projects_printed_energy_replicate_until_the_offer_is_exhausted() {
+        use engine::types::game_state::CastPaymentMode;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        let target = scenario
+            .add_creature(PlayerId(1), "Opponent's creature", 2, 2)
+            .id();
+        let other_target = scenario
+            .add_creature(PlayerId(1), "Another opponent creature", 3, 3)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Reiterating Bolt",
+                false,
+                "Replicate—Pay {E}{E}{E}. (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nReiterating Bolt deals 3 damage to target creature or planeswalker.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().players[P0.0 as usize].energy = 5;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id: runner.state().objects[&spell].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let (payer, pay, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert_eq!(payer, P0);
+        assert_eq!(pay, GameAction::DecideOptionalCost { index: 0 });
+        runner.act(pay).unwrap();
+        assert_eq!(runner.state().players[P0.0 as usize].energy, 5);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+
+        let (_, choose_target, _, _) = resolve_choice(runner.state(), P0, PlayerId(1)).unwrap();
+        assert!(matches!(
+            &choose_target,
+            GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            } if [target, other_target].contains(id)
+        ));
+        runner.act(choose_target).unwrap();
+        assert_eq!(runner.state().players[P0.0 as usize].energy, 2);
     }
 
     fn precast_offer_state() -> GameState {
