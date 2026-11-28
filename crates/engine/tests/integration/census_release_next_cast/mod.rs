@@ -379,6 +379,16 @@ fn counters(r: &GameRunner, id: ObjectId, kind: CounterType) -> u32 {
         .unwrap_or(0)
 }
 
+/// The pending "enters with an additional counter" rows registered for `id`.
+fn pending(r: &GameRunner, id: ObjectId) -> Vec<(CounterType, u32)> {
+    r.state()
+        .pending_etb_counters
+        .iter()
+        .filter(|(pending_id, _, _)| *pending_id == id)
+        .map(|(_, kind, count)| (kind.clone(), *count))
+        .collect()
+}
+
 fn zone(r: &GameRunner, id: ObjectId) -> Zone {
     r.state().objects[&id].zone
 }
@@ -1319,6 +1329,142 @@ fn kumano_counter_rider_is_not_registered_for_a_spell_remanded_in_response() {
     cast(&mut r, bears, vec![]);
     assert_eq!(zone(&r, bears), Zone::Battlefield);
     assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
+/// Two creature spells hold a pending counter rider at once. Kumano's delayed trigger registers one
+/// for the first spell, and Biophagus's mana spent on the second registers its own (CR 106.6a +
+/// CR 614.1c). P1 Remands only the second spell: that spell's rider ends with its stack exit
+/// (CR 400.7), while the first spell still resolves and enters with its counter.
+#[test]
+fn remanding_one_spell_keeps_the_other_spells_counter_rider() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let biophagus = card(&mut s, "Biophagus", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let viper = card(&mut s, "Ambush Viper", Zone::Hand);
+    remand_for_p1(&mut s);
+    let mut r = s.build();
+    let remand = r
+        .state()
+        .objects
+        .iter()
+        .find_map(|(id, object)| (object.name == "Remand" && object.owner == P1).then_some(*id))
+        .expect("P1 holds Remand");
+    run_chapter(&mut r, saga, 2, vec![]);
+    assert_eq!(delayed(&r), 1, "the chapter's next-cast trigger waits");
+    fund(&mut r, P0, ManaType::Green, 1);
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    fund(&mut r, P1, ManaType::Blue, 2);
+
+    // Plain green pays for the Bears, so only the Kumano rider is registered for it.
+    cast_action(&mut r, bears);
+    drive(&mut r, |s| !s.pending_etb_counters.is_empty(), vec![]);
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(pending(&r, viper), vec![]);
+    assert_eq!(delayed(&r), 0, "the next-cast trigger is spent");
+
+    // Ambush Viper (flash) is cast while the Bears spell is still on the stack. Biophagus's {T} is
+    // its only available green source, so the spent unit carries the mana-entry rider.
+    r.act(GameAction::ActivateAbility {
+        source_id: biophagus,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("Biophagus's mana ability is activated");
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "any-color mana ability prompts, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::ChooseManaColor {
+        choice: ManaChoice::SingleColor(ManaType::Green),
+        count: 1,
+    })
+    .expect("Biophagus adds one green mana");
+    assert_eq!(
+        r.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Green),
+        1,
+        "the flash spell's green pip must come from Biophagus"
+    );
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    cast_action(&mut r, viper);
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "both creature spells are on the stack"
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(zone(&r, viper), Zone::Stack);
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the first spell keeps its Kumano rider"
+    );
+    assert_eq!(
+        pending(&r, viper),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "Biophagus's mana registered a second rider for the flash spell"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        2,
+        "each spell holds its own rider"
+    );
+
+    // Remand the flash spell. Its rider leaves with it; the Bears' rider must survive the exit.
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    cast_action(&mut r, remand);
+    drive(
+        &mut r,
+        |s| s.stack.len() == 1 && s.stack[0].id == bears,
+        vec![Ask::Target {
+            actor: P1,
+            pick: TargetRef::Object(viper),
+        }],
+    );
+    assert_eq!(
+        zone(&r, viper),
+        Zone::Hand,
+        "Remand returned the flash spell to its owner's hand"
+    );
+    assert_eq!(
+        zone(&r, bears),
+        Zone::Stack,
+        "the other creature spell is still on the stack"
+    );
+    assert_eq!(
+        pending(&r, viper),
+        vec![],
+        "the Remanded spell's rider left with it"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        1,
+        "only the survivor's rider remains"
+    );
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the other spell's rider was not cleared with it"
+    );
+
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(
+        counters(&r, bears, CounterType::Plus1Plus1),
+        1,
+        "the surviving spell entered with its rider's counter"
+    );
+    assert_eq!(zone(&r, viper), Zone::Hand);
+    assert_eq!(counters(&r, viper, CounterType::Plus1Plus1), 0);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the survivor's entry consumed only its own rider"
+    );
     assert_idle(&r);
 }
 
