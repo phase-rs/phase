@@ -18927,6 +18927,7 @@ mod tests {
             AbilityKind::Activated,
             Effect::RememberCard {
                 target: TargetFilter::SelfRef,
+                retention: crate::types::ability::RememberRetention::Replace,
             },
         );
         {

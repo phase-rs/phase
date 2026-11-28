@@ -1012,6 +1012,45 @@ pub(super) fn normalize_exile_until_hit_bottom_cleanup(effect: &mut Effect) {
     }
 }
 
+/// CR 608.2c + CR 607.3: an anaphor in the instruction after a mass zone move
+/// ("Exile the Borg assimilated with this Saga, then return it to the
+/// battlefield" — The Best of Both Worlds, whose exile moves every recorded
+/// Borg) names every object that move affected, so a one-object move of the
+/// chain's tracked-set sentinel becomes the set-wide move of that set.
+pub(super) fn widen_sentinel_move_after_mass_move(prior: &Effect, next: &mut Effect) {
+    if !matches!(prior, Effect::ChangeZoneAll { .. }) {
+        return;
+    }
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_tapped,
+        enter_with_counters,
+        ..
+    } = next
+    else {
+        return;
+    };
+    if !matches!(
+        target,
+        TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0)
+        }
+    ) {
+        return;
+    }
+    *next = super::imperative::return_all_to_zone_effect(
+        *origin,
+        *destination,
+        target.clone(),
+        enters_under.take(),
+        *enter_tapped,
+        std::mem::take(enter_with_counters),
+    );
+}
+
 /// CR 614.1a + CR 608.2n: Fold a "if that spell would be put into a graveyard,
 /// [put it on the library / return it to its owner's hand] instead" rider onto
 /// the immediately-preceding optional `CastFromZone` as its canonical
@@ -2239,6 +2278,7 @@ pub(super) fn append_remember_card_to_standalone_exiled_choice(def: &mut Ability
             target: TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             },
+            retention: crate::types::ability::RememberRetention::Replace,
         },
     )));
 }
@@ -2269,6 +2309,7 @@ pub(super) fn ensure_remember_card_after_object_choice(def: &mut AbilityDefiniti
             target: TargetFilter::TrackedSet {
                 id: crate::types::identifiers::TrackedSetId(0),
             },
+            retention: crate::types::ability::RememberRetention::Replace,
         },
     );
     remember.sub_ability = Some(old_sub);

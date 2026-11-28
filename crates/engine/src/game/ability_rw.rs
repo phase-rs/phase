@@ -3331,7 +3331,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AssembleContraptionOnSprocket { target, .. }
         | Effect::ReassembleContraptionOnSprocket { target, .. }
         | Effect::ApplySticker { target, .. }
-        | Effect::RememberCard { target }
+        | Effect::RememberCard { target, .. }
         // CR 725.1 + CR 115.1: "target opponent becomes the monarch".
         | Effect::BecomeMonarch { target }
         | Effect::GrantCastingPermission { target, .. }

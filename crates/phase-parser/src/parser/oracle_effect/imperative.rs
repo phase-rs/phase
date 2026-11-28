@@ -14075,10 +14075,15 @@ pub(super) fn parse_exile_ast(
         ctx,
         EffectScope::Single,
     );
+    // CR 607.3: a singular reference to a linked ability's remembered object
+    // ("the Borg assimilated with this Saga") refers to each object the paired
+    // ability recorded (several when it was copied), so the exile moves the whole
+    // record — mirroring the `ExiledBySource` return's set-wide lowering.
+    let all = target.references_chosen_card();
     Some(ZoneCounterImperativeAst::Exile {
         origin,
         target,
-        all: false,
+        all,
         enter_with_counters,
         multi_target: None,
     })
@@ -18941,6 +18946,7 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
                     AbilityKind::Spell,
                     Effect::RememberCard {
                         target: TargetFilter::ParentTarget,
+                        retention: crate::types::ability::RememberRetention::Accumulate,
                     },
                 );
                 // CR 611.2a: the retype has no stated duration, so it lasts for the

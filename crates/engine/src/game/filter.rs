@@ -10666,8 +10666,9 @@ fn source_context_from_filter<'a>(
         // would still see the pre-resolution choice). While the source is
         // still the exact observed incarnation in its expected zone, the
         // live object is authoritative for that one attribute: drop any
-        // `Card` copied from the context and layer the live entry over the
-        // snapshot. The overlay keys on `source_read`'s exact
+        // `Card` copied from the context and layer the live entries over the
+        // snapshot (every entry: an accumulated linked record holds one per
+        // affected object). The overlay keys on `source_read`'s exact
         // incarnation/zone gate, so a departed source keeps the latched
         // snapshot on the CR 603.10a look-back path; the layered `Card`
         // value itself is an incarnation pin (CR 400.7), so a returned
@@ -10675,13 +10676,13 @@ fn source_context_from_filter<'a>(
         if let crate::types::game_state::TriggerSourceRead::ExactLive(object) = read {
             lki.chosen_attributes
                 .retain(|attribute| !matches!(attribute, ChosenAttribute::Card(_)));
-            if let Some(card) = object
-                .chosen_attributes
-                .iter()
-                .find(|attribute| matches!(attribute, ChosenAttribute::Card(_)))
-            {
-                lki.chosen_attributes.push(card.clone());
-            }
+            lki.chosen_attributes.extend(
+                object
+                    .chosen_attributes
+                    .iter()
+                    .filter(|attribute| matches!(attribute, ChosenAttribute::Card(_)))
+                    .cloned(),
+            );
         }
         (
             lki,

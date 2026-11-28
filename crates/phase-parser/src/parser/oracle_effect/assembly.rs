@@ -5054,6 +5054,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
 
     mark_independent_mana_spent_gates(&mut defs);
 
+    // CR 608.2c + CR 607.3: an anaphor after a mass zone move names every object
+    // that move affected.
+    for index in 1..defs.len() {
+        let (before, after) = defs.split_at_mut(index);
+        super::lower::widen_sentinel_move_after_mass_move(
+            &before[index - 1].effect,
+            &mut after[0].effect,
+        );
+    }
+
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
     // append to the deepest sub rather than overwriting.

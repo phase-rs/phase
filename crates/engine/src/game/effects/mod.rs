@@ -12172,7 +12172,7 @@ fn effect_fields_read_filter_population(
         Effect::PutSticker { target, .. } => has_filter(target),
         Effect::ApplySticker { target, .. } => has_filter(target),
         Effect::ChooseFromZone { filter, .. } => filter.as_ref().is_some_and(has_filter),
-        Effect::RememberCard { target } => has_filter(target),
+        Effect::RememberCard { target, .. } => has_filter(target),
         Effect::ChooseObjectsIntoTrackedSet {
             chooser, filter, ..
         } => has_filter(chooser) || has_filter(filter),

@@ -32,10 +32,11 @@ use engine::game::combat::AttackTarget;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -368,6 +369,14 @@ fn lore_count(runner: &GameRunner, saga: ObjectId) -> u32 {
 /// CR 714.3c: start P0's next turn at upkeep and advance into precombat main,
 /// where the lore counter is added and the next chapter triggers; resolve it.
 fn fire_next_chapter(runner: &mut GameRunner, saga: ObjectId) {
+    start_next_chapter(runner, saga);
+    resolve_all(runner);
+}
+
+/// CR 714.3c: start P0's next turn at upkeep and advance into precombat main,
+/// where the lore counter is added and the next chapter triggers. The chapter
+/// ability is left for the caller to handle.
+fn start_next_chapter(runner: &mut GameRunner, saga: ObjectId) {
     let expected = lore_count(runner, saga) + 1;
     {
         let state = runner.state_mut();
@@ -387,7 +396,6 @@ fn fire_next_chapter(runner: &mut GameRunner, saga: ObjectId) {
         runner.state().waiting_for,
         runner.state().objects[&saga].card_types,
     );
-    resolve_all(runner);
 }
 
 /// Chapter I gains control of the creature and assimilates it; chapter III
@@ -462,4 +470,165 @@ fn the_best_of_both_worlds_assimilates_a_permanent_and_releases_it() {
         Zone::Battlefield,
         "chapter III exiles only the Borg assimilated with this Saga"
     );
+}
+
+const STRIONIC_RESONATOR: &str = "{2}, {T}: Copy target triggered ability you control. You may \
+     choose new targets for the copy. (A triggered ability uses the words \"when,\" \"whenever,\" \
+     or \"at.\")";
+
+/// The Best of Both Worlds ruling (2026-10-07): "If The Best of Both Worlds's
+/// first chapter ability assimilated more than one creature (usually because
+/// the ability was copied), its third chapter ability will exile all of the
+/// assimilated Borg and then return them all to the battlefield under their
+/// owners' control." CR 607.1: the linked reader names every object the
+/// paired ability affected. Strionic Resonator copies chapter I, the copy is
+/// retargeted (CR 707.10c), and chapter III must release both creatures.
+#[test]
+fn the_best_of_both_worlds_releases_every_borg_a_copied_chapter_one_assimilated() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let soldier = scenario
+        .add_creature(P1, "Opposing Soldier", 2, 2)
+        .with_subtypes(vec!["Human", "Soldier"])
+        .id();
+    let elf = scenario
+        .add_creature(P1, "Opposing Elf", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .id();
+    for i in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 Library {i}"));
+    }
+    let resonator = scenario
+        .add_artifact_from_oracle(P0, "Strionic Resonator", STRIONIC_RESONATOR)
+        .id();
+    for i in 0..2 {
+        scenario.add_land_from_oracle(P0, &format!("P0 Wastes {i}"), "{T}: Add {C}.");
+    }
+    let saga = scenario
+        .add_creature(P0, "The Best of Both Worlds", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Saga"])
+        .from_oracle_text(THE_BEST_OF_BOTH_WORLDS)
+        .id();
+    let mut runner = scenario.build();
+    seed_creature_types(&mut runner);
+
+    // Chapter I triggers and targets the Soldier.
+    start_next_chapter(&mut runner, saga);
+    let chapter_one = loop {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(soldier)),
+                    })
+                    .expect("chapter I targets the Soldier");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                break runner
+                    .state()
+                    .stack
+                    .iter()
+                    .find(|entry| {
+                        entry.source_id == saga
+                            && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    })
+                    .map(|entry| entry.id)
+                    .expect("reach guard: chapter I is on the stack");
+            }
+            other => panic!("unexpected chapter I prompt: {other:?}"),
+        }
+    };
+
+    // Strionic Resonator copies chapter I.
+    if let WaitingFor::Priority { player } = runner.state().waiting_for {
+        assert_eq!(player, P0, "P0 holds priority with chapter I on the stack");
+    }
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: resonator,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Strionic Resonator");
+    let mut retargeted = false;
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } if !retargeted => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(chapter_one)],
+                    })
+                    .expect("Resonator targets chapter I");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner.act(GameAction::PassPriority).expect("pay {2}");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("choose new targets for the copy");
+            }
+            // CR 707.10c: the copy's new-target choice.
+            WaitingFor::CopyRetarget { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(elf)),
+                    })
+                    .expect("the copy targets the Elf");
+                retargeted = true;
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.pass_holding_team().expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    assert!(
+        retargeted,
+        "reach guard: the copy was retargeted to the Elf"
+    );
+    assert!(runner.state().stack.is_empty(), "the stack resolved");
+
+    // Both chapter I resolutions assimilated their creature.
+    assert_assimilated(&mut runner, soldier, &["Human", "Soldier"]);
+    assert_assimilated(&mut runner, elf, &["Elf"]);
+
+    fire_next_chapter(&mut runner, saga); // II
+    fire_next_chapter(&mut runner, saga); // III
+
+    // CR 607.1 + CR 400.7: chapter III exiled and returned BOTH Borg.
+    relayer(&mut runner);
+    for name in ["Opposing Soldier", "Opposing Elf"] {
+        let returned = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| runner.state().objects[id].name == name)
+            .unwrap_or_else(|| panic!("{name} is on the battlefield"));
+        let obj = &runner.state().objects[&returned];
+        assert_eq!(
+            obj.controller, P1,
+            "{name} returned under its owner's control"
+        );
+        assert_eq!(
+            plus_one_counters(&runner, returned),
+            0,
+            "{name} is a new object with no counter"
+        );
+        assert!(
+            !has_subtype(&runner, returned, "Borg"),
+            "{name}'s retype ended with the old object"
+        );
+    }
 }

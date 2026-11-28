@@ -27,6 +27,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -181,8 +182,33 @@ fn the_borg_queen_without_a_creature_bottoms_every_exiled_card() {
 
     let outcome = runner.cast(queen).target_players(&[P1]).resolve();
 
-    // REACH-GUARD: the Queen resolved, so her enters trigger ran.
+    // REACH-GUARD: the enters trigger ran — each land was exiled from the
+    // library and then put back from exile. Without these moves the final
+    // state below would be the same as a trigger that did nothing.
     outcome.assert_zone(&[queen], Zone::Battlefield);
+    for land in [land_a, land_b] {
+        let moves: Vec<(Option<Zone>, Zone)> = outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } if *object_id == land => Some((*from, *to)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                (Some(Zone::Library), Zone::Exile),
+                (Some(Zone::Exile), Zone::Library)
+            ],
+            "the land was exiled by the loop and then bottomed: {moves:?}"
+        );
+    }
     outcome.assert_zone(&[land_a, land_b], Zone::Library);
     assert_eq!(library(&runner, P1).len(), 2);
     assert!(

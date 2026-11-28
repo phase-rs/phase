@@ -68,6 +68,7 @@ fn remember_card_step() -> AbilityDefinition {
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
             },
+            retention: engine::types::ability::RememberRetention::Replace,
         },
     )
 }

@@ -75089,7 +75089,8 @@ fn assimilate_a_permanent_gains_control_and_records_it() {
     assert!(matches!(
         sub_at(execute, 3).effect.as_ref(),
         Effect::RememberCard {
-            target: TargetFilter::ParentTarget
+            target: TargetFilter::ParentTarget,
+            retention: crate::types::ability::RememberRetention::Accumulate,
         }
     ));
 }
@@ -75151,6 +75152,68 @@ fn assimilated_with_the_source_reads_the_recorded_permanent() {
             "{phrase}"
         );
     }
+}
+
+/// CR 607.3 + CR 608.2c: The Best of Both Worlds chapter III — "Exile the Borg
+/// assimilated with this Saga, then return it to the battlefield under its
+/// owner's control." The exile moves every recorded Borg (a copied chapter I
+/// records two), and "it" after that mass move returns the whole moved set.
+/// A one-object flicker ("Exile target creature, then return it …" —
+/// Cloudshift) keeps both moves single.
+#[test]
+fn an_anaphor_after_a_mass_exile_of_the_linked_record_moves_the_whole_set() {
+    let def = parse_effect_chain(
+        "Exile the Borg assimilated with ~, then return it to the battlefield under its \
+         owner's control.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChangeZoneAll {
+        destination: Zone::Exile,
+        target,
+        ..
+    } = &*def.effect
+    else {
+        panic!("the exile moves every recorded Borg: {:?}", def.effect);
+    };
+    assert!(target.references_chosen_card(), "{target:?}");
+    let ret = def.sub_ability.as_deref().expect("the return step");
+    assert!(
+        matches!(
+            &*ret.effect,
+            Effect::ChangeZoneAll {
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                ..
+            }
+        ),
+        "the return moves every exiled Borg: {:?}",
+        ret.effect
+    );
+
+    let flicker = parse_effect_chain(
+        "Exile target creature you control, then return it to the battlefield under its \
+         owner's control.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*flicker.effect, Effect::ChangeZone { .. }),
+        "a one-object exile stays single: {:?}",
+        flicker.effect
+    );
+    let flicker_return = flicker.sub_ability.as_deref().expect("the return step");
+    assert!(
+        matches!(
+            &*flicker_return.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "the return after a one-object exile stays single: {:?}",
+        flicker_return.effect
+    );
 }
 
 /// CR 608.2c + CR 401.4: "the other cards they revealed this way" (Gift of
@@ -84707,6 +84770,7 @@ fn zenos_trigger_one_pump_lowers_to_the_choice_chain() {
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
             },
+            retention: crate::types::ability::RememberRetention::Replace,
         },
         "the pick must be persisted via the chain's tracked-set sentinel (CR 608.2c)"
     );
