@@ -20,6 +20,7 @@ vi.mock("../dice3d/loaders", () => ({
 }));
 
 import { DiceRollOverlay } from "../DiceRollOverlay";
+import { GAME_Z_LAYER } from "../../../constants/ui";
 import {
   DICE_RESULT_HOLD_MS,
   DICE_RESULT_MIN_HOLD_MS,
@@ -271,6 +272,7 @@ describe("DiceRollOverlay yields to a decision prompt opened by its roll (#11411
 
     await waitOn("SearchChoice", 0);
 
+    expect(overlay).toHaveClass(GAME_Z_LAYER.boardChoiceGrid);
     expect(screen.queryByRole("button")).toBeNull();
     expect(overlay).toHaveClass("pointer-events-none");
     expect(overlay.querySelector(".pointer-events-auto")).toBeNull();

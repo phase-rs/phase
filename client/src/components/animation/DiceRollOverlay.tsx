@@ -2,6 +2,7 @@ import { Component, Suspense, type ComponentProps, useCallback, useEffect, useSt
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
+import { GAME_Z_LAYER } from "../../constants/ui";
 import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId";
 import { reportBoundaryError } from "../../services/telemetryEvents";
 import { useGameStore } from "../../stores/gameStore";
@@ -87,10 +88,10 @@ function hasWebGL(): boolean {
  * rolls that can fire while other overlays are up.
  *
  * An in-game roll yields while this player has a decision to make (the roll's
- * own result can open one): the result moves to the top and lets every click
- * through, with no backdrop, skip button, hint or Escape binding, so the
- * prompt below stays usable. It still closes on its own countdown. The contest
- * never yields: it holds until the player dismisses it.
+ * own result can open one): the result moves to the top, drops beneath the
+ * dialog layers so a prompt draws over it, and lets every click through, with
+ * no backdrop, skip button, hint or Escape binding. It still closes on its own
+ * countdown. The contest never yields: it holds until the player dismisses it.
  *
  * Its side gutters bound the captions that name a player (the roll winner, a
  * coin flip's outcome): each sits in a row as wide as the overlay inside them,
@@ -149,8 +150,8 @@ export function DiceRollOverlay() {
     <AnimatePresence>
       {diceRoll && (
         <motion.div
-          className={`fixed inset-0 z-[55] flex justify-center pointer-events-none ${
-            yieldsToPrompt ? "items-start pt-16" : "items-center"
+          className={`fixed inset-0 flex justify-center pointer-events-none ${
+            yieldsToPrompt ? `${GAME_Z_LAYER.boardChoiceGrid} items-start pt-16` : "z-[55] items-center"
           } ${BANNER_TITLE_GUTTERS}`}
           role="status"
           aria-live="polite"
