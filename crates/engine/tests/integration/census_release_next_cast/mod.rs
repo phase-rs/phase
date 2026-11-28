@@ -1333,7 +1333,7 @@ fn kumano_counter_rider_is_not_registered_for_a_spell_remanded_in_response() {
 }
 
 /// Two creature spells hold a pending counter rider at once. Kumano's delayed trigger registers one
-/// for the first spell, and Biophagus's mana spent on the second registers its own (CR 106.6a +
+/// for the first spell, and Biophagus's mana spent on the second registers its own (CR 106.6 +
 /// CR 614.1c). P1 Remands only the second spell: that spell's rider ends with its stack exit
 /// (CR 400.7), while the first spell still resolves and enters with its counter.
 #[test]
