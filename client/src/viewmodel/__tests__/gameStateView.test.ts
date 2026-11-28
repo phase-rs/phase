@@ -870,6 +870,35 @@ describe("getBoardChoiceView", () => {
     });
   });
 
+  it("allows a single advertised creature for a fixed spell tap cost", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures", mode: "Fixed" },
+        choices: [5],
+        count: 1,
+        min_count: 1,
+        resume: { type: "Spell", Spell: buildPendingCast({ object_id: 10 }) },
+      },
+    };
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(buildGameObject({ id: 5, zone: "Battlefield" })),
+    );
+
+    expect(choice).toMatchObject({
+      objectIds: [5],
+      intent: "tap",
+      selection: { type: "exactCount", count: 1 },
+      cancelAction: { type: "CancelCast" },
+    });
+    expect(choice && buildBoardChoiceAction(choice, [5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [5] },
+    });
+  });
+
   it("maps an X-style TapCreatures PayCost to a range the player can under-fill", () => {
     const waitingFor: WaitingFor = {
       type: "PayCost",

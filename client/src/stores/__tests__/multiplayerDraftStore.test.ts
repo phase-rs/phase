@@ -1208,8 +1208,8 @@ describe("multiplayerDraftStore", () => {
   });
 
   describe("the draft owner install", () => {
-    /** The module slots that name the tab's installed draft owner. */
-    const ownerSlots = [
+    /** The module slots that named the installed draft owner before it was one union-typed slot. */
+    const retiredOwnerSlots = [
       "activeHostAdapter",
       "activeGuestAdapter",
       "activeHostAbort",
@@ -1220,18 +1220,34 @@ describe("multiplayerDraftStore", () => {
       "activeHostRouteAbortListener",
       "activeGuestRouteAbortListener",
     ];
+    /** Type names whose module-level `let` would hold a draft owner. */
+    const ownerTypeNames = /\b(DraftPodHostAdapter|DraftPodGuestAdapter|ServerDraftAdapter|InstalledDraftOwner)\b/;
 
     it("installs every draft owner through one step", () => {
       const sourcePath = resolve(dirname(fileURLToPath(import.meta.url)), "../multiplayerDraftStore.ts");
-      const source = ts.createSourceFile(
-        sourcePath,
-        readFileSync(sourcePath, "utf8"),
-        ts.ScriptTarget.Latest,
-        true,
-        ts.ScriptKind.TS,
-      );
-      const assignments: { slot: string; owner: string }[] = [];
+      const text = readFileSync(sourcePath, "utf8");
+      const source = ts.createSourceFile(sourcePath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+      // Module-level declarations, with the text of the type each holds: its
+      // annotation, or the type arguments of the `new` that creates it.
+      const moduleBindings: { name: string; kind: "let" | "const"; typeText: string }[] = [];
+      for (const statement of source.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        const flags = statement.declarationList.flags;
+        const kind = flags & ts.NodeFlags.Const ? "const" : flags & ts.NodeFlags.Let ? "let" : null;
+        if (!kind) continue;
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name)) continue;
+          const init = declaration.initializer;
+          const typeText = declaration.type?.getText(source)
+            ?? (init && ts.isNewExpression(init) ? (init.typeArguments ?? []).map((arg) => arg.getText(source)).join(", ") : "");
+          moduleBindings.push({ name: declaration.name.text, kind, typeText });
+        }
+      }
+
+      const assignments: { value: "null" | "owner"; owner: string }[] = [];
       const installCalls: string[] = [];
+      const roles: string[] = [];
       let installDeclared = false;
       // `owner` is the enclosing function declaration or store action.
       const visit = (node: ts.Node, owner: string): void => {
@@ -1247,24 +1263,51 @@ describe("multiplayerDraftStore", () => {
         if (ts.isBinaryExpression(node)
           && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
           && ts.isIdentifier(node.left)
-          && ownerSlots.includes(node.left.text)
-          && node.right.kind !== ts.SyntaxKind.NullKeyword) {
-          assignments.push({ slot: node.left.text, owner: next });
+          && node.left.text === "installedDraftOwner") {
+          assignments.push({ value: node.right.kind === ts.SyntaxKind.NullKeyword ? "null" : "owner", owner: next });
         }
         if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "installDraftOwner") {
           installCalls.push(next);
+        }
+        if (ts.isTypeAliasDeclaration(node) && node.name.text === "InstalledDraftOwner" && ts.isUnionTypeNode(node.type)) {
+          for (const member of node.type.types) {
+            if (!ts.isTypeLiteralNode(member)) continue;
+            for (const property of member.members) {
+              if (ts.isPropertySignature(property) && property.name.getText(source) === "role"
+                && property.type && ts.isLiteralTypeNode(property.type) && ts.isStringLiteral(property.type.literal)) {
+                roles.push(property.type.literal.text);
+              }
+            }
+          }
         }
         ts.forEachChild(node, (child) => visit(child, next));
       };
       visit(source, "");
 
-      // Reach: the census found the install step and owner-slot assignments,
-      // and the install step takes every owner slot.
+      // Reach: the census found the install step, assignments to the owner
+      // slot, the module-level registries that hold adapters (excluded by being
+      // `const`), and a module-level `let` whose type names another adapter.
       expect(installDeclared).toBe(true);
       expect(assignments.length).toBeGreaterThan(0);
-      expect(new Set(assignments.map(({ slot }) => slot))).toEqual(new Set(ownerSlots));
-      expect(assignments.filter(({ owner }) => owner !== "installDraftOwner")).toEqual([]);
-      expect([...installCalls].sort()).toEqual(["hostDraft", "joinDraft", "resumeHostedDraft"]);
+      expect(moduleBindings.filter(({ kind, typeText }) => kind === "const" && ownerTypeNames.test(typeText))
+        .map(({ name }) => name).sort()).toEqual(["disposedGuestAdapters", "disposedNativeAdapters", "hostAdapterTeardowns", "leftHostAdapters"]);
+      const commanderLaunch = moduleBindings.find(({ name }) => name === "commanderLaunchInFlight");
+      expect(commanderLaunch).toMatchObject({ kind: "let" });
+      expect(commanderLaunch?.typeText).toContain("P2PHostAdapter");
+
+      // One union-typed slot names the installed owner.
+      expect(moduleBindings.filter(({ kind, typeText }) => kind === "let" && ownerTypeNames.test(typeText))
+        .map(({ name }) => name)).toEqual(["installedDraftOwner"]);
+      expect([...new Set(roles)].sort()).toEqual(["guest", "host", "native"]);
+      // Only the install step makes it non-null; only the detach step nulls it.
+      expect(assignments.filter(({ value }) => value === "owner").map(({ owner }) => owner))
+        .toEqual(expect.arrayContaining(["installDraftOwner"]));
+      expect(assignments.filter(({ value, owner }) => value === "owner" && owner !== "installDraftOwner")).toEqual([]);
+      expect(assignments.filter(({ value, owner }) => value === "null" && owner !== "detachInstalledDraftOwner")).toEqual([]);
+      expect(assignments.some(({ value }) => value === "null")).toBe(true);
+      expect([...installCalls].sort()).toEqual(["hostDraft", "joinDraft", "openNativeOwner", "resumeHostedDraft", "resumeNativeDraft"]);
+      // Hostile: none of the retired slots survives under its old name.
+      for (const slot of retiredOwnerSlots) expect(text).not.toMatch(new RegExp(`\\b${slot}\\b`));
     });
   });
 

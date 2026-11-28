@@ -59,6 +59,52 @@ use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
+/// CR 608.2c + CR 109.4: qualify a chosen-target reader by the controller
+/// phrase that follows it. ParentTarget supplies the announced chosen group;
+/// the typed controller leg selects the subset the instruction names.
+pub(super) fn parse_chosen_controller_target(lower: &str) -> Option<TargetFilter> {
+    let input = lower.trim_end_matches('.');
+    let (rest, _) = preceded(
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        alt((
+            tag("artifacts"),
+            tag("artifact"),
+            tag("cards"),
+            tag("card"),
+            tag("creatures"),
+            tag("creature"),
+            tag("enchantments"),
+            tag("enchantment"),
+            tag("lands"),
+            tag("land"),
+            tag("permanents"),
+            tag("permanent"),
+            tag("players"),
+            tag("player"),
+        )),
+    )
+    .parse(input)
+    .ok()?;
+    let (rest, controller) = alt((
+        value(
+            ControllerRef::You,
+            tag::<_, _, OracleError<'_>>(" you control"),
+        ),
+        value(
+            ControllerRef::Opponent,
+            tag::<_, _, OracleError<'_>>(" you don't control"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?;
+    rest.is_empty().then_some(TargetFilter::And {
+        filters: vec![
+            TargetFilter::ParentTarget,
+            TargetFilter::Typed(TypedFilter::default().controller(controller)),
+        ],
+    })
+}
+
 /// Coverage category key for "this sentence printed a subject, and the subject
 /// grammar could not bind it".
 ///
@@ -3900,6 +3946,9 @@ fn parse_subject_application_for(
     // objects.
     if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
         return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
+    if let Some(filter) = parse_chosen_controller_target(&lower) {
+        return subject_filter_application(filter, false);
     }
     if all_consuming(preceded(
         tag::<_, _, OracleError<'_>>("the chosen "),

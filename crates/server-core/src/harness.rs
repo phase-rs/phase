@@ -1,7 +1,7 @@
 //! Integration test harness for full draft tournament simulation.
 //! Runs at server-core crate level (D-06) -- no network, no tokio runtime needed.
 
-use crate::draft_session::DraftSessionManager;
+use crate::draft_session::{DraftActor, DraftSessionManager, FifoStaged};
 use draft_core::pack_source::FixturePackSource;
 use draft_core::types::{
     DeckAddableCards, DraftAction, DraftConfig, DraftKind, DraftSource, DraftStatus, PodPolicy,
@@ -174,6 +174,131 @@ impl TournamentHarness {
             draft_code: self.draft_code.clone(),
             tokens: self.tokens.clone(),
             source,
+        }
+    }
+}
+
+/// Harness for a private FIFO pod: 8 seats, `TST`, 2-card packs, 3 packs, a
+/// fixed 1000 ms pick clock and a 1000 ms Review, installed through the private
+/// stager. Every operation goes through the manager's FIFO staging and is
+/// committed as a saved result would be.
+pub(crate) struct PrivateFifoHarness {
+    pub manager: DraftSessionManager,
+    pub draft_code: String,
+    pub tokens: Vec<String>,
+    pub source: FixturePackSource,
+    pub now_ms: u64,
+}
+
+impl PrivateFifoHarness {
+    pub fn new() -> Self {
+        let mut manager = DraftSessionManager::new();
+        let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::FifoAsync,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy {
+                pick: draft_core::types::PickClockPolicy::Fixed { duration_ms: 1000 },
+                review_duration_ms: 1000,
+            },
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 2,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        };
+        let names = (0..8).map(|seat| format!("Player{seat}")).collect();
+        let staged = manager
+            .stage_private_fifo(config, names)
+            .expect("a valid private FIFO pod");
+        let draft_code = staged.draft_code().to_string();
+        let tokens = staged.player_tokens().to_vec();
+        manager.install_fifo(staged).expect("a free code");
+        Self {
+            manager,
+            draft_code,
+            tokens,
+            source: FixturePackSource {
+                set_code: "TST".to_string(),
+                cards_per_pack: 2,
+            },
+            now_ms: 1000,
+        }
+    }
+
+    fn apply(&mut self, actor: DraftActor<'_>, action: DraftAction) -> FifoStaged {
+        let staged = self
+            .manager
+            .stage_fifo_operation(
+                &self.draft_code,
+                actor,
+                action,
+                Some(&self.source),
+                self.now_ms,
+            )
+            .expect("an accepted FIFO operation");
+        if staged == FifoStaged::Pending {
+            self.manager
+                .commit_fifo_result(&self.draft_code)
+                .expect("a staged result");
+        }
+        staged
+    }
+
+    /// Start the draft at the harness clock.
+    pub fn start(&mut self) {
+        self.apply(DraftActor::Server, DraftAction::StartDraft);
+    }
+
+    /// The seat takes its head's legal selection, through its own token.
+    /// Returns whether the seat had a head.
+    pub fn select_head(&mut self, seat: u8) -> bool {
+        let session = &self.manager.sessions[&self.draft_code].session;
+        let Some(action) = draft_core::pick_pass::legal_auto_selection(session, seat) else {
+            return false;
+        };
+        let token = self.tokens[usize::from(seat)].clone();
+        self.apply(DraftActor::Seat { token: &token }, action);
+        true
+    }
+
+    /// Run core's clock expiry at `now_ms`.
+    pub fn advance_clock(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
+        self.apply(DraftActor::Server, DraftAction::AdvanceClock);
+    }
+
+    /// Get current draft status.
+    pub fn status(&self) -> DraftStatus {
+        self.manager.sessions[&self.draft_code].session.status
+    }
+
+    /// Simulate a crash: serialize the session, then restore it through the
+    /// internal FIFO restore into a fresh manager.
+    pub fn simulate_crash_and_restore(&self) -> Self {
+        let json =
+            serde_json::to_string(&self.manager.sessions[&self.draft_code].to_persisted()).unwrap();
+        let restored: crate::persist::PersistedDraftSession = serde_json::from_str(&json).unwrap();
+        let mut manager = DraftSessionManager::new();
+        let staged = manager
+            .stage_restored_fifo(restored)
+            .expect("a valid FIFO row");
+        manager.install_fifo(staged).expect("a free code");
+        Self {
+            manager,
+            draft_code: self.draft_code.clone(),
+            tokens: self.tokens.clone(),
+            source: FixturePackSource {
+                set_code: self.source.set_code.clone(),
+                cards_per_pack: self.source.cards_per_pack,
+            },
+            now_ms: self.now_ms,
         }
     }
 }
@@ -415,5 +540,90 @@ mod tests {
             session.connected.iter().all(|&c| !c),
             "all seats disconnected after restore"
         );
+    }
+
+    #[test]
+    fn private_fifo_crash_and_restore_preserves_queues() {
+        let mut h = PrivateFifoHarness::new();
+        h.start();
+        assert_eq!(h.status(), DraftStatus::Drafting);
+        // Mid-round 1: half the seats take their head.
+        h.now_ms = 1200;
+        for seat in 0..4 {
+            assert!(h.select_head(seat));
+        }
+        let before = h.manager.sessions[&h.draft_code].session.clone();
+        let restored = h.simulate_crash_and_restore();
+        let after = &restored.manager.sessions[&restored.draft_code].session;
+        let (before_fifo, after_fifo) =
+            (before.fifo.as_ref().unwrap(), after.fifo.as_ref().unwrap());
+        for seat in 0..8 {
+            assert_eq!(after_fifo.seats[seat].queue, before_fifo.seats[seat].queue);
+            assert_eq!(
+                after_fifo.seats[seat].prompt,
+                before_fifo.seats[seat].prompt
+            );
+            assert_eq!(after.pools[seat], before.pools[seat]);
+        }
+        assert_eq!(*after, before);
+
+        // Continue to the end: head selections, and core's clock at each
+        // Review expiry, until deckbuilding.
+        let mut h = restored;
+        let mut reviews = 0;
+        while h.status() != DraftStatus::Deckbuilding {
+            match h.status() {
+                DraftStatus::Drafting => {
+                    let mut selected = false;
+                    for seat in 0..8 {
+                        selected |= h.select_head(seat);
+                    }
+                    assert!(selected, "a drafting pod has a head to select");
+                }
+                DraftStatus::Review => {
+                    let review = h.manager.sessions[&h.draft_code]
+                        .session
+                        .fifo
+                        .as_ref()
+                        .unwrap()
+                        .review
+                        .clone()
+                        .unwrap();
+                    let draft_core::types::DraftClockState::Running { deadline_ms } =
+                        review.clock.state
+                    else {
+                        panic!("Review runs");
+                    };
+                    if reviews == 0 {
+                        // A crash during Review keeps its deadline.
+                        let again = h.simulate_crash_and_restore();
+                        assert_eq!(
+                            again.manager.sessions[&again.draft_code]
+                                .session
+                                .fifo
+                                .as_ref()
+                                .unwrap()
+                                .review,
+                            Some(review.clone())
+                        );
+                        assert_eq!(
+                            again.manager.fifo_next_due(&again.draft_code),
+                            Some(deadline_ms)
+                        );
+                        h = again;
+                    }
+                    reviews += 1;
+                    h.advance_clock(deadline_ms);
+                }
+                other => panic!("unexpected status {other:?}"),
+            }
+        }
+        assert_eq!(reviews, 2);
+        assert_eq!(h.status(), DraftStatus::Deckbuilding);
+        assert!(h.manager.sessions[&h.draft_code]
+            .session
+            .pools
+            .iter()
+            .all(|pool| pool.len() == 6));
     }
 }

@@ -2180,6 +2180,14 @@
     "attachments": "Con {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "¿Pagar el coste de reproducir?",
+      "again": "¿Volver a pagar el coste de reproducir? (Pagado {{times}} veces)",
+      "decline": "Listo",
+      "tapSubtype": "Gira un {{subtype}} enderezado que controlas",
+      "tapCreature": "Gira una criatura enderezada",
+      "payEnergy": "Paga {{amount}} de energía"
+    },
     "gift": {
       "title": "¿Prometer un regalo?",
       "pay": "Prometer {{gift}}",

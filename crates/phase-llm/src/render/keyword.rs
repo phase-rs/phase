@@ -26,11 +26,13 @@
 //! keywords, which is the text this module replaces.
 
 use engine::parser::oracle::keyword_display_name;
-use engine::types::ability::{AbilityCost, QuantityExpr, TargetFilter, TypeFilter, TypedFilter};
+use engine::types::ability::{
+    AbilityCost, ControllerRef, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+};
 use engine::types::keywords::{
     BestowCost, BlitzCost, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost, EchoCost,
     EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, HexproofFilter, Keyword, MorphCost, ProtectionTarget, WardCost,
+    GiftKind, HexproofFilter, Keyword, MorphCost, ProtectionTarget, ReplicateCost, WardCost,
 };
 use engine::types::mana::{ManaColor, ManaCost};
 
@@ -101,7 +103,7 @@ pub fn keyword_text(keyword: &Keyword) -> String {
         | Keyword::Transfigure(cost)
         | Keyword::Recover(cost)
         | Keyword::Cleave(cost)
-        | Keyword::Replicate(cost)
+        | Keyword::Replicate(ReplicateCost::Mana(cost))
         | Keyword::MoreThanMeetsTheEye(cost)
         | Keyword::Freerunning(cost)
         | Keyword::Specialize(cost)
@@ -123,6 +125,83 @@ pub fn keyword_text(keyword: &Keyword) -> String {
         | Keyword::Disguise(DisguiseCost::Reduced { cost, .. })
         // The name already says the land type ("islandcycling").
         | Keyword::Typecycling { cost, .. } => with_detail(mana_cost_text(cost)),
+
+        Keyword::Replicate(ReplicateCost::TapOne(filter)) => match filter.as_ref() {
+            TargetFilter::Typed(typed)
+                if typed.controller == Some(ControllerRef::You) && typed.properties.is_empty() =>
+            {
+                let words = typed.type_filters.iter().map(type_word).collect::<Option<Vec<_>>>();
+                match words.filter(|words| !words.is_empty()) {
+                    Some(words) => format!("{name}—Tap an untapped {} you control", words.join(" ")),
+                    None => name,
+                }
+            }
+            TargetFilter::None
+            | TargetFilter::Any
+            | TargetFilter::Player
+            | TargetFilter::Controller
+            | TargetFilter::SourceController
+            | TargetFilter::ControllerAndControlledPermanents { .. }
+            | TargetFilter::Opponent
+            | TargetFilter::SelfRef
+            | TargetFilter::GrantingObject { .. }
+            | TargetFilter::SourceOrPaired
+            | TargetFilter::Typed(..)
+            | TargetFilter::Not { .. }
+            | TargetFilter::Or { .. }
+            | TargetFilter::And { .. }
+            | TargetFilter::StackAbility { .. }
+            | TargetFilter::StackSpell
+            | TargetFilter::CastingSpell
+            | TargetFilter::SpecificObject { .. }
+            | TargetFilter::SpecificPlayer { .. }
+            | TargetFilter::PlayerWhoChoseLabel { .. }
+            | TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Neighbor { .. }
+            | TargetFilter::ScopedPlayer
+            | TargetFilter::AttachedTo
+            | TargetFilter::LastCreated
+            | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
+            | TargetFilter::CostPaidObject
+            | TargetFilter::AmassedArmy
+            | TargetFilter::ChosenCard
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
+            | TargetFilter::ExiledBySource
+            | TargetFilter::ExiledCardByIndex { .. }
+            | TargetFilter::TriggeringSpellController
+            | TargetFilter::TriggeringSpellOwner
+            | TargetFilter::TriggeringPlayer
+            | TargetFilter::TriggeringSource
+            | TargetFilter::AttackedPlayerOrPlaneswalker
+            | TargetFilter::EventTarget
+            | TargetFilter::TriggeringSourceController
+            | TargetFilter::EventTargetController
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::DeclaredPlayer { .. }
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::AffectedObjectOwner
+            | TargetFilter::SourceChosenPlayer
+            | TargetFilter::OriginalController
+            | TargetFilter::OriginalSource
+            | TargetFilter::PostReplacementSourceController
+            | TargetFilter::PostReplacementDamageSource
+            | TargetFilter::PostReplacementDamageTarget
+            | TargetFilter::PostReplacementDamageTargetOwner
+            | TargetFilter::DefendingPlayer
+            | TargetFilter::HasChosenName
+            | TargetFilter::ChosenDamageSource { .. }
+            | TargetFilter::Named { .. }
+            | TargetFilter::Owner
+            | TargetFilter::AllPlayers => name,
+        },
+        Keyword::Replicate(ReplicateCost::PayEnergy(amount)) => {
+            format!("{name}—Pay {} energy", amount.get())
+        }
 
         // CR 702.119a + CR 702.119b: Emerge sacrifices a creature, and
         // "Emerge from [quality]" another kind of permanent; only the creature

@@ -129,7 +129,7 @@ fn default_next_ai_driver_fault_id() -> u64 {
 ///
 /// Fields excluded (reconstructed at restore time):
 /// - `connected` — all players are disconnected on restore
-/// - `timer_task` — JoinHandle is not serializable; re-arm from `timer_remaining_ms`
+/// - the schedule — process-local: a legacy pod re-arms its pick timer from `timer_remaining_ms`, and a FIFO session registers a new wake from its core deadlines
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedDraftSession {
     pub draft_code: String,

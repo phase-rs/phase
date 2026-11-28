@@ -230,7 +230,13 @@ async function handshake(
 
 async function finishSnapshot(attachment: Attachment, socket: ControlledWebSocket, codec: boolean, turn = 1): Promise<void> {
   if (attachment.kind === "draft") {
-    socket.receive({ type: "DraftCreated", data: { draft_code: "DRAFT1", player_token: "draft-token", seat_index: 0 } });
+    // The create settles on its own correlated result, whose id is the one the
+    // adapter wrote on its setup frame.
+    const setup = socket.sent.filter((frame) => frame.type === "CreateDraftWithSettings").pop();
+    socket.receive({ type: "DraftCommandAccepted", data: {
+      request_id: setup?.data?.request_id,
+      result: { type: "Created", data: { draft_code: "DRAFT1", player_token: "draft-token", seat_index: 0 } },
+    } });
     await attachment.completion;
     socket.receive({ type: "DraftMatchStart", data: {
       match_id: "r1-t0", round: 1, game_code: FULL_KEY.game_code, full_key: FULL_KEY,

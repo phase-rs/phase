@@ -34,7 +34,7 @@ use crate::client_hello_guard::guard_client_hello;
 use crate::draft_action_payload_guard::guard_draft_action_payload;
 use crate::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-    guard_reconnect_draft,
+    guard_native_fifo_policy, guard_reconnect_draft,
 };
 use crate::emote_guard::guard_emote;
 use crate::game_action_payload_guard::guard_game_action_payload;
@@ -304,16 +304,21 @@ pub fn guard_client_message_before_dispatch(
             token,
             rotation_nonce,
         }),
+        // Every field is bound by name, so a field added later cannot pass
+        // this guard unconsidered.
         ClientMessage::CreateDraftWithSettings {
             display_name,
             source,
             set_codes,
+            kind,
+            public: _,
             password,
             timer_seconds,
-            pod_size,
-            kind,
             tournament_format,
-            ..
+            pod_policy: _,
+            pod_size,
+            fifo_policy,
+            request_id: _,
         } => {
             // Normalize the new tagged object and legacy root spelling before
             // validating any candidate token or touching a pool map.
@@ -326,20 +331,27 @@ pub fn guard_client_message_before_dispatch(
                 *pod_size,
                 *kind,
                 *tournament_format,
-            )
+            )?;
+            guard_native_fifo_policy(fifo_policy.as_ref())
         }
         ClientMessage::JoinDraftWithPassword {
             draft_code,
             display_name,
             password,
+            request_id: _,
         } => guard_join_draft_with_password(draft_code, display_name, password),
-        ClientMessage::DraftAction { draft_code, action } => {
+        ClientMessage::DraftAction {
+            draft_code,
+            action,
+            request_id: _,
+        } => {
             guard_draft_action(draft_code)?;
             guard_draft_action_payload(action)
         }
         ClientMessage::ReconnectDraft {
             draft_code,
             player_token,
+            request_id: _,
         } => guard_reconnect_draft(draft_code, player_token),
         ClientMessage::SpectateDraft { draft_code } => guard_spectate_draft(draft_code),
     }
@@ -399,6 +411,15 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
             request_id: *request_id,
             message: reason,
         },
+        // A native draft command carries its own request id, and every refusal
+        // it receives, before dispatch or in it, answers that id on the
+        // requesting socket, so the client settles that one command.
+        ClientMessage::CreateDraftWithSettings { request_id, .. }
+        | ClientMessage::JoinDraftWithPassword { request_id, .. }
+        | ClientMessage::DraftAction { request_id, .. }
+        | ClientMessage::ReconnectDraft { request_id, .. } => {
+            ServerMessage::draft_rejected(*request_id, reason)
+        }
 
         // Every remaining variant keeps the operational-error behavior: a
         // bounds failure on these is a malformed frame, not a rejected game
@@ -427,10 +448,6 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::UpdateLobbyMetadata { .. }
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::UnregisterLobby { .. }
-        | ClientMessage::CreateDraftWithSettings { .. }
-        | ClientMessage::JoinDraftWithPassword { .. }
-        | ClientMessage::DraftAction { .. }
-        | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
@@ -1528,5 +1545,87 @@ mod tests {
         // safe only because `to_lobby_client_message` never clones it (the
         // paired half lives in `phase-server`).
         assert!(guard_broker_projection_inbound(&frame).is_ok());
+    }
+
+    /// Every native draft command refused by its wire bounds answers its own
+    /// request on the correlated refusal, carrying the guard's reason; the
+    /// uncorrelated spectator frame keeps the operational `Error`.
+    #[test]
+    fn draft_command_wire_rejections_answer_their_own_request() {
+        use crate::protocol::{DraftCommandRefusal, DraftRequestId};
+        use lobby_broker::validation::{MAX_DISPLAY_NAME_LEN, MAX_GAME_CODE_LEN, MAX_TOKEN_LEN};
+
+        let id = |value: u64| DraftRequestId::try_from(value).unwrap();
+        let long_code = "C".repeat(MAX_GAME_CODE_LEN + 1);
+        let frames = [
+            (
+                201,
+                ClientMessage::CreateDraftWithSettings {
+                    display_name: "A".repeat(MAX_DISPLAY_NAME_LEN + 1),
+                    source: Some(crate::protocol::DraftSourceIntent::Uniform {
+                        set_codes: vec!["TST".to_string()],
+                    }),
+                    set_codes: None,
+                    kind: draft_core::types::DraftKind::Premier,
+                    public: true,
+                    password: None,
+                    timer_seconds: None,
+                    tournament_format: draft_core::types::TournamentFormat::Swiss,
+                    pod_policy: draft_core::types::PodPolicy::Competitive,
+                    pod_size: 8,
+                    fifo_policy: None,
+                    request_id: id(201),
+                },
+            ),
+            (
+                202,
+                ClientMessage::JoinDraftWithPassword {
+                    draft_code: long_code.clone(),
+                    display_name: "Bob".to_string(),
+                    password: None,
+                    request_id: id(202),
+                },
+            ),
+            (
+                203,
+                ClientMessage::DraftAction {
+                    draft_code: long_code.clone(),
+                    action: draft_core::types::DraftAction::StartDraft,
+                    request_id: id(203),
+                },
+            ),
+            (
+                204,
+                ClientMessage::ReconnectDraft {
+                    draft_code: "ABCD12".to_string(),
+                    player_token: "t".repeat(MAX_TOKEN_LEN + 1),
+                    request_id: id(204),
+                },
+            ),
+        ];
+        for (expected_id, frame) in frames {
+            let reason =
+                guard_client_message_before_dispatch(&frame, ServerMode::Full).unwrap_err();
+            match wire_rejection_message(&frame, reason.clone()) {
+                ServerMessage::DraftCommandRefused {
+                    request_id,
+                    refusal: DraftCommandRefusal::Rejected { reason: answered },
+                } => {
+                    assert_eq!(request_id, id(expected_id));
+                    assert_eq!(answered, reason);
+                }
+                other => panic!("draft command {expected_id} was answered uncorrelated: {other:?}"),
+            }
+        }
+
+        let spectate = ClientMessage::SpectateDraft {
+            draft_code: long_code,
+        };
+        let reason = guard_client_message_before_dispatch(&spectate, ServerMode::Full).unwrap_err();
+        assert!(reason.contains("draft_code"), "{reason}");
+        match wire_rejection_message(&spectate, reason.clone()) {
+            ServerMessage::Error { message, .. } => assert_eq!(message, reason),
+            other => panic!("a spectator frame carries no request id: {other:?}"),
+        }
     }
 }

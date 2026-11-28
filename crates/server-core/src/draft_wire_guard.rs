@@ -11,6 +11,8 @@ use lobby_broker::validation::{
     MAX_DRAFT_SET_CODE_LEN, MAX_GAME_CODE_LEN, MAX_PASSWORD_LEN, MAX_TIMER_SECONDS, MAX_TOKEN_LEN,
 };
 
+use crate::protocol::NativeFifoPolicyIntent;
+
 /// Validate `CreateDraftWithSettings` wire fields before pool lookup and lobby
 /// registration.
 pub fn guard_create_draft_with_settings(
@@ -96,6 +98,20 @@ pub fn guard_draft_action(draft_code: &str) -> Result<(), String> {
     validate_token("draft_code", draft_code, MAX_GAME_CODE_LEN)
 }
 
+/// Refuse a native create's FIFO policy intent while native FIFO is closed.
+///
+/// Every `Some` is refused, explicit defaults included, so "no FIFO policy"
+/// has one spelling on the wire (the field absent). The refusal is the one
+/// shared FIFO text every runtime that does not run FIFO gives.
+pub fn guard_native_fifo_policy(
+    fifo_policy: Option<&NativeFifoPolicyIntent>,
+) -> Result<(), String> {
+    match fifo_policy {
+        None => Ok(()),
+        Some(_) => Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use draft_core::types::{DraftKind, TournamentFormat, MAX_PACK_COUNT};
@@ -103,8 +119,32 @@ mod tests {
 
     use super::{
         guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
-        guard_join_draft_with_password, guard_reconnect_draft,
+        guard_join_draft_with_password, guard_native_fifo_policy, guard_reconnect_draft,
     };
+    use crate::protocol::NativeFifoPolicyIntent;
+
+    #[test]
+    fn native_fifo_policy_intent_is_refused_while_native_fifo_is_closed() {
+        assert_eq!(guard_native_fifo_policy(None), Ok(()));
+        let explicit_default = NativeFifoPolicyIntent {
+            selection: draft_core::types::DraftSelectionPolicy::default(),
+            review_seconds: 0,
+        };
+        let burning = NativeFifoPolicyIntent {
+            selection: draft_core::types::DraftSelectionPolicy {
+                burns_per_pick: 1,
+                discard_threshold: 0,
+            },
+            review_seconds: 30,
+        };
+        for intent in [explicit_default, burning] {
+            assert_eq!(
+                guard_native_fifo_policy(Some(&intent)),
+                Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string()),
+                "{intent:?}"
+            );
+        }
+    }
 
     #[test]
     fn create_draft_accepts_valid_fields() {

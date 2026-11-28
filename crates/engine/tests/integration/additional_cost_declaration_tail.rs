@@ -772,13 +772,8 @@ fn aura_replicate_is_declared_with_the_defiler() {
     assert_cast_completes(&runner, loyalty, &trail);
     assert_eq!(
         trail.prompts,
-        [
-            "TargetSelection",
-            "DefilerPayment",
-            "OptionalCostChoice",
-            "OptionalCostChoice"
-        ],
-        "the Aura's target, then the Defiler, then replicate (paid once, then declined)"
+        ["TargetSelection", "DefilerPayment", "OptionalCostChoice"],
+        "the Aura's target, then the Defiler, then the one affordable Replicate payment"
     );
     assert_eq!(life(&runner), 18);
     assert_eq!(pool(&runner), 1, "{{1}}{{B}} + replicate {{2}} less {{B}}");
@@ -1318,11 +1313,11 @@ fn replicate_declared_before_targets_still_exiles_three() {
         );
 
         assert_cast_completes(&runner, pyromatics, &trail);
-        // CR 601.2b: one replicate run (each payment, then the decline),
-        // never offered again after the targets.
+        // CR 601.2b: a single Replicate choice precedes the target. Declining or
+        // reaching the capacity ends the run before the escape cards are exiled.
         assert_eq!(
-            trail.count("OptionalCostChoice"),
-            replicate as usize + 1,
+            trail.prompts,
+            ["OptionalCostChoice", "TargetSelection", "PayCost"],
             "replicate={replicate}: {:?}",
             trail.prompts
         );

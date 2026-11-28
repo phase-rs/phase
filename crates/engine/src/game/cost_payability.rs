@@ -1919,10 +1919,7 @@ impl AbilityCostLegPayability for AbilityCost {
             AbilityCost::PayEnergy { amount } => {
                 let resolved =
                     super::quantity::resolve_quantity(state, amount, player, source).max(0);
-                state
-                    .players
-                    .get(player.0 as usize)
-                    .is_some_and(|p| (p.energy as i64) >= resolved as i64)
+                super::restrictions::energy_available_for_payment(state, player) >= resolved as u32
             }
             // CR 702.179f: Pay-speed resolves the quantity, then checks against
             // current speed. `QuantityExpr::Ref(Variable)` resolves to 0, which

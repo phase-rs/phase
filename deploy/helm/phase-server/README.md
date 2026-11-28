@@ -278,8 +278,9 @@ idempotency keys: commands are not automatically retried or deduplicated.
 
 Reattachment bootstraps precede updates from the new room, and a successful
 spectator switch stops routing the previous room. If a draft match ends while
-a handoff waits, the server returns `DraftActionRejected` and the current draft
-view instead of an active-game bootstrap. This is an operation refusal, not a
+a handoff waits, the server answers the reconnect with `DraftCommandRefused`,
+carrying the reconnect's `request_id`, and then the current draft view instead
+of an active-game bootstrap. This is an operation refusal, not a
 WebSocket disconnect.
 
 A Full connection installed during a draft handoff takes precedence over that

@@ -79,6 +79,7 @@ pub async fn admin_delete_draft(
     match removed {
         Some(session) => {
             crate::teardown_removed_draft(
+                &app_state.draft_sessions,
                 &app_state.sessions,
                 &app_state.connections,
                 &app_state.draft_spectators,

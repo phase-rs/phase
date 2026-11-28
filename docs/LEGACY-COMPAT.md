@@ -30,6 +30,13 @@ maximum expression. A checkpoint containing a numeric Blight count resumes
 with that fixed amount. Fresh Oracle parsing supplies bounded X to newly
 created card definitions.
 
+### `LEGACY_CONSPIRE_PAYMENT_ORIGIN_2026Q4`
+
+- **Covers** saved Conspire offers and tap selections recorded under the generic `Other` payment origin. Restore recognizes the exact Conspire cost and gives it a separate payment record before the cast resumes.
+- **Added in** 0.134.0.
+- **Removal trigger** the compile-time tripwire fires after 0.148.x.
+- **Source** `crates/engine/src/game/casting_costs.rs:2812`.
+
 ### `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`
 
 - **Grep token:** `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`

@@ -255,7 +255,9 @@ fn parse_granted_self_cost_keyword(keyword_str: &str) -> Option<Keyword> {
             (|c| Keyword::Blitz(crate::types::keywords::BlitzCost::Mana(c)))
                 as fn(ManaCost) -> Keyword,
         ),
-        ("replicate", Keyword::Replicate as fn(ManaCost) -> Keyword),
+        ("replicate", |cost| {
+            Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(cost))
+        }),
     ]
     .into_iter()
     .find_map(|(name, ctor)| {
