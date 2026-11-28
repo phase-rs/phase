@@ -84,8 +84,8 @@ use server_core::client_message_wire_guard::{
 };
 use server_core::draft_action_payload_guard::guard_draft_action_payload;
 use server_core::draft_session::{
-    draft_seats_needing_auto_pick, DraftMatchPlayer, DraftMatchSpawn, DraftSession,
-    DraftSessionManager, DRAFT_HOST_SEAT,
+    draft_seats_needing_auto_pick, native_flow, DraftMatchPlayer, DraftMatchSpawn, DraftSchedule,
+    DraftSession, DraftSessionManager, NativeRowFlow, DRAFT_HOST_SEAT,
 };
 use server_core::draft_wire_guard::{
     guard_chaos_layout_for_kind, guard_create_draft_with_settings, guard_draft_action,
@@ -103,7 +103,8 @@ use server_core::legacy_join_guard::guard_legacy_join_game;
 use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
-    build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerErrorCode,
+    answered_draft_prompt, build_commit, resolve_draft_source_intent, ClientMessage,
+    DraftCommandRefusal, DraftCommandResult, DraftRequestId, RankedPlayerResult, ServerErrorCode,
     ServerMessage, ServerMode, StateCodec, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL,
     LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
@@ -423,9 +424,13 @@ fn restore_persisted_draft_session(
     Ok(restored.session.status)
 }
 
-/// Restores every persisted draft row, deleting the ones that cannot be
-/// admitted, and re-arms the pick timer of each pod restored mid-draft.
-/// Returns the number restored.
+/// Restores every persisted legacy and shared-stack draft row and re-arms the
+/// pick timer of each pod restored mid-draft. Returns the number restored.
+///
+/// Deletes no row: a row it cannot parse, and a row the public restore refuses
+/// (a FIFO row, a malformed FIFO row, a legacy-flow row carrying FIFO state, a
+/// wrapper or key mismatch, an invalid legacy snapshot), is retained for
+/// recovery with a warning, never installed and never registered.
 async fn restore_persisted_drafts(
     game_db: &SharedGameDb,
     draft_state: &SharedDraftState,
@@ -459,13 +464,11 @@ async fn restore_persisted_drafts(
                     restored_drafts += 1;
                 }
                 Err(error) => {
-                    warn!(draft = %draft_code, error = %error, "invalid persisted draft session, deleting");
-                    let _ = game_db.delete_draft_session(draft_code);
+                    warn!(draft = %draft_code, error = %error, "persisted draft session not admitted; row retained for recovery");
                 }
             },
             Err(e) => {
-                warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
-                let _ = game_db.delete_draft_session(draft_code);
+                warn!(draft = %draft_code, error = %e, "persisted draft session unreadable; row retained for recovery");
             }
         }
     }
@@ -1902,15 +1905,21 @@ const DRAFT_SOCKET_FRESH_REJECTION: &str = "This socket is already attached to a
 /// Reconnecting is deliberately excluded. A new websocket has no draft seat
 /// identity and may reconnect, while an attached websocket is governed by the
 /// exact-seat checks in [`reconnect_draft_seat`].
+///
+/// The refusal answers the command's own request id.
 fn draft_socket_admission_rejection(
     message: &ClientMessage,
     identity: &SocketIdentity,
-) -> Option<&'static str> {
-    (matches!(
-        message,
-        ClientMessage::CreateDraftWithSettings { .. } | ClientMessage::JoinDraftWithPassword { .. }
-    ) && identity.draft_seat().is_some())
-    .then_some(DRAFT_SOCKET_FRESH_REJECTION)
+) -> Option<ServerMessage> {
+    let (ClientMessage::CreateDraftWithSettings { request_id, .. }
+    | ClientMessage::JoinDraftWithPassword { request_id, .. }) = message
+    else {
+        return None;
+    };
+    identity
+        .draft_seat()
+        .is_some()
+        .then(|| ServerMessage::draft_rejected(*request_id, DRAFT_SOCKET_FRESH_REJECTION))
 }
 
 /// Resolve a game to its own lock. The registry guard is taken, the handle
@@ -2342,9 +2351,41 @@ async fn transition_listing(
     transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
 ) {
     let mut lob_guard = lobby.lock().await;
+    transition_listing_locked(&mut lob_guard, lobby_subscribers, game_code, transition).await;
+}
+
+/// Runs a presence transition on the row `registration` created, and announces
+/// the listing change it made, only while that registration is still the row
+/// under its code; a replacement row is left as it is and announces nothing.
+async fn transition_registered_listing(
+    lobby: &SharedLobby,
+    lobby_subscribers: &SharedLobbySubscribers,
+    registration: &LobbyRegistration,
+    transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
+) {
+    let mut lob_guard = lobby.lock().await;
+    if lob_guard.lobby().is_current(registration) {
+        transition_listing_locked(
+            &mut lob_guard,
+            lobby_subscribers,
+            registration.game_code(),
+            transition,
+        )
+        .await;
+    }
+}
+
+/// Runs a presence transition on `game_code`'s lobby row under the caller's
+/// lobby guard, and announces the listing change it made.
+async fn transition_listing_locked(
+    lob_guard: &mut LobbyGuard<'_>,
+    lobby_subscribers: &SharedLobbySubscribers,
+    game_code: &str,
+    transition: impl FnOnce(&mut lobby_broker::lobby::LobbyManager),
+) {
     let delta = lob_guard.lobby_mut().listing_delta(game_code, transition);
     if let Some(frame) = listing_frame(game_code, delta) {
-        broadcast_to_lobby_subscribers(&lob_guard, lobby_subscribers, frame).await;
+        broadcast_to_lobby_subscribers(lob_guard, lobby_subscribers, frame).await;
     }
 }
 
@@ -2673,11 +2714,17 @@ async fn attach_current_draft_match(
     lobby_subscribers: &SharedLobbySubscribers,
     identity: &mut SocketIdentity,
     draft_code: &str,
+    request_id: DraftRequestId,
     tx: &crate::socket_mailbox::Sender,
     received_at: Instant,
     executor: &game_executor::GameExecutor,
     #[cfg(test)] hooks: &socket_test_hooks::Hooks,
 ) -> Result<(), String> {
+    // The one answer of an accepted reconnect: the seat's view, carrying the
+    // reconnect's own request id.
+    let reconnected = move |view: draft_core::view::DraftPlayerView| {
+        ServerMessage::draft_accepted(request_id, DraftCommandResult::Reconnected { view })
+    };
     let (attached_draft, draft_seat, draft_token) = identity
         .draft_seat()
         .ok_or_else(|| "Socket is not attached to a draft seat".to_string())?;
@@ -2696,7 +2743,7 @@ async fn attach_current_draft_match(
         .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
     let Some((pairing, game_code, game_player)) = draft_session.active_match_for_seat(draft_seat)
     else {
-        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        let _ = tx.send(reconnected(draft_view));
         return Ok(());
     };
     let opponent_index = match game_player {
@@ -2730,7 +2777,7 @@ async fn attach_current_draft_match(
             game = %game_code,
             "draft pairing references a game that is no longer resident"
         );
-        let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+        let _ = tx.send(reconnected(draft_view));
         return Ok(());
     };
     let full_key = session
@@ -2785,7 +2832,7 @@ async fn attach_current_draft_match(
                 game = %game_code,
                 "draft pairing disappeared during prior-route retirement"
             );
-            let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
+            let _ = tx.send(reconnected(draft_view));
             return Ok(());
         };
         session = current;
@@ -2802,9 +2849,10 @@ async fn attach_current_draft_match(
         session.state.waiting_for,
         engine::types::game_state::WaitingFor::GameOver { .. }
     ) {
-        let _ = tx.send(ServerMessage::DraftActionRejected {
-            reason: "Draft match is no longer active".to_string(),
-        });
+        let _ = tx.send(ServerMessage::draft_rejected(
+            request_id,
+            "Draft match is no longer active",
+        ));
         let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
         return Ok(());
     }
@@ -2816,9 +2864,10 @@ async fn attach_current_draft_match(
         }
     };
     if active_key.as_ref() != Some(&full_key) {
-        let _ = tx.send(ServerMessage::DraftActionRejected {
-            reason: "Draft match is no longer active".to_string(),
-        });
+        let _ = tx.send(ServerMessage::draft_rejected(
+            request_id,
+            "Draft match is no longer active",
+        ));
         let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
         return Ok(());
     }
@@ -2834,9 +2883,10 @@ async fn attach_current_draft_match(
             .and_then(|players| players.get(&game_player))
             .is_some_and(|sender| !sender.same_channel(tx))
     {
-        let _ = tx.send(ServerMessage::DraftActionRejected {
-            reason: "Draft match seat belongs to a newer Full connection".to_string(),
-        });
+        let _ = tx.send(ServerMessage::draft_rejected(
+            request_id,
+            "Draft match seat belongs to a newer Full connection",
+        ));
         let _ = tx.send(ServerMessage::DraftStateUpdate { view: draft_view });
         return Ok(());
     }
@@ -2864,11 +2914,7 @@ async fn attach_current_draft_match(
                 build_game_started_message(session, &decision, game_player, None, Vec::new());
             // Both leases still fence capture and publication, while projection
             // and decision derivation occupy only a blocking CPU worker.
-            for message in [
-                binding,
-                game_started,
-                ServerMessage::DraftStateUpdate { view: draft_view },
-            ] {
+            for message in [binding, game_started, reconnected(draft_view)] {
                 let _ = sender.send(message);
             }
         })
@@ -3579,7 +3625,13 @@ async fn flush_sessions_on_shutdown(
     // gone by here, which is the whole point of the extraction.
     let dsm = draft_state.lock().await;
     let mut flushed_drafts = 0u32;
-    for (draft_code, session) in &dsm.sessions {
+    // A FIFO row is already current through its fence; an unsaved FIFO result
+    // was never acknowledged, so only legacy pods are written here.
+    for (draft_code, session) in dsm
+        .sessions
+        .iter()
+        .filter(|(_, session)| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    {
         let snapshot = session.to_persisted();
         match serde_json::to_string(&snapshot) {
             Ok(json) => {
@@ -6505,7 +6557,12 @@ async fn broadcast_draft_spectator_views(
     draft_spectators: &SharedDraftSpectators,
 ) {
     let mgr = draft_state.lock().await;
-    let Some(session) = mgr.sessions.get(draft_code) else {
+    // A FIFO owner publishes only through its own save-then-publish fence.
+    let Some(session) = mgr
+        .sessions
+        .get(draft_code)
+        .filter(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    else {
         return;
     };
     let mut specs = draft_spectators.lock().await;
@@ -6526,11 +6583,18 @@ async fn broadcast_draft_spectator_views(
     }
 }
 
-/// Tears down a pod already removed from the draft manager: its match games,
-/// routing, spectators, listing and persisted row. Never acquires
-/// `draft_sessions`.
+/// Tears down a pod already removed from the draft manager: its match games
+/// and their routing always, and its code-keyed routing, spectators, listing
+/// and persisted row only while no session holds the code.
+///
+/// Holds `draft_sessions` throughout, so the residency check and every
+/// code-keyed write it guards form one critical section: a session installed
+/// under the code after the removal (a FIFO owner restored or created there)
+/// keeps its row, its senders and its listing. Every other lock it takes is
+/// below `draft_sessions` in the declared order.
 #[allow(clippy::too_many_arguments)]
 async fn teardown_removed_draft(
+    draft_state: &SharedDraftState,
     state: &SharedState,
     connections: &SharedConnections,
     draft_spectators: &SharedDraftSpectators,
@@ -6541,6 +6605,8 @@ async fn teardown_removed_draft(
     code: &str,
     session: DraftSession,
 ) {
+    let manager = draft_state.lock().await;
+    let code_is_free = !manager.sessions.contains_key(code);
     // Remove active game sessions spawned by this draft (Pitfall 4 mitigation)
     let match_codes: Vec<String> = session.active_matches.values().cloned().collect();
     if !match_codes.is_empty() {
@@ -6554,21 +6620,28 @@ async fn teardown_removed_draft(
     // entry, and a force-delete destroys the same kinds of subject.
     {
         let mut conns = connections.lock().await;
-        conns.remove(code);
+        if code_is_free {
+            conns.remove(code);
+        }
         for game_code in &match_codes {
             conns.remove(game_code);
         }
     }
-    draft_spectators.lock().await.remove(code);
+    if code_is_free {
+        draft_spectators.lock().await.remove(code);
+    }
     {
         let mut specs = game_spectators.lock().await;
         for game_code in &match_codes {
             specs.remove(game_code);
         }
     }
-    delist_and_announce(lobby, lobby_subscribers, std::iter::once(code)).await;
-    // Delete from persistence
-    let _ = game_db.delete_draft_session(code);
+    if code_is_free {
+        delist_and_announce(lobby, lobby_subscribers, std::iter::once(code)).await;
+        // Delete from persistence
+        let _ = game_db.delete_draft_session(code);
+    }
+    drop(manager);
 }
 
 /// The draft seat-expiry sweep: acts on every lapsed seat in one draft critical
@@ -6608,6 +6681,7 @@ async fn sweep_draft_seat_expiry(
     };
     for (code, session) in sweep.reaped {
         teardown_removed_draft(
+            draft_state,
             state,
             connections,
             draft_spectators,
@@ -6639,7 +6713,12 @@ async fn persist_draft_session_async(
     // Snapshot and write under the draft guard: a pod removed first is never written back.
     tokio::task::spawn_blocking(move || {
         let mgr = draft_state.blocking_lock();
-        let Some(session) = mgr.sessions.get(&code) else {
+        // A FIFO row is written only by its own save-then-publish fence.
+        let Some(session) = mgr
+            .sessions
+            .get(&code)
+            .filter(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+        else {
             return;
         };
         match serde_json::to_string(&session.to_persisted()) {
@@ -7646,6 +7725,15 @@ async fn maybe_spawn_draft_matches(
     connections: &SharedConnections,
 ) {
     let mut draft_mgr = draft_state.clone().lock_owned().await;
+    // The calling action released the draft guard first: act only while a
+    // legacy pod still holds the code, never on a FIFO owner installed since.
+    if !draft_mgr
+        .sessions
+        .get(draft_code)
+        .is_some_and(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    {
+        return;
+    }
     let code = draft_code.to_string();
     let card_db = db.clone();
     let persistence = game_db.clone();
@@ -7715,6 +7803,15 @@ async fn maybe_spawn_draft_matches(
     // its engine state between pairing generation and match-start delivery.
     // Draft reconnects use the same draft state -> connections ordering.
     let draft_manager = draft_state.lock().await;
+    // The guard was released after the spawn: announce only while a legacy pod
+    // still holds the code.
+    if !draft_manager
+        .sessions
+        .get(draft_code)
+        .is_some_and(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    {
+        return;
+    }
     let conns = connections.lock().await;
     let Some(players) = conns.get(draft_code) else {
         return;
@@ -7768,20 +7865,34 @@ async fn broadcast_draft_views(
     // transaction. Without this guard, a reconnect could mark its seat live
     // while a concurrent broadcast still selected its superseded sender.
     let draft_manager = draft_state.lock().await;
-    let Some(session) = draft_manager.sessions.get(draft_code) else {
+    // A FIFO owner publishes only through its own save-then-publish fence.
+    let Some(session) = draft_manager
+        .sessions
+        .get(draft_code)
+        .filter(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    else {
         return;
     };
     let conns = connections.lock().await;
     // Draft connections are stored under the draft_code in the connections map
     if let Some(players) = conns.get(draft_code) {
-        for (pid, sender) in players.iter() {
-            let seat = pid.0 as usize;
-            if seat < session.player_tokens.len() {
-                let msg = ServerMessage::DraftStateUpdate {
-                    view: session.view_for_seat(seat),
-                };
-                let _ = sender.send(msg);
-            }
+        send_draft_views(session, players);
+    }
+}
+
+/// Sends each seat sender its own `DraftStateUpdate`: the one fan-out the
+/// legacy publisher and the FIFO fence share.
+fn send_draft_views(
+    session: &DraftSession,
+    players: &HashMap<PlayerId, crate::socket_mailbox::Sender>,
+) {
+    for (pid, sender) in players.iter() {
+        let seat = pid.0 as usize;
+        if seat < session.player_tokens.len() {
+            let msg = ServerMessage::DraftStateUpdate {
+                view: session.view_for_seat(seat),
+            };
+            let _ = sender.send(msg);
         }
     }
 }
@@ -7793,7 +7904,16 @@ async fn broadcast_draft_timer_sync(
     draft_state: &SharedDraftState,
 ) {
     let msg = ServerMessage::DraftTimerSync { remaining_ms };
-    let _draft_manager = draft_state.lock().await;
+    let draft_manager = draft_state.lock().await;
+    // The tick released the guard before calling here: only a legacy pod
+    // still under the code takes its timer sync.
+    if !draft_manager
+        .sessions
+        .get(draft_code)
+        .is_some_and(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
+    {
+        return;
+    }
     let conns = connections.lock().await;
     if let Some(players) = conns.get(draft_code) {
         for sender in players.values() {
@@ -7835,11 +7955,18 @@ fn spawn_pick_timer(
                 let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
                     return;
                 };
-                if session.session.status != draft_core::types::DraftStatus::Drafting {
-                    session.timer_remaining_ms = None;
+                let status = session.session.status;
+                // A pod removed since this timer was armed may have been
+                // replaced under its code by a FIFO owner, which this timer
+                // never drives.
+                let Some(legacy) = session.legacy_schedule_mut() else {
+                    return;
+                };
+                if status != draft_core::types::DraftStatus::Drafting {
+                    legacy.timer_remaining_ms = None;
                     return;
                 }
-                session.timer_remaining_ms = Some(remaining_ms);
+                legacy.timer_remaining_ms = Some(remaining_ms);
             }
 
             broadcast_draft_timer_sync(
@@ -7859,10 +7986,14 @@ fn spawn_pick_timer(
         let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
             return;
         };
+        let status = session.session.status;
+        let Some(legacy) = session.legacy_schedule_mut() else {
+            return;
+        };
 
         // Only auto-pick if still in Drafting status
-        if session.session.status != draft_core::types::DraftStatus::Drafting {
-            session.timer_remaining_ms = None;
+        if status != draft_core::types::DraftStatus::Drafting {
+            legacy.timer_remaining_ms = None;
             return;
         }
 
@@ -7889,8 +8020,12 @@ fn spawn_pick_timer(
             }
         }
 
-        if let Some(session) = mgr.sessions.get_mut(&timer_draft_code) {
-            session.timer_remaining_ms = None;
+        if let Some(legacy) = mgr
+            .sessions
+            .get_mut(&timer_draft_code)
+            .and_then(DraftSession::legacy_schedule_mut)
+        {
+            legacy.timer_remaining_ms = None;
         }
 
         drop(mgr);
@@ -7920,6 +8055,7 @@ fn spawn_pick_timer(
             let status = mgr
                 .sessions
                 .get(&timer_draft_code)
+                .filter(|s| matches!(s.schedule, DraftSchedule::Legacy(_)))
                 .map(|s| s.session.status);
             status == Some(draft_core::types::DraftStatus::Drafting)
         };
@@ -7934,17 +8070,44 @@ fn spawn_pick_timer(
     });
 
     // Store the handle so it can be aborted if all picks come in early
-    tokio::spawn(async move {
+    tokio::spawn(pick_timer_handle::store(
+        draft_state,
+        draft_code,
+        handle,
+        pick_ms,
+    ));
+}
+
+mod pick_timer_handle {
+    use super::*;
+
+    /// Hands a pick timer's task to the legacy pod under `draft_code`,
+    /// aborting the pod's previous timer.
+    pub(super) async fn store(
+        draft_state: SharedDraftState,
+        draft_code: String,
+        handle: tokio::task::JoinHandle<()>,
+        pick_ms: u32,
+    ) {
         let mut mgr = draft_state.lock().await;
-        if let Some(session) = mgr.sessions.get_mut(&draft_code) {
-            // Abort previous timer if any (T-59-07: prevent timer task accumulation)
-            if let Some(prev) = session.timer_task.take() {
-                prev.abort();
+        match mgr
+            .sessions
+            .get_mut(&draft_code)
+            .and_then(DraftSession::legacy_schedule_mut)
+        {
+            Some(legacy) => {
+                // Abort previous timer if any (T-59-07: prevent timer task accumulation)
+                if let Some(prev) = legacy.timer_task.take() {
+                    prev.abort();
+                }
+                legacy.timer_remaining_ms = Some(pick_ms);
+                legacy.timer_task = Some(handle);
             }
-            session.timer_remaining_ms = Some(pick_ms);
-            session.timer_task = Some(handle);
+            // No legacy pod holds the code any more: no session takes this
+            // timer, so it ends here.
+            None => handle.abort(),
         }
-    });
+    }
 }
 
 type DraftPickWindow = (draft_core::types::DraftStatus, u8, u8);
@@ -7965,6 +8128,1604 @@ fn should_rearm_pick_timer(
             after.1 != pack || after.2 != pick
         }
         _ => false,
+    }
+}
+
+/// The private FIFO scheduler: a process-local wake for each FIFO session's
+/// core-owned deadlines, the one save-then-publish fence every accepted FIFO
+/// operation and wake passes through, and the private create and restore that
+/// install a FIFO session. No public path creates a FIFO session.
+///
+/// Lock use: `draft_sessions` is held throughout each operation; `lobby`,
+/// `connections` and `draft_spectators` are taken inside it, each released
+/// before the next, all downward in the declared order. No `GameSession` guard
+/// is taken. A result is saved synchronously under the draft guard: queued
+/// legacy saves block a pool thread on this same guard, so awaiting the
+/// blocking pool while holding it could starve.
+#[cfg_attr(not(test), allow(dead_code))] // Reached once native FIFO admission opens.
+mod fifo_scheduler {
+    use super::*;
+    use draft_core::pack_source::PackSource;
+    use draft_core::types::DraftAction;
+    use server_core::draft_session::{
+        DraftActor, FifoStaged, FifoWakeRegistration, StagedFifoSession, DRAFT_CODE_RESIDENT,
+    };
+    use server_core::persist::PersistedDraftSession;
+
+    /// The host clock a FIFO wake sleeps on: epoch milliseconds anchored to a
+    /// tokio instant, so a wake can sleep on tokio's clock. Core clamps time to
+    /// its `last_now_ms`, so a later process's earlier origin cannot move a
+    /// session backwards.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct FifoHostClock {
+        origin_ms: u64,
+        origin: tokio::time::Instant,
+    }
+
+    impl FifoHostClock {
+        /// A clock reading `origin_ms` now.
+        pub(super) fn starting_at(origin_ms: u64) -> Self {
+            Self {
+                origin_ms,
+                origin: tokio::time::Instant::now(),
+            }
+        }
+
+        /// The current epoch milliseconds: the origin plus elapsed tokio time.
+        pub(super) fn now_ms(&self) -> u64 {
+            let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.origin_ms.saturating_add(elapsed)
+        }
+
+        /// The tokio instant at which this clock reads `due_ms`.
+        pub(super) fn instant_for(&self, due_ms: u64) -> tokio::time::Instant {
+            self.origin + Duration::from_millis(due_ms.saturating_sub(self.origin_ms))
+        }
+    }
+
+    /// Everything a FIFO operation, wake or install touches.
+    #[derive(Clone)]
+    pub(super) struct FifoScheduler {
+        pub(super) draft_state: SharedDraftState,
+        pub(super) game_db: SharedGameDb,
+        pub(super) connections: SharedConnections,
+        pub(super) draft_spectators: SharedDraftSpectators,
+        pub(super) lobby: SharedLobby,
+        pub(super) lobby_subscribers: SharedLobbySubscribers,
+        pub(super) clock: FifoHostClock,
+    }
+
+    /// What one wake did.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) enum FifoWakeOutcome {
+        /// Its registration was no longer current; nothing was touched.
+        Stale,
+        /// The claimed wake ran `AdvanceClock` through the fence.
+        Applied(FifoStaged),
+        /// The claimed wake's operation was refused.
+        Refused(String),
+    }
+
+    /// Saves a FIFO row synchronously, under the caller's draft guard.
+    pub(super) fn save_fifo_row(
+        game_db: &persistence::GameDb,
+        draft_code: &str,
+        row: &str,
+    ) -> Result<(), String> {
+        game_db
+            .save_draft_session(draft_code, row)
+            .map_err(|error| {
+                error!(draft = %draft_code, %error, "failed to save FIFO draft result");
+                format!("failed to save draft result: {error}")
+            })
+    }
+
+    /// Sends each seat sender of a FIFO session its committed view.
+    pub(super) async fn publish_fifo_views_locked(
+        manager: &DraftSessionManager,
+        connections: &SharedConnections,
+        draft_code: &str,
+    ) {
+        let Some(session) = manager.sessions.get(draft_code) else {
+            return;
+        };
+        let conns = connections.lock().await;
+        if let Some(players) = conns.get(draft_code) {
+            send_draft_views(session, players);
+        }
+    }
+
+    /// Under the held guard, registers a wake for the session's earliest
+    /// running deadline and attaches its task, or cancels the wake when none
+    /// runs. No await separates the registration from the attach.
+    pub(super) fn reconcile_fifo_wake_locked(
+        manager: &mut DraftSessionManager,
+        scheduler: &FifoScheduler,
+        draft_code: &str,
+    ) {
+        match manager.fifo_next_due(draft_code) {
+            None => manager.cancel_fifo_wake(draft_code),
+            Some(due_ms) => {
+                let Some(registration) = manager.register_fifo_wake(draft_code, due_ms) else {
+                    return;
+                };
+                let task = tokio::spawn(fifo_wake(
+                    scheduler.clone(),
+                    draft_code.to_string(),
+                    registration.clone(),
+                ));
+                manager.attach_fifo_wake_task(draft_code, &registration, task);
+            }
+        }
+    }
+
+    /// Sleeps until the registration's due on the host clock, then runs it.
+    pub(super) async fn fifo_wake(
+        scheduler: FifoScheduler,
+        draft_code: String,
+        registration: FifoWakeRegistration,
+    ) {
+        tokio::time::sleep_until(scheduler.clock.instant_for(registration.due_ms())).await;
+        match run_fifo_wake(&scheduler, &draft_code, &registration).await {
+            FifoWakeOutcome::Refused(error) => {
+                warn!(draft = %draft_code, %error, "FIFO draft wake refused");
+            }
+            FifoWakeOutcome::Stale | FifoWakeOutcome::Applied(_) => {}
+        }
+    }
+
+    /// Takes the draft guard and claims the registration; a wake whose
+    /// registration is no longer current touches nothing. A claimed wake runs
+    /// core's `AdvanceClock` through the fence at the host clock's now.
+    pub(super) async fn run_fifo_wake(
+        scheduler: &FifoScheduler,
+        draft_code: &str,
+        registration: &FifoWakeRegistration,
+    ) -> FifoWakeOutcome {
+        let mut manager = scheduler.draft_state.lock().await;
+        if !manager.claim_fifo_wake(draft_code, registration) {
+            return FifoWakeOutcome::Stale;
+        }
+        match run_fifo_operation_locked(
+            &mut manager,
+            scheduler,
+            draft_code,
+            DraftActor::Server,
+            DraftAction::AdvanceClock,
+            None,
+            scheduler.clock.now_ms(),
+        )
+        .await
+        {
+            Ok(staged) => FifoWakeOutcome::Applied(staged),
+            Err(error) => FifoWakeOutcome::Refused(error),
+        }
+    }
+
+    /// The one save-then-publish fence. Under the held draft guard: an earlier
+    /// unsaved result is saved and published first, or the operation is
+    /// refused; the operation is staged; a staged result is saved, then
+    /// committed, then published; and the wake is reconciled. A failed save
+    /// leaves the result unsaved, the committed core unchanged, nothing
+    /// published and no wake registered.
+    pub(super) async fn run_fifo_operation_locked(
+        manager: &mut DraftSessionManager,
+        scheduler: &FifoScheduler,
+        draft_code: &str,
+        actor: DraftActor<'_>,
+        action: DraftAction,
+        pack_source: Option<&(dyn PackSource + Sync)>,
+        now_ms: u64,
+    ) -> Result<FifoStaged, String> {
+        // Nothing advances past an unsaved result: its save is retried first.
+        let retried = match manager.pending_fifo_row(draft_code) {
+            Some(row) => {
+                save_fifo_row(&scheduler.game_db, draft_code, row)?;
+                true
+            }
+            None => false,
+        };
+        if retried {
+            manager.commit_fifo_result(draft_code)?;
+            publish_fifo_views_locked(manager, &scheduler.connections, draft_code).await;
+        }
+        // The `&dyn` source lives only inside this block, never across an await.
+        let staged = {
+            let source = pack_source.map(|source| source as &dyn PackSource);
+            manager.stage_fifo_operation(draft_code, actor, action, source, now_ms)
+        };
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                // The retried result is committed and its stage cleared the
+                // wake, so the session needs its next wake even though this
+                // operation was refused.
+                if retried {
+                    reconcile_fifo_wake_locked(manager, scheduler, draft_code);
+                }
+                return Err(error);
+            }
+        };
+        match staged {
+            FifoStaged::Pending => {
+                let row = manager
+                    .pending_fifo_row(draft_code)
+                    .ok_or_else(|| "a staged draft result is missing".to_string())?;
+                save_fifo_row(&scheduler.game_db, draft_code, row)?;
+                manager.commit_fifo_result(draft_code)?;
+                publish_fifo_views_locked(manager, &scheduler.connections, draft_code).await;
+            }
+            FifoStaged::Unchanged => {}
+        }
+        reconcile_fifo_wake_locked(manager, scheduler, draft_code);
+        Ok(staged)
+    }
+
+    /// Takes the draft guard and runs one operation through the fence.
+    pub(super) async fn run_fifo_operation(
+        scheduler: &FifoScheduler,
+        draft_code: &str,
+        actor: DraftActor<'_>,
+        action: DraftAction,
+        pack_source: Option<&(dyn PackSource + Sync)>,
+        now_ms: u64,
+    ) -> Result<FifoStaged, String> {
+        let mut manager = scheduler.draft_state.lock().await;
+        run_fifo_operation_locked(
+            &mut manager,
+            scheduler,
+            draft_code,
+            actor,
+            action,
+            pack_source,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Installs a staged FIFO session under the held draft guard. Refuses a
+    /// resident code before writing anything; saves the row first (a failed
+    /// save installs nothing and leaves the prior row); then claims the code,
+    /// clearing whatever a removed owner left keyed by it (its listing, its
+    /// seat senders, its spectators), before the FIFO owner is installed and
+    /// its wake registered.
+    pub(super) async fn install_private_fifo_locked(
+        manager: &mut DraftSessionManager,
+        scheduler: &FifoScheduler,
+        staged: StagedFifoSession,
+    ) -> Result<String, String> {
+        let draft_code = staged.draft_code().to_string();
+        if manager.sessions.contains_key(&draft_code) {
+            return Err(DRAFT_CODE_RESIDENT.to_string());
+        }
+        save_fifo_row(&scheduler.game_db, &draft_code, staged.row())?;
+        delist_and_announce(
+            &scheduler.lobby,
+            &scheduler.lobby_subscribers,
+            std::iter::once(draft_code.as_str()),
+        )
+        .await;
+        scheduler.connections.lock().await.remove(&draft_code);
+        scheduler.draft_spectators.lock().await.remove(&draft_code);
+        manager.install_fifo(staged)?;
+        reconcile_fifo_wake_locked(manager, scheduler, &draft_code);
+        Ok(draft_code)
+    }
+
+    /// Creates and installs a private FIFO pod with one seat per name. Returns
+    /// its code and its seats' tokens.
+    pub(super) async fn create_private_fifo(
+        scheduler: &FifoScheduler,
+        config: draft_core::types::DraftConfig,
+        display_names: Vec<String>,
+    ) -> Result<(String, Vec<String>), String> {
+        let mut manager = scheduler.draft_state.lock().await;
+        let staged = manager.stage_private_fifo(config, display_names)?;
+        let tokens = staged.player_tokens().to_vec();
+        let draft_code = install_private_fifo_locked(&mut manager, scheduler, staged).await?;
+        Ok((draft_code, tokens))
+    }
+
+    /// Restores a saved private FIFO row under its database key. The row is
+    /// saved again at install, so the database row always equals the installed
+    /// session's snapshot.
+    pub(super) async fn restore_private_fifo(
+        scheduler: &FifoScheduler,
+        row_draft_code: &str,
+        persisted: PersistedDraftSession,
+    ) -> Result<(), String> {
+        if persisted.draft_code != row_draft_code {
+            return Err("persisted draft code does not match its database row".to_string());
+        }
+        let mut manager = scheduler.draft_state.lock().await;
+        let staged = manager.stage_restored_fifo(persisted)?;
+        install_private_fifo_locked(&mut manager, scheduler, staged).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fifo_scheduler_tests {
+    use super::fifo_scheduler::{
+        create_private_fifo, restore_private_fifo, run_fifo_operation, run_fifo_wake,
+        FifoHostClock, FifoScheduler, FifoWakeOutcome,
+    };
+    use super::*;
+    use draft_core::pack_source::FixturePackSource;
+    use draft_core::types::{
+        DeckAddableCards, DraftAction, DraftClockPolicy, DraftConfig, DraftControl,
+        DraftDeckSubmission, DraftFlow, DraftKind, DraftPairing, DraftPauseReason, DraftSeat,
+        DraftSessionId, DraftSource, DraftStatus, PairingStatus, PickClockPolicy, PodPolicy,
+        SpectatorVisibility, TournamentFormat,
+    };
+    use server_core::draft_session::{DraftActor, FifoStaged, DRAFT_CODE_RESIDENT};
+    use server_core::persist::PersistedDraftSession;
+
+    pub(super) struct Fixture {
+        _dir: tempfile::TempDir,
+        db_path: PathBuf,
+        pub(super) scheduler: FifoScheduler,
+        sessions: SharedState,
+        game_spectators: SharedGameSpectators,
+    }
+
+    /// A real scheduler over a temporary database, with its clock reading 1000.
+    pub(super) fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("games.db");
+        let game_db = Arc::new(
+            persistence::GameDb::open(&db_path, persistence::SessionRetention::Multiplayer)
+                .expect("game db"),
+        );
+        Fixture {
+            _dir: dir,
+            db_path,
+            scheduler: FifoScheduler {
+                draft_state: Arc::new(Mutex::new(DraftSessionManager::new())),
+                game_db,
+                connections: Arc::new(Mutex::new(HashMap::new())),
+                draft_spectators: Arc::new(Mutex::new(HashMap::new())),
+                lobby: Arc::new(Mutex::new(Broker::new())),
+                lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
+                clock: FifoHostClock::starting_at(1000),
+            },
+            sessions: Arc::new(Mutex::new(SessionManager::new())),
+            game_spectators: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(super) fn legacy_config() -> DraftConfig {
+        DraftConfig {
+            flow: DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: DraftClockPolicy::default(),
+            source: DraftSource::single_set("TST".to_string()),
+            set_code: "TST".to_string(),
+            kind: DraftKind::Premier,
+            pod_size: 8,
+            cards_per_pack: 14,
+            pack_count: 3,
+            min_deck_size: 40,
+            addable_cards: DeckAddableCards::standard_basics(),
+            rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
+            spectator_visibility: SpectatorVisibility::default(),
+        }
+    }
+
+    /// The FIFO fixture: 8 seats, `TST`, 2-card packs, 3 packs, a fixed
+    /// 1000 ms pick clock and a 1000 ms Review.
+    pub(super) fn fifo_config() -> DraftConfig {
+        DraftConfig {
+            flow: DraftFlow::FifoAsync,
+            cards_per_pack: 2,
+            clock_policy: DraftClockPolicy {
+                pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+                review_duration_ms: 1000,
+            },
+            ..legacy_config()
+        }
+    }
+
+    /// The FIFO fixture with no clock at all, so no wake ever exists.
+    pub(super) fn fifo_off_config() -> DraftConfig {
+        DraftConfig {
+            clock_policy: DraftClockPolicy {
+                pick: PickClockPolicy::Off,
+                review_duration_ms: 0,
+            },
+            ..fifo_config()
+        }
+    }
+
+    fn source() -> FixturePackSource {
+        FixturePackSource {
+            set_code: "TST".into(),
+            cards_per_pack: 2,
+        }
+    }
+
+    fn names() -> Vec<String> {
+        (0..8).map(|seat| format!("Player {seat}")).collect()
+    }
+
+    /// A FIFO row under `code`, started at 1000.
+    pub(super) fn started_fifo_row(code: &str, config: DraftConfig) -> PersistedDraftSession {
+        let seats = names()
+            .into_iter()
+            .enumerate()
+            .map(|(seat, display_name)| DraftSeat::Human {
+                player_id: PlayerId(seat as u8),
+                display_name,
+            })
+            .collect();
+        let mut core = draft_core::types::DraftSession::new_fifo(
+            config.clone(),
+            seats,
+            code.to_string(),
+            DraftSessionId(format!("restore-{code}")),
+        )
+        .expect("a valid FIFO configuration");
+        draft_core::session::apply_at(&mut core, DraftAction::StartDraft, Some(&source()), 1000)
+            .expect("the FIFO start");
+        PersistedDraftSession {
+            draft_code: code.to_string(),
+            session: core,
+            player_tokens: (0..8).map(|seat| format!("{code}-token-{seat}")).collect(),
+            display_names: names(),
+            config,
+            active_matches: HashMap::new(),
+            lobby_meta: None,
+            timer_remaining_ms: None,
+        }
+    }
+
+    fn row(fx: &Fixture, code: &str) -> Option<String> {
+        fx.scheduler
+            .game_db
+            .load_all_drafts()
+            .expect("load rows")
+            .into_iter()
+            .find_map(|(key, json)| (key == code).then_some(json))
+    }
+
+    fn row_revision(fx: &Fixture, code: &str) -> u64 {
+        let row: PersistedDraftSession =
+            serde_json::from_str(&row(fx, code).expect("a saved row")).expect("a draft row");
+        row.session.fifo.expect("a FIFO row").revision
+    }
+
+    async fn revision(fx: &Fixture, code: &str) -> u64 {
+        fx.scheduler.draft_state.lock().await.sessions[code]
+            .session
+            .fifo
+            .as_ref()
+            .expect("a FIFO core")
+            .revision
+    }
+
+    async fn current_wake(
+        fx: &Fixture,
+        code: &str,
+    ) -> Option<server_core::draft_session::FifoWakeRegistration> {
+        fx.scheduler
+            .draft_state
+            .lock()
+            .await
+            .current_fifo_wake(code)
+    }
+
+    async fn attach_seat(fx: &Fixture, code: &str, seat: u8) -> crate::socket_mailbox::Receiver {
+        let (tx, rx) = crate::socket_mailbox::channel();
+        fx.scheduler
+            .connections
+            .lock()
+            .await
+            .entry(code.to_string())
+            .or_default()
+            .insert(PlayerId(seat), tx);
+        rx
+    }
+
+    fn drain(rx: &mut crate::socket_mailbox::Receiver) -> Vec<ServerMessage> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// The FIFO revisions of the `DraftStateUpdate` frames queued on `rx`.
+    fn published_revisions(rx: &mut crate::socket_mailbox::Receiver) -> Vec<u64> {
+        drain(rx)
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::DraftStateUpdate { view } => {
+                    Some(view.fifo.expect("a FIFO view").state.revision)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The seat's head selection through its own token, via the fence.
+    async fn select_head(
+        fx: &Fixture,
+        code: &str,
+        seat: u8,
+        now_ms: u64,
+    ) -> Result<FifoStaged, String> {
+        let (token, action) = {
+            let manager = fx.scheduler.draft_state.lock().await;
+            let session = &manager.sessions[code];
+            (
+                session.player_tokens[usize::from(seat)].clone(),
+                draft_core::pick_pass::legal_auto_selection(&session.session, seat)
+                    .expect("the seat has a head"),
+            )
+        };
+        run_fifo_operation(
+            &fx.scheduler,
+            code,
+            DraftActor::Seat { token: &token },
+            action,
+            None,
+            now_ms,
+        )
+        .await
+    }
+
+    async fn server_operation(
+        fx: &Fixture,
+        code: &str,
+        action: DraftAction,
+        now_ms: u64,
+    ) -> Result<FifoStaged, String> {
+        let source = source();
+        run_fifo_operation(
+            &fx.scheduler,
+            code,
+            DraftActor::Server,
+            action,
+            Some(&source),
+            now_ms,
+        )
+        .await
+    }
+
+    /// A private pod created through the private path and started at the
+    /// clock's now.
+    async fn started_private_pod(fx: &Fixture, config: DraftConfig) -> String {
+        let (code, _tokens) = create_private_fifo(&fx.scheduler, config, names())
+            .await
+            .expect("a private FIFO pod");
+        let now = fx.scheduler.clock.now_ms();
+        assert_eq!(
+            server_operation(fx, &code, DraftAction::StartDraft, now).await,
+            Ok(FifoStaged::Pending)
+        );
+        code
+    }
+
+    /// A started legacy Premier pod in the fixture's manager.
+    async fn started_legacy_pod(fx: &Fixture) -> String {
+        let mut manager = fx.scheduler.draft_state.lock().await;
+        let (code, _, _) = manager.create_draft(legacy_config(), "Host".to_string());
+        for seat in 1..8 {
+            manager
+                .join_draft(&code, format!("Player {seat}"), None)
+                .unwrap();
+        }
+        manager
+            .apply_system_action(
+                &code,
+                DraftAction::StartDraft,
+                Some(&FixturePackSource {
+                    set_code: "TST".into(),
+                    cards_per_pack: 14,
+                }),
+            )
+            .unwrap();
+        code
+    }
+
+    /// A second connection that makes every save of `code`'s row (or of every
+    /// row) abort, until [`release`].
+    fn fault(fx: &Fixture, code: Option<&str>) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(&fx.db_path).expect("fault connection");
+        let when = code.map_or_else(
+            || "1".to_string(),
+            |code| format!("NEW.draft_code = '{code}'"),
+        );
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER fault_insert BEFORE INSERT ON draft_sessions WHEN {when}
+               BEGIN SELECT RAISE(ABORT, 'injected'); END;
+             CREATE TRIGGER fault_update BEFORE UPDATE ON draft_sessions WHEN {when}
+               BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+        ))
+        .expect("install fault");
+        conn
+    }
+
+    fn release(conn: rusqlite::Connection) {
+        conn.execute_batch("DROP TRIGGER fault_insert; DROP TRIGGER fault_update;")
+            .expect("release fault");
+    }
+
+    async fn yield_a_few() {
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fifo_wake_acts_only_for_its_current_registration() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let r1 = current_wake(&fx, &code)
+            .await
+            .expect("the start registered R1");
+        assert_eq!(r1.due_ms(), 2000);
+        let mut rx = attach_seat(&fx, &code, 0).await;
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert_eq!(
+            select_head(&fx, &code, 0, fx.scheduler.clock.now_ms()).await,
+            Ok(FifoStaged::Pending)
+        );
+        let r2 = current_wake(&fx, &code)
+            .await
+            .expect("the select registered R2");
+        assert_ne!(r2, r1);
+        assert_eq!(r2.due_ms(), 2000);
+        drain(&mut rx);
+        let before = revision(&fx, &code).await;
+        assert_eq!(row_revision(&fx, &code), before);
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        assert_eq!(fx.scheduler.clock.now_ms(), 2000);
+        // Without yielding: R1 is stale and touches nothing.
+        assert_eq!(
+            run_fifo_wake(&fx.scheduler, &code, &r1).await,
+            FifoWakeOutcome::Stale
+        );
+        assert_eq!(revision(&fx, &code).await, before);
+        assert_eq!(row_revision(&fx, &code), before);
+        assert!(drain(&mut rx).is_empty());
+        // Still without yielding: R2 applies exactly once.
+        assert_eq!(
+            run_fifo_wake(&fx.scheduler, &code, &r2).await,
+            FifoWakeOutcome::Applied(FifoStaged::Pending)
+        );
+        assert_eq!(revision(&fx, &code).await, before + 1);
+        assert_eq!(row_revision(&fx, &code), before + 1);
+        assert_eq!(published_revisions(&mut rx), vec![before + 1]);
+        let r3 = current_wake(&fx, &code).await.expect("R3");
+        assert_ne!(r3, r2);
+        assert!(r3.due_ms() > 2001);
+
+        // R2's own task, detached by the claim above, runs now and is stale.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, before + 1);
+        assert_eq!(row_revision(&fx, &code), before + 1);
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(current_wake(&fx, &code).await, Some(r3.clone()));
+
+        // A cancelled registration is stale too.
+        fx.scheduler
+            .draft_state
+            .lock()
+            .await
+            .cancel_fifo_wake(&code);
+        assert_eq!(
+            run_fifo_wake(&fx.scheduler, &code, &r3).await,
+            FifoWakeOutcome::Stale
+        );
+        assert_eq!(revision(&fx, &code).await, before + 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fifo_wake_never_moves_to_a_later_owner() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let ra = current_wake(&fx, &code).await.expect("owner A's wake");
+        assert_eq!(ra.due_ms(), 2000);
+        let saved: PersistedDraftSession =
+            serde_json::from_str(&row(&fx, &code).expect("A's row")).unwrap();
+        fx.scheduler
+            .draft_state
+            .lock()
+            .await
+            .remove_draft(&code)
+            .expect("owner A");
+        restore_private_fifo(&fx.scheduler, &code, saved.clone())
+            .await
+            .expect("owner B under the same code");
+        let rb = current_wake(&fx, &code)
+            .await
+            .expect("B registered from its restored deadlines");
+        assert_ne!(rb, ra);
+        assert_eq!(rb.due_ms(), 2000);
+        let before = revision(&fx, &code).await;
+        let before_row = row(&fx, &code);
+
+        tokio::time::advance(Duration::from_millis(1000)).await;
+        assert_eq!(fx.scheduler.clock.now_ms(), 2000);
+        assert_eq!(
+            run_fifo_wake(&fx.scheduler, &code, &ra).await,
+            FifoWakeOutcome::Stale
+        );
+        assert_eq!(revision(&fx, &code).await, before);
+        assert_eq!(row(&fx, &code), before_row);
+        assert_eq!(
+            run_fifo_wake(&fx.scheduler, &code, &rb).await,
+            FifoWakeOutcome::Applied(FifoStaged::Pending)
+        );
+        assert_eq!(revision(&fx, &code).await, before + 1);
+
+        // A restart: a fresh manager holds no registration until the
+        // restore's reconcile registers one.
+        let mut fresh = DraftSessionManager::new();
+        let staged = fresh.stage_restored_fifo(saved.clone()).unwrap();
+        fresh.install_fifo(staged).unwrap();
+        assert_eq!(fresh.current_fifo_wake(&code), None);
+        let restarted = FifoScheduler {
+            draft_state: Arc::new(Mutex::new(DraftSessionManager::new())),
+            ..fx.scheduler.clone()
+        };
+        restore_private_fifo(&restarted, &code, saved)
+            .await
+            .unwrap();
+        assert!(restarted
+            .draft_state
+            .lock()
+            .await
+            .current_fifo_wake(&code)
+            .is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fifo_wake_sleeps_until_its_core_deadline() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let before = revision(&fx, &code).await;
+        tokio::time::advance(Duration::from_millis(999)).await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, before);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, before + 1);
+        assert_eq!(row_revision(&fx, &code), before + 1);
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert!(manager.sessions[&code]
+                .session
+                .pools
+                .iter()
+                .all(|pool| pool.len() == 1));
+        }
+        assert!(
+            current_wake(&fx, &code)
+                .await
+                .expect("the next wake")
+                .due_ms()
+                > 2000
+        );
+
+        // A restored row whose due is already past fires on the first yield,
+        // once.
+        let late = "LATE01";
+        let late_row = started_fifo_row(late, fifo_config());
+        let late_before = late_row.session.fifo.as_ref().unwrap().revision;
+        restore_private_fifo(&fx.scheduler, late, late_row)
+            .await
+            .unwrap();
+        assert_eq!(current_wake(&fx, late).await.unwrap().due_ms(), 2000);
+        yield_a_few().await;
+        assert_eq!(revision(&fx, late).await, late_before + 1);
+        yield_a_few().await;
+        assert_eq!(revision(&fx, late).await, late_before + 1);
+
+        // A Pause cancels, and advancing past the old due applies nothing.
+        let due = current_wake(&fx, &code).await.unwrap().due_ms();
+        let pause = DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        };
+        assert_eq!(
+            server_operation(&fx, &code, pause, fx.scheduler.clock.now_ms()).await,
+            Ok(FifoStaged::Pending)
+        );
+        assert_eq!(current_wake(&fx, &code).await, None);
+        let paused = revision(&fx, &code).await;
+        tokio::time::advance(Duration::from_millis(
+            due - fx.scheduler.clock.now_ms() + 10,
+        ))
+        .await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, paused);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_fifo_save_publishes_nothing_and_nothing_advances_past_it() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let mut rx = attach_seat(&fx, &code, 0).await;
+        // An unchanged stage attempts no save: it succeeds under the fault.
+        let conn = fault(&fx, Some(&code));
+        assert_eq!(
+            server_operation(&fx, &code, DraftAction::AdvanceClock, 1000).await,
+            Ok(FifoStaged::Unchanged)
+        );
+        assert!(drain(&mut rx).is_empty());
+        release(conn);
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let now = fx.scheduler.clock.now_ms();
+        // Saved, then published.
+        assert_eq!(
+            select_head(&fx, &code, 1, now).await,
+            Ok(FifoStaged::Pending)
+        );
+        let r = revision(&fx, &code).await;
+        assert_eq!(row_revision(&fx, &code), r);
+        assert_eq!(published_revisions(&mut rx), vec![r]);
+
+        // A failed save publishes nothing and keeps the result unsaved.
+        let conn = fault(&fx, Some(&code));
+        assert!(select_head(&fx, &code, 0, now).await.is_err());
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(revision(&fx, &code).await, r);
+        assert_eq!(row_revision(&fx, &code), r);
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert!(manager.pending_fifo_row(&code).is_some());
+            assert_eq!(manager.fifo_next_due(&code), None);
+            assert_eq!(manager.current_fifo_wake(&code), None);
+        }
+
+        // Nothing advances past the unsaved result.
+        assert!(select_head(&fx, &code, 2, now).await.is_err());
+        assert_eq!(revision(&fx, &code).await, r);
+        assert!(drain(&mut rx).is_empty());
+        release(conn);
+        assert_eq!(
+            select_head(&fx, &code, 2, now).await,
+            Ok(FifoStaged::Pending)
+        );
+        assert_eq!(published_revisions(&mut rx), vec![r + 1, r + 2]);
+        assert_eq!(row_revision(&fx, &code), r + 2);
+        let manager = fx.scheduler.draft_state.lock().await;
+        let pools = &manager.sessions[&code].session.pools;
+        assert_eq!(pools[0].len(), 1);
+        assert_eq!(pools[2].len(), 1);
+        assert!(manager.current_fifo_wake(&code).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retried_save_keeps_a_wake_when_the_operation_is_refused() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let mut rx = attach_seat(&fx, &code, 0).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        let now = fx.scheduler.clock.now_ms();
+        let r = revision(&fx, &code).await;
+        let conn = fault(&fx, Some(&code));
+        assert!(select_head(&fx, &code, 0, now).await.is_err());
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert!(manager.pending_fifo_row(&code).is_some());
+            assert_eq!(manager.current_fifo_wake(&code), None);
+        }
+        release(conn);
+
+        // Seat 0's selection again, built from the committed core: the fence
+        // saves and publishes the unsaved result, then refuses the repeat.
+        assert_eq!(
+            select_head(&fx, &code, 0, now).await,
+            Err("Draft error: seat 0 has no pending pack".to_string())
+        );
+        assert_eq!(revision(&fx, &code).await, r + 1);
+        assert_eq!(row_revision(&fx, &code), r + 1);
+        assert_eq!(published_revisions(&mut rx), vec![r + 1]);
+
+        // The refused operation still leaves the session a wake, and it fires
+        // at the earliest running deadline.
+        let wake = current_wake(&fx, &code)
+            .await
+            .expect("a wake after the refused operation");
+        assert_eq!(wake.due_ms(), 2000);
+        tokio::time::advance(Duration::from_millis(wake.due_ms() - now)).await;
+        yield_a_few().await;
+        assert_eq!(revision(&fx, &code).await, r + 2);
+        assert_eq!(row_revision(&fx, &code), r + 2);
+        assert_eq!(published_revisions(&mut rx), vec![r + 2]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fifo_wake_saves_before_it_publishes() {
+        let fx = fixture();
+        let code = started_private_pod(&fx, fifo_config()).await;
+        let mut rx = attach_seat(&fx, &code, 0).await;
+        let before = revision(&fx, &code).await;
+        let before_row = row(&fx, &code);
+        let conn = fault(&fx, Some(&code));
+        tokio::time::advance(Duration::from_millis(1000)).await;
+        yield_a_few().await;
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(row(&fx, &code), before_row);
+        assert_eq!(revision(&fx, &code).await, before);
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert!(
+                manager.pending_fifo_row(&code).is_some(),
+                "the expiry is unsaved"
+            );
+            assert_eq!(manager.current_fifo_wake(&code), None);
+        }
+        release(conn);
+        let pause = DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        };
+        assert_eq!(
+            server_operation(&fx, &code, pause, fx.scheduler.clock.now_ms()).await,
+            Ok(FifoStaged::Pending)
+        );
+        assert_eq!(published_revisions(&mut rx), vec![before + 1, before + 2]);
+        assert_eq!(row_revision(&fx, &code), before + 2);
+
+        // A Review expiry passes the same fence.
+        let review = started_private_pod(&fx, fifo_config()).await;
+        let now = fx.scheduler.clock.now_ms();
+        for _ in 0..2 {
+            for seat in 0..8 {
+                select_head(&fx, &review, seat, now + 100).await.unwrap();
+            }
+        }
+        let due = {
+            let manager = fx.scheduler.draft_state.lock().await;
+            assert_eq!(
+                manager.sessions[&review].session.status,
+                DraftStatus::Review
+            );
+            manager
+                .current_fifo_wake(&review)
+                .expect("the Review wake")
+                .due_ms()
+        };
+        let mut review_rx = attach_seat(&fx, &review, 0).await;
+        let before = revision(&fx, &review).await;
+        let conn = fault(&fx, Some(&review));
+        tokio::time::advance(Duration::from_millis(due - fx.scheduler.clock.now_ms())).await;
+        yield_a_few().await;
+        assert!(drain(&mut review_rx).is_empty());
+        assert_eq!(revision(&fx, &review).await, before);
+        assert_eq!(row_revision(&fx, &review), before);
+        release(conn);
+        let pause_review = DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        };
+        server_operation(&fx, &review, pause_review, fx.scheduler.clock.now_ms())
+            .await
+            .unwrap();
+        assert_eq!(
+            published_revisions(&mut review_rx),
+            vec![before + 1, before + 2]
+        );
+        let manager = fx.scheduler.draft_state.lock().await;
+        assert_eq!(manager.sessions[&review].session.current_pack_number, 1);
+    }
+
+    /// A task that never finishes on its own, and a receiver that reports
+    /// `Closed` once the task is dropped.
+    fn watched_task() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (alive, ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        (task, ended)
+    }
+
+    #[tokio::test]
+    async fn a_pick_timer_no_legacy_pod_takes_is_aborted() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let fx = fixture();
+        let draft_state = fx.scheduler.draft_state.clone();
+        let legacy = started_legacy_pod(&fx).await;
+        let (task, mut legacy_ended) = watched_task();
+        super::pick_timer_handle::store(draft_state.clone(), legacy.clone(), task, 5000).await;
+        yield_a_few().await;
+        assert_eq!(legacy_ended.try_recv(), Err(TryRecvError::Empty));
+        assert!(draft_state.lock().await.sessions[&legacy]
+            .legacy_schedule()
+            .expect("a legacy pod")
+            .timer_task
+            .is_some());
+
+        // A code whose legacy pod was removed, and a code a FIFO owner holds.
+        draft_state
+            .lock()
+            .await
+            .remove_draft(&legacy)
+            .expect("the legacy pod");
+        let fifo = started_private_pod(&fx, fifo_off_config()).await;
+        for code in [legacy, fifo] {
+            let (task, mut ended) = watched_task();
+            super::pick_timer_handle::store(draft_state.clone(), code.clone(), task, 5000).await;
+            yield_a_few().await;
+            assert_eq!(ended.try_recv(), Err(TryRecvError::Closed), "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn private_fifo_install_saves_first() {
+        let fx = fixture();
+        let prior = "PRIOR1";
+        fx.scheduler
+            .game_db
+            .save_draft_session(prior, "prior row")
+            .unwrap();
+        let conn = fault(&fx, None);
+        assert!(
+            create_private_fifo(&fx.scheduler, fifo_off_config(), names())
+                .await
+                .is_err()
+        );
+        assert!(fx.scheduler.draft_state.lock().await.sessions.is_empty());
+        assert!(restore_private_fifo(
+            &fx.scheduler,
+            prior,
+            started_fifo_row(prior, fifo_off_config())
+        )
+        .await
+        .is_err());
+        assert!(fx.scheduler.draft_state.lock().await.sessions.is_empty());
+        assert_eq!(row(&fx, prior).as_deref(), Some("prior row"));
+        release(conn);
+
+        let (created, _) = create_private_fifo(&fx.scheduler, fifo_off_config(), names())
+            .await
+            .unwrap();
+        restore_private_fifo(
+            &fx.scheduler,
+            prior,
+            started_fifo_row(prior, fifo_off_config()),
+        )
+        .await
+        .unwrap();
+        for code in [created.as_str(), prior] {
+            let installed = serde_json::to_string(
+                &fx.scheduler.draft_state.lock().await.sessions[code].to_persisted(),
+            )
+            .unwrap();
+            assert_eq!(row(&fx, code), Some(installed));
+        }
+        // A resident code is refused before anything is written.
+        let resident_row = row(&fx, prior);
+        let mut other = started_fifo_row(prior, fifo_off_config());
+        other.display_names[0] = "Someone else".into();
+        assert_eq!(
+            restore_private_fifo(&fx.scheduler, prior, other).await,
+            Err(DRAFT_CODE_RESIDENT.to_string())
+        );
+        assert_eq!(row(&fx, prior), resident_row);
+    }
+
+    #[tokio::test]
+    async fn startup_loader_retains_every_row_it_does_not_restore() {
+        let fx = fixture();
+        let db = &fx.scheduler.game_db;
+        let mut scratch = DraftSessionManager::new();
+        let pack14 = FixturePackSource {
+            set_code: "TST".into(),
+            cards_per_pack: 14,
+        };
+        let legacy = {
+            let (code, _, _) = scratch.create_draft(legacy_config(), "Host".into());
+            for seat in 1..8 {
+                scratch
+                    .join_draft(&code, format!("Player {seat}"), None)
+                    .unwrap();
+            }
+            scratch
+                .apply_system_action(&code, DraftAction::StartDraft, Some(&pack14))
+                .unwrap();
+            code
+        };
+        let winston = {
+            let procedure = DraftKind::Winston.procedure();
+            let config = DraftConfig {
+                kind: DraftKind::Winston,
+                pod_size: procedure.pod_size,
+                pack_count: procedure.packs_per_player,
+                min_deck_size: procedure.min_deck_size,
+                ..legacy_config()
+            };
+            let (code, _, _) = scratch.create_draft(config, "Host".into());
+            scratch.join_draft(&code, "Guest".into(), None).unwrap();
+            scratch
+                .apply_system_action(&code, DraftAction::StartDraft, Some(&pack14))
+                .unwrap();
+            code
+        };
+        let mut mismatched = {
+            let (code, _, _) = scratch.create_draft(legacy_config(), "Host".into());
+            scratch.sessions[&code].to_persisted()
+        };
+        mismatched.draft_code = "MISMAT".into();
+        let mut malformed = started_fifo_row("FIFOBD", fifo_config());
+        malformed.session.fifo = None;
+        // An existing legacy pod under a FIFO row's code.
+        let existing = fx
+            .scheduler
+            .draft_state
+            .lock()
+            .await
+            .create_draft(legacy_config(), "Host".into())
+            .0;
+        let existing_before = serde_json::to_value(
+            fx.scheduler.draft_state.lock().await.sessions[&existing].to_persisted(),
+        )
+        .unwrap();
+        let json = |row: &PersistedDraftSession| serde_json::to_string(row).unwrap();
+        for (code, text) in [
+            (
+                legacy.clone(),
+                json(&scratch.sessions[&legacy].to_persisted()),
+            ),
+            (
+                winston.clone(),
+                json(&scratch.sessions[&winston].to_persisted()),
+            ),
+            (
+                "FIFOOK".to_string(),
+                json(&started_fifo_row("FIFOOK", fifo_config())),
+            ),
+            ("FIFOBD".to_string(), json(&malformed)),
+            ("MISMAT".to_string(), json(&mismatched)),
+            ("BROKEN".to_string(), "{not a draft row".to_string()),
+            (
+                existing.clone(),
+                json(&started_fifo_row(&existing, fifo_config())),
+            ),
+        ] {
+            db.save_draft_session(&code, &text).unwrap();
+        }
+        let before: HashMap<String, String> = db.load_all_drafts().unwrap().into_iter().collect();
+
+        let restored = restore_persisted_drafts(
+            db,
+            &fx.scheduler.draft_state,
+            &fx.scheduler.lobby,
+            &fx.scheduler.connections,
+            DRAFT_PICK_TIMER_SECONDS,
+        )
+        .await;
+        assert_eq!(restored, 2);
+        {
+            let manager = fx.scheduler.draft_state.lock().await;
+            let mut residents: Vec<_> = manager.sessions.keys().cloned().collect();
+            residents.sort();
+            let mut expected = vec![legacy.clone(), winston.clone(), existing.clone()];
+            expected.sort();
+            assert_eq!(residents, expected);
+            for code in [&legacy, &winston] {
+                assert!(matches!(
+                    manager.sessions[code].schedule,
+                    DraftSchedule::Legacy(_)
+                ));
+            }
+            assert_eq!(
+                serde_json::to_value(manager.sessions[&existing].to_persisted()).unwrap(),
+                existing_before
+            );
+        }
+        let after: HashMap<String, String> = db.load_all_drafts().unwrap().into_iter().collect();
+        let lobby = fx.scheduler.lobby.lock().await;
+        for code in ["FIFOOK", "FIFOBD", "MISMAT", "BROKEN", existing.as_str()] {
+            assert_eq!(after.get(code), before.get(code), "row {code} retained");
+            assert!(after.contains_key(code));
+            assert!(!lobby.lobby().has_game(code));
+        }
+        drop(lobby);
+        // The restored Winston pod's timer is armed.
+        let armed_by = std::time::Instant::now() + Duration::from_secs(5);
+        while fx.scheduler.draft_state.lock().await.sessions[&winston]
+            .legacy_schedule()
+            .expect("a legacy pod")
+            .timer_task
+            .is_none()
+        {
+            assert!(
+                std::time::Instant::now() < armed_by,
+                "the Winston timer arms"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn late_legacy_teardown_never_reaches_a_same_code_fifo_replacement() {
+        let fx = fixture();
+        let s = &fx.scheduler;
+        let (first, control) = {
+            let mut manager = s.draft_state.lock().await;
+            (
+                manager.create_draft(legacy_config(), "Host".into()).0,
+                manager.create_draft(legacy_config(), "Host".into()).0,
+            )
+        };
+        let mut stale = Vec::new();
+        for code in [&first, &control] {
+            let snapshot = s.draft_state.lock().await.sessions[code].to_persisted();
+            s.game_db
+                .save_draft_session(code, &serde_json::to_string(&snapshot).unwrap())
+                .unwrap();
+            s.lobby.lock().await.lobby_mut().register_game(
+                code,
+                RegisterGameRequest {
+                    host_name: "Host".into(),
+                    public: true,
+                    ..Default::default()
+                },
+                &SysEnv,
+            );
+            stale.push(attach_seat(&fx, code, 0).await);
+            let (spectator, _spectator_rx) = crate::socket_mailbox::channel();
+            s.draft_spectators.lock().await.insert(
+                code.clone(),
+                vec![(SpectatorVisibility::default(), spectator)],
+            );
+        }
+        let removed_first = s.draft_state.lock().await.remove_draft(&first).unwrap();
+        let removed_control = s.draft_state.lock().await.remove_draft(&control).unwrap();
+        // Before the restore the code is listed and routed.
+        assert!(s.lobby.lock().await.lobby().has_game(&first));
+        assert!(s.connections.lock().await.contains_key(&first));
+        restore_private_fifo(s, &first, started_fifo_row(&first, fifo_config()))
+            .await
+            .unwrap();
+        // Installing claimed the code.
+        assert!(!s.lobby.lock().await.lobby().has_game(&first));
+        assert!(!s.connections.lock().await.contains_key(&first));
+        assert!(!s.draft_spectators.lock().await.contains_key(&first));
+        let mut fifo_rx = attach_seat(&fx, &first, 0).await;
+        let fifo_row = row(&fx, &first);
+
+        for (code, removed) in [(&first, removed_first), (&control, removed_control)] {
+            teardown_removed_draft(
+                &s.draft_state,
+                &fx.sessions,
+                &s.connections,
+                &s.draft_spectators,
+                &fx.game_spectators,
+                &s.lobby,
+                &s.lobby_subscribers,
+                &s.game_db,
+                code,
+                removed,
+            )
+            .await;
+        }
+        assert_eq!(row(&fx, &first), fifo_row);
+        assert!(s.connections.lock().await[&first].contains_key(&PlayerId(0)));
+        assert!(matches!(
+            s.draft_state.lock().await.sessions[&first].schedule,
+            DraftSchedule::Fifo(_)
+        ));
+        // The control pod's teardown, the same call, cleared everything.
+        assert_eq!(row(&fx, &control), None);
+        assert!(!s.connections.lock().await.contains_key(&control));
+        assert!(!s.draft_spectators.lock().await.contains_key(&control));
+        assert!(!s.lobby.lock().await.lobby().has_game(&control));
+        // The removed pod's stale sender received none of the FIFO owner's views.
+        assert!(drain(&mut stale[0]).is_empty());
+
+        // An admin delete of the FIFO owner: the teardown clears the free code.
+        assert!(drain(&mut fifo_rx).is_empty());
+        let removed = s.draft_state.lock().await.remove_draft(&first).unwrap();
+        teardown_removed_draft(
+            &s.draft_state,
+            &fx.sessions,
+            &s.connections,
+            &s.draft_spectators,
+            &fx.game_spectators,
+            &s.lobby,
+            &s.lobby_subscribers,
+            &s.game_db,
+            &first,
+            removed,
+        )
+        .await;
+        assert_eq!(row(&fx, &first), None);
+        assert!(!s.connections.lock().await.contains_key(&first));
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        yield_a_few().await;
+        assert_eq!(row(&fx, &first), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_pick_timer_never_reaches_a_later_fifo_owner() {
+        let fx = fixture();
+        let s = &fx.scheduler;
+        let code = started_legacy_pod(&fx).await;
+        let mut first = attach_seat(&fx, &code, 0).await;
+        spawn_pick_timer(
+            s.draft_state.clone(),
+            s.connections.clone(),
+            code.clone(),
+            2,
+        );
+        yield_a_few().await;
+        assert!(
+            drain(&mut first)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::DraftTimerSync { .. })),
+            "reach: the first tick delivers a timer sync"
+        );
+        // A re-arm whose tasks have not run, then the code changes owner.
+        spawn_pick_timer(
+            s.draft_state.clone(),
+            s.connections.clone(),
+            code.clone(),
+            2,
+        );
+        s.draft_state.lock().await.remove_draft(&code).unwrap();
+        restore_private_fifo(s, &code, started_fifo_row(&code, fifo_off_config()))
+            .await
+            .unwrap();
+        let mut second = attach_seat(&fx, &code, 0).await;
+        let before = revision(&fx, &code).await;
+        let before_row = row(&fx, &code);
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            yield_a_few().await;
+        }
+        let frames = drain(&mut second);
+        assert!(frames.is_empty(), "the FIFO owner's sender got {frames:?}");
+        assert_eq!(revision(&fx, &code).await, before);
+        assert_eq!(row(&fx, &code), before_row);
+        assert!(!drain(&mut first)
+            .iter()
+            .any(|message| matches!(message, ServerMessage::DraftStateUpdate { .. })));
+    }
+
+    #[test]
+    fn late_legacy_save_never_writes_a_later_fifo_row() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let fx = fixture();
+            let s = &fx.scheduler;
+            let (x, y) = {
+                let mut manager = s.draft_state.lock().await;
+                (
+                    manager.create_draft(legacy_config(), "Host".into()).0,
+                    manager.create_draft(legacy_config(), "Host".into()).0,
+                )
+            };
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                gate_rx.recv().unwrap();
+            });
+            started_rx.recv().unwrap();
+            persist_draft_session_async(&s.game_db, &x, &s.draft_state).await;
+            s.draft_state.lock().await.remove_draft(&x).unwrap();
+            restore_private_fifo(s, &x, started_fifo_row(&x, fifo_off_config()))
+                .await
+                .unwrap();
+            s.game_db.save_draft_session(&x, "sentinel").unwrap();
+            persist_draft_session_async(&s.game_db, &x, &s.draft_state).await;
+            persist_draft_session_async(&s.game_db, &y, &s.draft_state).await;
+            gate_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+
+            assert_eq!(row(&fx, &x).as_deref(), Some("sentinel"));
+            let y_row =
+                serde_json::to_string(&s.draft_state.lock().await.sessions[&y].to_persisted())
+                    .unwrap();
+            assert_eq!(row(&fx, &y), Some(y_row), "Y's queued save ran");
+        });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_publishers_skip_a_fifo_owner() {
+        let fx = fixture();
+        let s = &fx.scheduler;
+        let fifo = started_private_pod(&fx, fifo_off_config()).await;
+        let legacy = started_legacy_pod(&fx).await;
+        let mut receivers = Vec::new();
+        for code in [&fifo, &legacy] {
+            let seat = attach_seat(&fx, code, 0).await;
+            let (spectator, spectator_rx) = crate::socket_mailbox::channel();
+            s.draft_spectators.lock().await.insert(
+                code.clone(),
+                vec![(SpectatorVisibility::default(), spectator)],
+            );
+            broadcast_draft_views(code, &s.connections, &s.draft_state).await;
+            broadcast_draft_spectator_views(code, &s.draft_state, &s.draft_spectators).await;
+            broadcast_draft_timer_sync(code, 1000, &s.connections, &s.draft_state).await;
+            receivers.push((seat, spectator_rx));
+        }
+        let (mut fifo_seat, mut fifo_spectator) = receivers.remove(0);
+        assert!(drain(&mut fifo_seat).is_empty());
+        assert!(drain(&mut fifo_spectator).is_empty());
+        let (mut legacy_seat, mut legacy_spectator) = receivers.remove(0);
+        let seat_frames = drain(&mut legacy_seat);
+        assert!(seat_frames
+            .iter()
+            .any(|message| matches!(message, ServerMessage::DraftStateUpdate { .. })));
+        assert!(seat_frames
+            .iter()
+            .any(|message| matches!(message, ServerMessage::DraftTimerSync { .. })));
+        assert!(drain(&mut legacy_spectator)
+            .iter()
+            .any(|message| matches!(message, ServerMessage::DraftSpectatorView { .. })));
+    }
+
+    #[tokio::test]
+    async fn shutdown_flush_leaves_fifo_rows_to_the_fence() {
+        let fx = fixture();
+        let s = &fx.scheduler;
+        let legacy = s
+            .draft_state
+            .lock()
+            .await
+            .create_draft(legacy_config(), "Host".into())
+            .0;
+        let fifo = started_private_pod(&fx, fifo_off_config()).await;
+        let unsaved = started_private_pod(&fx, fifo_off_config()).await;
+        let conn = fault(&fx, Some(&unsaved));
+        assert!(select_head(&fx, &unsaved, 0, s.clock.now_ms())
+            .await
+            .is_err());
+        release(conn);
+        assert!(s
+            .draft_state
+            .lock()
+            .await
+            .pending_fifo_row(&unsaved)
+            .is_some());
+        for code in [&fifo, &unsaved] {
+            s.game_db.save_draft_session(code, "sentinel").unwrap();
+        }
+        assert_eq!(row(&fx, &legacy), None);
+
+        flush_sessions_on_shutdown(
+            &game_executor::GameExecutor::default(),
+            &fx.sessions,
+            &s.draft_state,
+            &s.game_db,
+        )
+        .await;
+        assert_eq!(row(&fx, &fifo).as_deref(), Some("sentinel"));
+        assert_eq!(row(&fx, &unsaved).as_deref(), Some("sentinel"));
+        let legacy_row =
+            serde_json::to_string(&s.draft_state.lock().await.sessions[&legacy].to_persisted())
+                .unwrap();
+        assert_eq!(row(&fx, &legacy), Some(legacy_row));
+    }
+
+    fn basic_land_database() -> SharedDb {
+        let cards: serde_json::Map<String, serde_json::Value> = [
+            "Plains", "Island", "Forest", "Mountain",
+        ]
+        .into_iter()
+        .map(|name| {
+            (
+                name.to_lowercase(),
+                serde_json::json!({
+                    "name":name,
+                    "mana_cost":{"type":"Cost","shards":[],"generic":0},
+                    "card_type":{"supertypes":["Basic"],"core_types":["Land"],"subtypes":[name]},
+                    "power":null,"toughness":null,"loyalty":null,"defense":null,
+                    "oracle_text":null,"non_ability_text":null,"flavor_name":null,
+                    "keywords":[],"abilities":[],"triggers":[],"static_abilities":[],
+                    "replacements":[],"color_override":null,"color_identity":[],
+                    "scryfall_oracle_id":format!("oracle-{name}")
+                }),
+            )
+        })
+        .collect();
+        Arc::new(
+            CardDatabase::from_json_str(&serde_json::Value::Object(cards).to_string()).unwrap(),
+        )
+    }
+
+    /// A pending round-1 pairing of seats 0 and 1, both with basic-land decks.
+    fn give_round_one_pairing(core: &mut draft_core::types::DraftSession) {
+        core.status = DraftStatus::MatchInProgress;
+        core.current_round = 1;
+        core.pairings = vec![DraftPairing {
+            round: 1,
+            table: 0,
+            players: [PlayerId(0), PlayerId(1)],
+            match_id: "m1".into(),
+            status: PairingStatus::Pending,
+            winner: None,
+        }];
+        for seat in 0..2u8 {
+            core.submitted_decks.insert(
+                PlayerId(seat),
+                DraftDeckSubmission {
+                    seat,
+                    main_deck: vec!["Plains".into(); 40],
+                    commanders: Vec::new(),
+                    companion: None,
+                    printings: Vec::new(),
+                },
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_match_spawn_skips_a_fifo_owner() {
+        let fx = fixture();
+        let s = &fx.scheduler;
+        let fifo = started_private_pod(&fx, fifo_off_config()).await;
+        let legacy = started_legacy_pod(&fx).await;
+        {
+            let mut manager = s.draft_state.lock().await;
+            for code in [&fifo, &legacy] {
+                give_round_one_pairing(&mut manager.sessions.get_mut(code).unwrap().session);
+            }
+        }
+        let db = basic_land_database();
+        let combos: SharedComboTable = Arc::new(ComboTable::default());
+        let executor = game_executor::GameExecutor::default();
+        let mut fifo_rx = attach_seat(&fx, &fifo, 0).await;
+        let mut legacy_rx = attach_seat(&fx, &legacy, 0).await;
+        let games_before = fx.sessions.lock().await.game_count();
+        maybe_spawn_draft_matches(
+            &fifo,
+            &s.draft_state,
+            &fx.sessions,
+            &executor,
+            &db,
+            &combos,
+            &s.game_db,
+            &s.connections,
+        )
+        .await;
+        assert_eq!(fx.sessions.lock().await.game_count(), games_before);
+        assert!(s.draft_state.lock().await.sessions[&fifo]
+            .active_matches
+            .is_empty());
+        assert!(drain(&mut fifo_rx).is_empty());
+        // The same call on the legacy pod spawns its one game.
+        maybe_spawn_draft_matches(
+            &legacy,
+            &s.draft_state,
+            &fx.sessions,
+            &executor,
+            &db,
+            &combos,
+            &s.game_db,
+            &s.connections,
+        )
+        .await;
+        assert_eq!(fx.sessions.lock().await.game_count(), games_before + 1);
+        assert_eq!(
+            s.draft_state.lock().await.sessions[&legacy]
+                .active_matches
+                .len(),
+            1
+        );
+        assert!(drain(&mut legacy_rx)
+            .iter()
+            .any(|message| matches!(message, ServerMessage::DraftMatchStart { .. })));
     }
 }
 
@@ -8751,6 +10512,13 @@ fn operation_failed_message(
                 message: message.into(),
             })
         }
+        // A native draft command's every refusal answers its own request id.
+        ClientMessage::CreateDraftWithSettings { request_id, .. }
+        | ClientMessage::JoinDraftWithPassword { request_id, .. }
+        | ClientMessage::DraftAction { request_id, .. }
+        | ClientMessage::ReconnectDraft { request_id, .. } => {
+            Some(ServerMessage::draft_rejected(*request_id, message))
+        }
         ClientMessage::ClientHello { .. }
         | ClientMessage::ResyncState
         | ClientMessage::CreateGame { .. }
@@ -8777,10 +10545,6 @@ fn operation_failed_message(
         | ClientMessage::UpdateLobbyMetadata { .. }
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::UnregisterLobby { .. }
-        | ClientMessage::CreateDraftWithSettings { .. }
-        | ClientMessage::JoinDraftWithPassword { .. }
-        | ClientMessage::DraftAction { .. }
-        | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
         // No correlated `*Failed` frame: a tournament request that fails is
         // answered by the broker's own `Error` outbound, carrying the
@@ -10374,10 +12138,7 @@ async fn handle_client_message(
             return;
         }
 
-        if let Some(reason) = draft_socket_admission_rejection(&client_msg, identity) {
-            let msg = ServerMessage::DraftActionRejected {
-                reason: reason.to_string(),
-            };
+        if let Some(msg) = draft_socket_admission_rejection(&client_msg, identity) {
             let _ = socket.enqueue_reply(msg);
             return;
         }
@@ -12881,11 +14642,15 @@ async fn handle_client_message(
             tournament_format,
             pod_policy,
             pod_size,
+            // The wire guard refused every `Some` before dispatch: native FIFO
+            // is closed, so no create reaches here with a FIFO policy.
+            fifo_policy: _,
+            request_id,
         } => {
             let source_intent = match resolve_draft_source_intent(source, set_codes) {
                 Ok(intent) => intent,
                 Err(reason) => {
-                    let msg = ServerMessage::DraftActionRejected { reason };
+                    let msg = ServerMessage::draft_rejected(request_id, reason);
                     let _ = socket.enqueue_reply(msg);
                     return;
                 }
@@ -12909,7 +14674,7 @@ async fn handle_client_message(
                 kind,
                 tournament_format,
             ) {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -12986,16 +14751,17 @@ async fn handle_client_message(
             let (source, cards_per_pack) = match resolved_source {
                 Ok(resolved) => resolved,
                 Err(reason) => {
-                    let msg = ServerMessage::DraftActionRejected { reason };
+                    let msg = ServerMessage::draft_rejected(request_id, reason);
                     let _ = socket.enqueue_reply(msg);
                     return;
                 }
             };
 
             if !draft_pod_size_is_allowed(kind, tournament_format, pod_size) {
-                let msg = ServerMessage::DraftActionRejected {
-                    reason: "Pod size is not allowed by the draft procedure".to_string(),
-                };
+                let msg = ServerMessage::draft_rejected(
+                    request_id,
+                    "Pod size is not allowed by the draft procedure",
+                );
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -13026,7 +14792,14 @@ async fn handle_client_message(
                 spectator_visibility: draft_core::types::SpectatorVisibility::default(),
             };
 
-            let (draft_code, player_token, seat_index) = {
+            let (
+                draft_code,
+                player_token,
+                seat_index,
+                registration,
+                host_version,
+                host_build_commit,
+            ) = {
                 let mut mgr = draft_state.lock().await;
                 let (draft_code, player_token, seat_index) =
                     mgr.create_draft(config, display_name.clone());
@@ -13040,11 +14813,14 @@ async fn handle_client_message(
                         ranked: false,
                     });
                 }
-                let _ = tx.send(ServerMessage::DraftCreated {
-                    draft_code: draft_code.clone(),
-                    player_token: player_token.clone(),
-                    seat_index,
-                });
+                let _ = tx.send(ServerMessage::draft_accepted(
+                    request_id,
+                    DraftCommandResult::Created {
+                        draft_code: draft_code.clone(),
+                        player_token: player_token.clone(),
+                        seat_index,
+                    },
+                ));
                 install_draft_sender_while_state_locked(
                     connections,
                     &draft_code,
@@ -13052,59 +14828,104 @@ async fn handle_client_message(
                     tx,
                 )
                 .await;
-                (draft_code, player_token, seat_index)
+                // The pod's lobby row is registered here, unlisted, under the guard that
+                // created the pod and issued its host's credentials, and after `Created` is
+                // sent: every reconnect, join and departure acts on the row under this guard,
+                // so none of them can reach the pod before its row exists, and a busy lobby
+                // delays the row, never the creator's result.
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
+                #[cfg(test)]
+                context
+                    .socket_hooks
+                    .before_draft_create_registration()
+                    .await;
+                let registration = {
+                    let mut lob_guard = lobby.lock().await;
+                    let registration = lob_guard.lobby_mut().register_game(
+                        &draft_code,
+                        RegisterGameRequest {
+                            host_name: display_name.clone(),
+                            public,
+                            password,
+                            timer_seconds,
+                            host_version: host_version.clone(),
+                            host_build_commit: host_build_commit.clone(),
+                            current_players: 1,
+                            max_players: pod_size as u32,
+                            format_config: None,
+                            match_config: Default::default(),
+                            room_name: None,
+                            host_peer_id: String::new(),
+                            draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
+                                set_code: lobby_set_label,
+                                draft_kind: format!("{kind:?}"),
+                                cube_name: None,
+                            }),
+                            ranked: false,
+                        },
+                        &SysEnv,
+                    );
+                    // Unlisted until the step below confirms the pod, so no
+                    // subscriber can see a row that may yet be withdrawn.
+                    lob_guard.lobby_mut().mark_host_away(&draft_code);
+                    registration
+                };
+                (
+                    draft_code,
+                    player_token,
+                    seat_index,
+                    registration,
+                    host_version,
+                    host_build_commit,
+                )
             };
 
             identity.draft_code = Some(draft_code.clone());
             identity.draft_seat = Some(seat_index as usize);
             identity.draft_token = Some(player_token);
 
-            // Register in lobby so draft appears in the lobby list
-            {
-                let (host_version, host_build_commit) = identity
-                    .client_hello
-                    .as_ref()
-                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
-                    .unwrap_or_default();
-                let mut lob_guard = lobby.lock().await;
-                lob_guard.lobby_mut().register_game(
-                    &draft_code,
-                    RegisterGameRequest {
-                        host_name: display_name.clone(),
-                        public,
-                        password,
-                        timer_seconds,
-                        host_version,
-                        host_build_commit,
-                        current_players: 1,
-                        max_players: pod_size as u32,
-                        format_config: None,
-                        match_config: Default::default(),
-                        room_name: None,
-                        host_peer_id: String::new(),
-                        draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
-                            set_code: lobby_set_label,
-                            draft_kind: format!("{kind:?}"),
-                            cube_name: None,
-                        }),
-                        ranked: false,
-                    },
-                    &SysEnv,
-                );
-            }
+            #[cfg(test)]
+            context.socket_hooks.before_draft_create_listing().await;
 
-            if public {
+            // The row was registered under the draft guard that created the pod, so
+            // every reconnect, join and departure of the pod found it. Since that
+            // guard was released, the pod may have been removed and its code given
+            // to a FIFO owner or to another lobby row, and a newer socket may have
+            // taken the host seat. So the listing is settled here, in a second
+            // critical section under the draft guard,
+            // against the row this create registered: a code no legacy pod holds
+            // withdraws that row while it is still unlisted, so nothing is announced;
+            // otherwise the row is listed with the creator's build only while the
+            // creator's socket still holds the host seat, so a newer host's build and
+            // presence are left as that host's reconnect or departure set them.
+            // Another row under the code is never touched.
+            {
+                let mgr = draft_state.lock().await;
+                if !mgr
+                    .sessions
+                    .get(&draft_code)
+                    .is_some_and(|session| matches!(session.schedule, DraftSchedule::Legacy(_)))
                 {
-                    let lob = lobby.lock().await;
-                    let game = lob.lobby().public_game(&draft_code);
-                    if let Some(game) = game {
-                        broadcast_to_lobby_subscribers(
-                            &lob,
-                            lobby_subscribers,
-                            ServerMessage::LobbyGameAdded { game },
-                        )
-                        .await;
-                    }
+                    transition_registered_listing(lobby, lobby_subscribers, &registration, |lob| {
+                        lob.unregister_registration(&registration);
+                    })
+                    .await;
+                } else if draft_socket_is_current_while_state_locked(
+                    &mgr,
+                    connections,
+                    identity,
+                    tx,
+                )
+                .await
+                {
+                    transition_registered_listing(lobby, lobby_subscribers, &registration, |lob| {
+                        lob.mark_host_returned(&draft_code, host_version, host_build_commit)
+                    })
+                    .await;
                 }
             }
 
@@ -13115,13 +14936,14 @@ async fn handle_client_message(
             draft_code,
             display_name,
             password,
+            request_id,
         } => {
             info!(draft = %draft_code, joiner = %display_name, "JoinDraftWithPassword");
 
             if let Err(reason) =
                 guard_join_draft_with_password(&draft_code, &display_name, &password)
             {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -13136,12 +14958,15 @@ async fn handle_client_message(
                     mgr.join_draft(&draft_code, display_name.clone(), password.as_deref())
                 }) {
                     Ok((player_token, seat_index, view)) => {
-                        let _ = tx.send(ServerMessage::DraftJoined {
-                            draft_code: draft_code.clone(),
-                            player_token: player_token.clone(),
-                            seat_index,
-                            view,
-                        });
+                        let _ = tx.send(ServerMessage::draft_accepted(
+                            request_id,
+                            DraftCommandResult::Joined {
+                                draft_code: draft_code.clone(),
+                                player_token: player_token.clone(),
+                                seat_index,
+                                view,
+                            },
+                        ));
                         install_draft_sender_while_state_locked(
                             connections,
                             &draft_code,
@@ -13187,28 +15012,32 @@ async fn handle_client_message(
                     }
                 }
                 Err(reason) => {
-                    if reason == "password_required" {
-                        let msg = ServerMessage::PasswordRequired {
-                            game_code: draft_code.clone(),
-                        };
-                        let _ = socket.enqueue_reply(msg);
-                        return;
-                    }
-                    let msg = ServerMessage::DraftActionRejected { reason };
+                    let msg = if reason == "password_required" {
+                        ServerMessage::DraftCommandRefused {
+                            request_id,
+                            refusal: DraftCommandRefusal::PasswordRequired,
+                        }
+                    } else {
+                        ServerMessage::draft_rejected(request_id, reason)
+                    };
                     let _ = socket.enqueue_reply(msg);
                 }
             }
         }
 
-        ClientMessage::DraftAction { draft_code, action } => {
+        ClientMessage::DraftAction {
+            draft_code,
+            action,
+            request_id,
+        } => {
             if let Err(reason) = guard_draft_action(&draft_code) {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
 
             if let Err(reason) = guard_draft_action_payload(&action) {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -13216,9 +15045,7 @@ async fn handle_client_message(
             let token = match &identity.draft_token {
                 Some(t) => t.clone(),
                 None => {
-                    let msg = ServerMessage::DraftActionRejected {
-                        reason: "Not in a draft session".to_string(),
-                    };
+                    let msg = ServerMessage::draft_rejected(request_id, "Not in a draft session");
                     let _ = socket.enqueue_reply(msg);
                     return;
                 }
@@ -13227,7 +15054,7 @@ async fn handle_client_message(
             debug!(draft = %draft_code, action = ?action, "DraftAction");
 
             if let Some(reason) = client_forbidden_draft_action_reason(&action) {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -13238,7 +15065,7 @@ async fn handle_client_message(
                 match draft_pack_generator_for_start(draft_state, draft_pools, &draft_code).await {
                     Ok(generator) => Some(generator),
                     Err(reason) => {
-                        let msg = ServerMessage::DraftActionRejected { reason };
+                        let msg = ServerMessage::draft_rejected(request_id, reason);
                         let _ = socket.enqueue_reply(msg);
                         return;
                     }
@@ -13266,6 +15093,14 @@ async fn handle_client_message(
                 {
                     Err(DRAFT_SOCKET_AUTHORITY_REJECTION.to_string())
                 } else {
+                    // The actor is the seat the reducer itself resolves from the
+                    // token in this pod, under this same guard, so the view it
+                    // receives is the one the reducer built for its authority.
+                    let actor_seat = mgr
+                        .sessions
+                        .get(&draft_code)
+                        .and_then(|session| session.seat_for_token(&token));
+                    let prompt_id = answered_draft_prompt(&action);
                     let before_window = mgr.sessions.get(&draft_code).map(|s| {
                         (
                             s.session.status,
@@ -13290,7 +15125,30 @@ async fn handle_client_message(
                     });
                     let should_rearm_timer =
                         result.is_ok() && should_rearm_pick_timer(before_window, after_window);
-                    result.map(|_| should_rearm_timer)
+                    result.map(|mut views| {
+                        // Answered inside the guard that applied the action, so
+                        // the actor's result precedes the pod's fan-out below.
+                        match actor_seat.filter(|seat| *seat < views.len()) {
+                            Some(seat) => {
+                                let _ = tx.send(ServerMessage::draft_accepted(
+                                    request_id,
+                                    DraftCommandResult::Applied {
+                                        prompt_id,
+                                        view: views.swap_remove(seat),
+                                    },
+                                ));
+                            }
+                            // `handle_draft_action` refuses a token with no seat
+                            // in this pod before building any view, and builds
+                            // one view per seat, so an accepted action always
+                            // has its actor's view.
+                            None => error!(
+                                draft = %draft_code,
+                                "accepted draft action has no actor view to answer with"
+                            ),
+                        }
+                        should_rearm_timer
+                    })
                 }
             };
 
@@ -13352,7 +15210,7 @@ async fn handle_client_message(
                         .await;
                 }
                 Err(reason) => {
-                    let msg = ServerMessage::DraftActionRejected { reason };
+                    let msg = ServerMessage::draft_rejected(request_id, reason);
                     let _ = socket.enqueue_reply(msg);
                 }
             }
@@ -13361,11 +15219,12 @@ async fn handle_client_message(
         ClientMessage::ReconnectDraft {
             draft_code,
             player_token,
+            request_id,
         } => {
             info!(draft = %draft_code, "ReconnectDraft attempt");
 
             if let Err(reason) = guard_reconnect_draft(&draft_code, &player_token) {
-                let msg = ServerMessage::DraftActionRejected { reason };
+                let msg = ServerMessage::draft_rejected(request_id, reason);
                 let _ = socket.enqueue_reply(msg);
                 return;
             }
@@ -13376,9 +15235,8 @@ async fn handle_client_message(
                     || !draft_socket_is_current_preflight(draft_state, connections, identity, tx)
                         .await
                 {
-                    let msg = ServerMessage::DraftActionRejected {
-                        reason: DRAFT_SOCKET_AUTHORITY_REJECTION.to_string(),
-                    };
+                    let msg =
+                        ServerMessage::draft_rejected(request_id, DRAFT_SOCKET_AUTHORITY_REJECTION);
                     let _ = socket.enqueue_reply(msg);
                     return;
                 }
@@ -13409,6 +15267,7 @@ async fn handle_client_message(
                         lobby_subscribers,
                         identity,
                         &draft_code,
+                        request_id,
                         tx,
                         received_at,
                         &context.game_executor,
@@ -13419,7 +15278,7 @@ async fn handle_client_message(
                     {
                         Ok(()) => {}
                         Err(reason) => {
-                            let msg = ServerMessage::DraftActionRejected { reason };
+                            let msg = ServerMessage::draft_rejected(request_id, reason);
                             let _ = socket.enqueue_reply(msg);
                             return;
                         }
@@ -13428,7 +15287,7 @@ async fn handle_client_message(
                     info!(draft = %draft_code, "draft reconnect succeeded");
                 }
                 Err(reason) => {
-                    let msg = ServerMessage::DraftActionRejected { reason };
+                    let msg = ServerMessage::draft_rejected(request_id, reason);
                     let _ = socket.enqueue_reply(msg);
                 }
             }
@@ -13446,6 +15305,12 @@ async fn handle_client_message(
                 let _ = socket.enqueue_reply(ServerMessage::error("Draft not found".to_string()));
                 return;
             };
+            if native_flow(&session.session) == NativeRowFlow::Fifo {
+                let _ = socket.enqueue_reply(ServerMessage::error(
+                    draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string(),
+                ));
+                return;
+            }
             let visibility = session.config.spectator_visibility;
             let view = draft_core::view::filter_for_spectator(&session.session, visibility);
             if let Err(reason) = switch_draft_spectator_slot(
@@ -15365,7 +17230,63 @@ mod draft_socket_authority_tests {
         PairingStatus, PodPolicy, SetLayout, SpectatorVisibility, TournamentFormat,
     };
     use futures_util::SinkExt;
+    use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use tokio_tungstenite::WebSocketStream;
+
+    /// A test command's request id; each command a test sends carries its own.
+    pub(super) fn draft_request_id(value: u64) -> DraftRequestId {
+        DraftRequestId::try_from(value).expect("a test draft request id is in range")
+    }
+
+    /// The next frame that could answer a draft command. Timer syncs and lobby
+    /// listings never answer one and are skipped; every other frame, an
+    /// unsolicited view or an uncorrelated `Error` included, is returned so
+    /// the caller's read fails on it.
+    pub(super) async fn next_draft_result<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        loop {
+            match super::issue_4548_full_create_tests::recv_server_message(socket).await {
+                ServerMessage::DraftTimerSync { .. }
+                | ServerMessage::LobbyUpdate { .. }
+                | ServerMessage::LobbyGameAdded { .. }
+                | ServerMessage::LobbyGameUpdated { .. }
+                | ServerMessage::LobbyGameRemoved { .. }
+                | ServerMessage::PlayerCount { .. } => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// The result of draft command `id`, which must be its accepted answer.
+    pub(super) fn accepted_result(message: ServerMessage, id: u64) -> DraftCommandResult {
+        match message {
+            ServerMessage::DraftCommandAccepted { request_id, result }
+                if request_id == draft_request_id(id) =>
+            {
+                result
+            }
+            other => panic!("expected the accepted result of draft command {id}, got {other:?}"),
+        }
+    }
+
+    /// The reason of draft command `id`'s refusal, which must be its answer.
+    pub(super) fn refused_reason(message: ServerMessage, id: u64) -> String {
+        match message {
+            ServerMessage::DraftCommandRefused {
+                request_id,
+                refusal: DraftCommandRefusal::Rejected { reason },
+            } if request_id == draft_request_id(id) => reason,
+            other => panic!("expected the refusal of draft command {id}, got {other:?}"),
+        }
+    }
+
+    fn assert_fresh_admission_refused(answer: Option<ServerMessage>, id: u64) {
+        let answer = answer.expect("the gate must refuse an attached socket's admission");
+        assert_eq!(refused_reason(answer, id), DRAFT_SOCKET_FRESH_REJECTION);
+    }
 
     fn empty_identity() -> SocketIdentity {
         SocketIdentity {
@@ -15429,6 +17350,7 @@ mod draft_socket_authority_tests {
         )
     }
 
+    /// A create (id 21) and a join (id 22) of `draft_code`.
     fn draft_admission_messages(draft_code: &str) -> [ClientMessage; 2] {
         [
             ClientMessage::CreateDraftWithSettings {
@@ -15442,13 +17364,59 @@ mod draft_socket_authority_tests {
                 tournament_format: TournamentFormat::Swiss,
                 pod_policy: PodPolicy::Competitive,
                 pod_size: 8,
+                fifo_policy: None,
+                request_id: draft_request_id(21),
             },
             ClientMessage::JoinDraftWithPassword {
                 draft_code: draft_code.to_string(),
                 display_name: "Bob".to_string(),
                 password: None,
+                request_id: draft_request_id(22),
             },
         ]
+    }
+
+    /// Every operational refusal of a native draft command, the server mode's
+    /// included, answers that command's own request id; the spectator frame,
+    /// which awaits no outcome, has no correlated answer.
+    #[test]
+    fn operational_refusals_answer_each_draft_command_as_its_own() {
+        let [create, join] = draft_admission_messages("DRAFT01");
+        let commands = [
+            (21, create),
+            (22, join),
+            (
+                23,
+                ClientMessage::DraftAction {
+                    draft_code: "DRAFT01".to_string(),
+                    action: draft_core::types::DraftAction::StartDraft,
+                    request_id: draft_request_id(23),
+                },
+            ),
+            (
+                24,
+                ClientMessage::ReconnectDraft {
+                    draft_code: "DRAFT01".to_string(),
+                    player_token: "player-token".to_string(),
+                    request_id: draft_request_id(24),
+                },
+            ),
+        ];
+        for (id, command) in commands {
+            let reason = reject_if_disabled(&command, ServerMode::LobbyOnly)
+                .expect("lobby-only mode refuses every draft command");
+            let answer = operation_failed_message(&command, reason).unwrap_or_else(|| {
+                panic!("draft command {id} must be answered as its own command")
+            });
+            assert_eq!(refused_reason(answer, id), reason);
+        }
+        assert!(operation_failed_message(
+            &ClientMessage::SpectateDraft {
+                draft_code: "DRAFT01".to_string(),
+            },
+            "refused",
+        )
+        .is_none());
     }
 
     /// A draft in its first match round whose started Full game is bound.
@@ -15551,17 +17519,22 @@ mod draft_socket_authority_tests {
 
     #[tokio::test]
     async fn dormant_native_prompt_actions_are_bounded_before_dispatch() {
-        use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+        use super::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server,
+        };
         use draft_core::types::{
             DraftAction, DraftControl, DraftPromptId, DraftSessionId, MAX_DRAFT_JSON_INTEGER,
         };
         let (url, server, _temp, app) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
             let (fixture, _, code, token) = test_draft();
-            let persisted = {
+            let (persisted, seat_one_token) = {
                 let mut manager = fixture.lock().await;
+                let mut joined = Vec::new();
                 for seat in 1..8 {
-                    manager.join_draft(&code, format!("Seat {seat}"), None).unwrap();
+                    let (seat_token, _, _) =
+                        manager.join_draft(&code, format!("Seat {seat}"), None).unwrap();
+                    joined.push(seat_token);
                 }
                 manager.apply_system_action(
                     &code,
@@ -15571,9 +17544,25 @@ mod draft_socket_authority_tests {
                         cards_per_pack: 14,
                     }),
                 ).unwrap();
-                manager.sessions[&code].to_persisted()
+                (manager.sessions[&code].to_persisted(), joined.swap_remove(0))
             };
             app.draft_sessions.lock().await.restore_persisted_session(persisted).unwrap();
+            async fn persisted_session(app: &AppState, code: &str) -> serde_json::Value {
+                let manager = app.draft_sessions.lock().await;
+                serde_json::to_value(manager.sessions[code].to_persisted()).unwrap()
+            }
+            let reconnect = |player_token: &str, draft_code: &str, id: u64| {
+                ClientMessage::ReconnectDraft {
+                    draft_code: draft_code.to_string(),
+                    player_token: player_token.to_string(),
+                    request_id: draft_request_id(id),
+                }
+            };
+            let action = |action: DraftAction, id: u64| ClientMessage::DraftAction {
+                draft_code: code.clone(),
+                action,
+                request_id: draft_request_id(id),
+            };
             let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
             assert!(matches!(recv_server_message(&mut socket).await, ServerMessage::ServerHello { .. }));
             let hello = ClientMessage::ClientHello { client_version: env!("CARGO_PKG_VERSION").into(),
@@ -15581,18 +17570,56 @@ mod draft_socket_authority_tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION), wire_formats: Vec::new(), state_codecs: Vec::new() };
             socket.send(WsMessage::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
-            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
-                draft_code: code.clone(),
-                player_token: "wrong-token".into(),
-            }).unwrap().into())).await.unwrap();
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftActionRejected { reason } if reason == "Invalid player token"));
-            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
-                draft_code: code.clone(),
-                player_token: token.clone(),
-            }).unwrap().into())).await.unwrap();
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Drafting));
+            send_test_message(&mut socket, &reconnect("wrong-token", &code, 81), false).await;
+            assert_eq!(refused_reason(next_draft_result(&mut socket).await, 81), "Invalid player token");
+
+            // The refused reconnect set no identity, so a legacy pick from this
+            // socket meets the action arm's no-seat refusal.
+            let before = persisted_session(&app, &code).await;
+            send_test_message(
+                &mut socket,
+                &action(DraftAction::Pick { seat: 0, card_instance_ids: vec!["TST-0-0-0".into()] }, 84),
+                false,
+            ).await;
+            assert_eq!(refused_reason(next_draft_result(&mut socket).await, 84), "Not in a draft session");
+            assert_eq!(persisted_session(&app, &code).await, before);
+
+            send_test_message(&mut socket, &reconnect(&token, &code, 82), false).await;
+            assert!(matches!(accepted_result(next_draft_result(&mut socket).await, 82),
+                DraftCommandResult::Reconnected { view } if view.status == DraftStatus::Drafting));
+
+            // An attached socket may not take another seat's token or another
+            // pod's code; neither attempt installs a sender.
+            send_test_message(&mut socket, &reconnect(&seat_one_token, &code, 86), false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 86),
+                DRAFT_SOCKET_AUTHORITY_REJECTION
+            );
+            assert!(!app.connections.lock().await[&code].contains_key(&PlayerId(1)));
+            send_test_message(&mut socket, &reconnect(&token, "OTHER1", 87), false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 87),
+                DRAFT_SOCKET_AUTHORITY_REJECTION
+            );
+
+            // `spawn_full_mode_server` carries no draft pool, so the host's
+            // `StartDraft` reaches the start generator's refusal before the
+            // reducer, which would answer a drafting pod with a "Draft error".
+            assert_eq!(app.draft_pools.len(), 0);
+            assert_eq!(app.draft_sessions.lock().await.sessions[&code].config.set_code, "TST");
+            let before = persisted_session(&app, &code).await;
+            send_test_message(&mut socket, &action(DraftAction::StartDraft, 85), false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 85),
+                "No draft pool data for set: TST"
+            );
+            assert_eq!(persisted_session(&app, &code).await, before);
+            assert!(app.draft_sessions.lock().await.sessions[&code]
+                .legacy_schedule()
+                .expect("a legacy pod")
+                .timer_task
+                .is_none());
+
             let select = DraftAction::Select {
                 seat: 7,
                 prompt_id: DraftPromptId {
@@ -15638,60 +17665,68 @@ mod draft_socket_authority_tests {
                 prompt_id.generation = MAX_DRAFT_JSON_INTEGER + 1;
             }
             cases.push((bad, "Select has invalid prompt identity"));
-            let before = {
-                let manager = app.draft_sessions.lock().await;
-                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap()
-            };
+            assert_eq!(cases.len(), 9);
+            let before = persisted_session(&app, &code).await;
             let disk = app.game_db.load_all_drafts().unwrap();
-            for (action, expected) in cases {
-                socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
-                    draft_code: code.clone(), action,
-                }).unwrap().into())).await.unwrap();
-                match recv_server_message(&mut socket).await {
-                    ServerMessage::Error { message, .. } if expected.starts_with("Select ") => {
-                        assert_eq!(message, expected);
-                    }
-                    ServerMessage::DraftActionRejected { reason } if !expected.starts_with("Select ") => {
-                        assert_eq!(reason, expected);
-                    }
-                    other => panic!("expected bounded/dormant refusal, got {other:?}"),
-                }
+            for (id, (case, expected)) in (100..).zip(cases) {
+                send_test_message(&mut socket, &action(case, id), false).await;
+                assert_eq!(refused_reason(next_draft_result(&mut socket).await, id), expected);
                 let manager = app.draft_sessions.lock().await;
                 assert_eq!(serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(), before);
-                assert!(manager.sessions[&code].timer_task.is_none());
+                assert!(manager.sessions[&code]
+                    .legacy_schedule()
+                    .expect("a legacy pod")
+                    .timer_task
+                    .is_none());
                 assert_eq!(app.game_db.load_all_drafts().unwrap(), disk);
             }
-            let mut unknown = serde_json::to_value(ClientMessage::DraftAction {
-                draft_code: code.clone(), action: select.clone(),
-            }).unwrap();
+            let mut unknown = serde_json::to_value(action(select.clone(), 120)).unwrap();
             unknown["data"]["action"]["type"] = "UnknownSelect".into();
             socket.send(WsMessage::Text(unknown.to_string().into())).await.unwrap();
             assert!(matches!(recv_server_message(&mut socket).await,
                 ServerMessage::Error { message, .. } if message.starts_with("Invalid message:")));
-            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
-                draft_code: code.clone(),
-                action: DraftAction::Pick { seat: 7, card_instance_ids: vec!["TST-0-0-0".into()] },
-            }).unwrap().into())).await.unwrap();
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftStateUpdate { view } if view.pool.len() == 1
+            send_test_message(
+                &mut socket,
+                &action(DraftAction::Pick { seat: 7, card_instance_ids: vec!["TST-0-0-0".into()] }, 90),
+                false,
+            ).await;
+            assert!(matches!(accepted_result(next_draft_result(&mut socket).await, 90),
+                DraftCommandResult::Applied { prompt_id: None, view } if view.pool.len() == 1
                     && view.flow == draft_core::types::DraftFlow::LegacyBarrier && view.fifo.is_none()));
+            // The pick's fan-out follows its result; drain it so the next read
+            // answers the next command.
+            assert!(matches!(next_draft_result(&mut socket).await, ServerMessage::DraftStateUpdate { .. }));
+
+            // The attached socket may not create a second pod.
+            let [create, _] = draft_admission_messages(&code);
+            send_test_message(&mut socket, &create, false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 21),
+                DRAFT_SOCKET_FRESH_REJECTION
+            );
+            assert_eq!(app.draft_sessions.lock().await.sessions.len(), 1);
+
             let (mut replacement, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
             assert!(matches!(recv_server_message(&mut replacement).await, ServerMessage::ServerHello { .. }));
             replacement.send(WsMessage::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
-            replacement.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
-                draft_code: code.clone(), player_token: token,
-            }).unwrap().into())).await.unwrap();
-            assert!(matches!(recv_server_message(&mut replacement).await, ServerMessage::DraftStateUpdate { .. }));
-            let before = {
-                let manager = app.draft_sessions.lock().await;
-                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap()
-            };
-            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
-                draft_code: code.clone(), action: select,
-            }).unwrap().into())).await.unwrap();
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftActionRejected { reason } if reason == DRAFT_SOCKET_AUTHORITY_REJECTION));
-            assert_eq!(serde_json::to_value(app.draft_sessions.lock().await.sessions[&code].to_persisted()).unwrap(), before);
+            send_test_message(&mut replacement, &reconnect(&token, &code, 92), false).await;
+            assert!(matches!(
+                accepted_result(next_draft_result(&mut replacement).await, 92),
+                DraftCommandResult::Reconnected { .. }
+            ));
+            let before = persisted_session(&app, &code).await;
+            send_test_message(&mut socket, &action(select, 93), false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 93),
+                DRAFT_SOCKET_AUTHORITY_REJECTION
+            );
+            assert_eq!(persisted_session(&app, &code).await, before);
+            // The superseded socket may not reattach with its own token.
+            send_test_message(&mut socket, &reconnect(&token, &code, 94), false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 94),
+                DRAFT_SOCKET_AUTHORITY_REJECTION
+            );
         }).await;
         server.abort();
         result.expect("dormant WebSocket fixture timed out");
@@ -15725,96 +17760,161 @@ mod draft_socket_authority_tests {
         let pools = draft_pools::DraftPools::from_path(pool_file.path()).unwrap();
         let (url, server, _temp, app) = spawn_full_mode_server_with_draft_pools(pools).await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
+            use super::issue_4548_full_create_tests::send_test_message;
             let (fixture, _, code, token) = test_draft();
-            let persisted = {
+            let (persisted, guest_token) = {
                 let mut manager = fixture.lock().await;
+                let mut joined = Vec::new();
                 for seat in 1..8 {
-                    manager
+                    let (seat_token, _, _) = manager
                         .join_draft(&code, format!("Seat {seat}"), None)
                         .unwrap();
+                    joined.push(seat_token);
                 }
                 let session = manager.sessions.get_mut(&code).unwrap();
                 session.config.cards_per_pack = 3;
                 session.session.config.cards_per_pack = 3;
-                session.to_persisted()
+                (session.to_persisted(), joined.swap_remove(0))
             };
             app.draft_sessions
                 .lock()
                 .await
                 .restore_persisted_session(persisted)
                 .unwrap();
-            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").into(),
+                build_commit: build_commit().into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
+            };
+            let action = |action: DraftAction, id: u64| ClientMessage::DraftAction {
+                draft_code: code.clone(),
+                action,
+                request_id: draft_request_id(id),
+            };
+            let seat_pool = |manager: &DraftSessionManager, seat: usize| {
+                serde_json::to_value(&manager.sessions[&code].session.pools[seat]).unwrap()
+            };
+
+            // The host (seat 0) and a guest (seat 1) each reattach on their own
+            // socket and read their own reconnect's result.
+            let mut sockets = Vec::new();
+            for (seat_token, id) in [(&token, 60), (&guest_token, 70)] {
+                let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+                assert!(matches!(
+                    recv_server_message(&mut socket).await,
+                    ServerMessage::ServerHello { .. }
+                ));
+                send_test_message(&mut socket, &hello, false).await;
+                send_test_message(
+                    &mut socket,
+                    &ClientMessage::ReconnectDraft {
+                        draft_code: code.clone(),
+                        player_token: seat_token.clone(),
+                        request_id: draft_request_id(id),
+                    },
+                    false,
+                )
+                .await;
+                assert!(matches!(
+                    accepted_result(next_draft_result(&mut socket).await, id),
+                    DraftCommandResult::Reconnected { view } if view.status == DraftStatus::Lobby
+                ));
+                sockets.push(socket);
+            }
+            let [mut host, mut guest]: [_; 2] = sockets.try_into().ok().unwrap();
+
+            // The host's start is answered on the host's socket, before the
+            // pod's fan-out; the guest reads only the fan-out.
+            send_test_message(&mut host, &action(DraftAction::StartDraft, 61), false).await;
             assert!(matches!(
-                recv_server_message(&mut socket).await,
-                ServerMessage::ServerHello { .. }
+                accepted_result(next_draft_result(&mut host).await, 61),
+                DraftCommandResult::Applied { prompt_id: None, view }
+                    if view.status == DraftStatus::Drafting
+                        && view.current_pack.as_ref().unwrap().len() == 3
+                        && view.fifo.is_none()
             ));
-            for message in [
-                ClientMessage::ClientHello {
-                    client_version: env!("CARGO_PKG_VERSION").into(),
-                    build_commit: build_commit().into(),
-                    protocol_version: PROTOCOL_VERSION,
-                    lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
-                    wire_formats: Vec::new(),
-                    state_codecs: Vec::new(),
-                },
-                ClientMessage::ReconnectDraft {
-                    draft_code: code.clone(),
-                    player_token: token,
-                },
-            ] {
-                socket
-                    .send(WsMessage::Text(
-                        serde_json::to_string(&message).unwrap().into(),
-                    ))
-                    .await
-                    .unwrap();
-            }
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Lobby));
-            socket
-                .send(WsMessage::Text(
-                    serde_json::to_string(&ClientMessage::DraftAction {
-                        draft_code: code.clone(),
-                        action: DraftAction::StartDraft,
-                    })
-                    .unwrap()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-            assert!(matches!(recv_server_message(&mut socket).await,
-                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Drafting
-                    && view.current_pack.as_ref().unwrap().len() == 3 && view.fifo.is_none()));
-            socket
-                .send(WsMessage::Text(
-                    serde_json::to_string(&ClientMessage::DraftAction {
-                        draft_code: code.clone(),
-                        action: DraftAction::Pick {
-                            seat: 7,
-                            card_instance_ids: vec!["TST-0-0-0".into()],
-                        },
-                    })
-                    .unwrap()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-            loop {
-                match recv_server_message(&mut socket).await {
-                    ServerMessage::DraftTimerSync { .. } => continue,
-                    ServerMessage::DraftStateUpdate { view } => {
-                        assert_eq!(view.pool[0].instance_id, "TST-0-0-0");
-                        assert_eq!(view.flow, draft_core::types::DraftFlow::LegacyBarrier);
-                        break;
-                    }
-                    other => panic!("legacy pick did not publish: {other:?}"),
+            assert!(matches!(
+                next_draft_result(&mut host).await,
+                ServerMessage::DraftStateUpdate { .. }
+            ));
+            let guest_card = match next_draft_result(&mut guest).await {
+                ServerMessage::DraftStateUpdate { view } => {
+                    view.current_pack.as_ref().unwrap()[0].instance_id.clone()
                 }
+                other => {
+                    panic!("the guest sent nothing and must read only the fan-out, got {other:?}")
+                }
+            };
+
+            send_test_message(
+                &mut guest,
+                &action(
+                    DraftAction::Pick {
+                        seat: 1,
+                        card_instance_ids: vec![guest_card.clone()],
+                    },
+                    62,
+                ),
+                false,
+            )
+            .await;
+            match accepted_result(next_draft_result(&mut guest).await, 62) {
+                DraftCommandResult::Applied {
+                    prompt_id: None,
+                    view,
+                } => {
+                    let pool: Vec<_> = view
+                        .pool
+                        .iter()
+                        .map(|card| card.instance_id.as_str())
+                        .collect();
+                    assert_eq!(pool, [guest_card.as_str()]);
+                    assert_eq!(view.flow, draft_core::types::DraftFlow::LegacyBarrier);
+                }
+                other => panic!("the guest's pick must be applied, got {other:?}"),
             }
+            assert!(matches!(
+                next_draft_result(&mut guest).await,
+                ServerMessage::DraftStateUpdate { .. }
+            ));
+            assert!(matches!(
+                next_draft_result(&mut host).await,
+                ServerMessage::DraftStateUpdate { view } if view.pool.is_empty()
+            ));
+
+            // A refused action answers its own id and changes no pool.
+            for (id, refused, expected) in [
+                (
+                    63,
+                    DraftAction::Pick {
+                        seat: 1,
+                        card_instance_ids: vec!["NOT-IN-PACK".into()],
+                    },
+                    "Draft error",
+                ),
+                (
+                    64,
+                    DraftAction::AdvanceRound,
+                    "Only the draft host can perform this action",
+                ),
+            ] {
+                let before = seat_pool(&*app.draft_sessions.lock().await, 1);
+                send_test_message(&mut guest, &action(refused, id), false).await;
+                let reason = refused_reason(next_draft_result(&mut guest).await, id);
+                assert!(reason.starts_with(expected), "{id}: {reason}");
+                assert_eq!(seat_pool(&*app.draft_sessions.lock().await, 1), before);
+            }
+
             let mut manager = app.draft_sessions.lock().await;
             let timer = manager
                 .sessions
                 .get_mut(&code)
                 .unwrap()
+                .legacy_schedule_mut()
+                .expect("a legacy pod")
                 .timer_task
                 .take()
                 .expect("legacy StartDraft armed its existing timer");
@@ -15894,6 +17994,7 @@ mod draft_socket_authority_tests {
                     serde_json::to_string(&ClientMessage::ReconnectDraft {
                         draft_code,
                         player_token: announced_token.clone(),
+                        request_id: draft_request_id(71),
                     })
                     .expect("draft reconnect json")
                     .into(),
@@ -15922,8 +18023,8 @@ mod draft_socket_authority_tests {
                 other => panic!("expected matching GameStarted, got {other:?}"),
             }
             assert!(matches!(
-                recv_server_message(&mut socket).await,
-                ServerMessage::DraftStateUpdate { .. }
+                accepted_result(recv_server_message(&mut socket).await, 71),
+                DraftCommandResult::Reconnected { .. }
             ));
 
             socket
@@ -16025,6 +18126,7 @@ mod draft_socket_authority_tests {
                 ClientMessage::ReconnectDraft {
                     draft_code: draft_code.clone(),
                     player_token: draft_token,
+                    request_id: draft_request_id(72),
                 },
             ] {
                 socket
@@ -16037,8 +18139,8 @@ mod draft_socket_authority_tests {
                     .expect("send client message");
             }
 
-            match recv_server_message(&mut socket).await {
-                ServerMessage::DraftStateUpdate { view } => {
+            match accepted_result(recv_server_message(&mut socket).await, 72) {
+                DraftCommandResult::Reconnected { view } => {
                     assert_eq!(view.status, DraftStatus::MatchInProgress);
                     assert_eq!(view.seats[0].seat_index, 0);
                 }
@@ -16086,21 +18188,21 @@ mod draft_socket_authority_tests {
     fn fresh_socket_keeps_draft_admission_and_reconnect_paths() {
         let fresh = empty_identity();
         for message in draft_admission_messages("DRAFT01") {
-            assert_eq!(
-                draft_socket_admission_rejection(&message, &fresh),
-                None,
+            assert!(
+                draft_socket_admission_rejection(&message, &fresh).is_none(),
                 "a fresh socket must reach {message:?}'s handler"
             );
         }
-        assert_eq!(
+        assert!(
             draft_socket_admission_rejection(
                 &ClientMessage::ReconnectDraft {
                     draft_code: "DRAFT01".to_string(),
                     player_token: "player-token".to_string(),
+                    request_id: draft_request_id(23),
                 },
                 &fresh,
-            ),
-            None,
+            )
+            .is_none(),
             "a fresh socket must retain draft reconnect eligibility"
         );
     }
@@ -16130,11 +18232,15 @@ mod draft_socket_authority_tests {
             identity.draft_token.clone(),
         );
 
-        for message in draft_admission_messages(&draft_code) {
-            assert_eq!(
+        // The gate must refuse each admission before its handler mutates
+        // draft state, answering the command's own id.
+        for (id, message) in [21, 22]
+            .into_iter()
+            .zip(draft_admission_messages(&draft_code))
+        {
+            assert_fresh_admission_refused(
                 draft_socket_admission_rejection(&message, &identity),
-                Some(DRAFT_SOCKET_FRESH_REJECTION),
-                "the gate must reject {message:?} before its handler mutates draft state"
+                id,
             );
         }
 
@@ -16194,11 +18300,15 @@ mod draft_socket_authority_tests {
         .await
         .expect("replace original socket");
 
-        for message in draft_admission_messages("OTHER01") {
-            assert_eq!(
+        // A stale seat must be refused before either admission can overwrite
+        // its identity.
+        for (id, message) in [21, 22]
+            .into_iter()
+            .zip(draft_admission_messages("OTHER01"))
+        {
+            assert_fresh_admission_refused(
                 draft_socket_admission_rejection(&message, &stale_identity),
-                Some(DRAFT_SOCKET_FRESH_REJECTION),
-                "a stale seat must be rejected before {message:?} can overwrite its identity"
+                id,
             );
         }
         assert!(
@@ -17963,9 +20073,16 @@ mod issue_4548_full_create_tests {
     async fn frames_until_lobby_snapshot(sock: &mut TestWs) -> Vec<ServerMessage> {
         send_test_message(sock, &ClientMessage::SubscribeLobby, false).await;
         let mut frames = Vec::new();
+        collect_until_lobby_snapshot(sock, &mut frames).await;
+        frames
+    }
+
+    /// Reads `sock` into `frames` until a lobby snapshot arrives. Cancelling
+    /// the read keeps every frame already read in `frames`.
+    async fn collect_until_lobby_snapshot(sock: &mut TestWs, frames: &mut Vec<ServerMessage>) {
         loop {
             match recv_server_message(sock).await {
-                ServerMessage::LobbyUpdate { .. } => return frames,
+                ServerMessage::LobbyUpdate { .. } => return,
                 other => frames.push(other),
             }
         }
@@ -18764,6 +20881,7 @@ mod issue_4548_full_create_tests {
                 &ClientMessage::ReconnectDraft {
                     draft_code,
                     player_token: draft_token,
+                    request_id: next_draft_request_id(),
                 },
                 false,
             )
@@ -19451,35 +21569,65 @@ mod issue_4548_full_create_tests {
         }
     }
 
+    /// A fresh request id for each draft command these tests send, distinct
+    /// across every test in the process.
+    fn next_draft_request_id() -> DraftRequestId {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000);
+        DraftRequestId::try_from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            .expect("a test draft request id is in range")
+    }
+
+    /// The request id a native draft command frame carries.
+    fn draft_command_id(frame: &ClientMessage) -> DraftRequestId {
+        match frame {
+            ClientMessage::CreateDraftWithSettings { request_id, .. }
+            | ClientMessage::JoinDraftWithPassword { request_id, .. }
+            | ClientMessage::DraftAction { request_id, .. }
+            | ClientMessage::ReconnectDraft { request_id, .. } => *request_id,
+            other => panic!("not a native draft command: {other:?}"),
+        }
+    }
+
     fn pod_frame(pod_size: u8, public: bool) -> ClientMessage {
+        pod_frame_with(pod_size, public, None, next_draft_request_id())
+    }
+
+    fn pod_frame_with(
+        pod_size: u8,
+        public: bool,
+        password: Option<&str>,
+        request_id: DraftRequestId,
+    ) -> ClientMessage {
         ClientMessage::CreateDraftWithSettings {
             display_name: "Host".to_string(),
             source: None,
             set_codes: Some(vec!["TST".to_string()]),
             kind: draft_core::types::DraftKind::Premier,
             public,
-            password: None,
+            password: password.map(str::to_string),
             timer_seconds: None,
             tournament_format: draft_core::types::TournamentFormat::Swiss,
             pod_policy: draft_core::types::PodPolicy::Competitive,
             pod_size,
+            fifo_policy: None,
+            request_id,
         }
     }
 
     async fn host_pod(url: &str, build: &str, pod_size: u8, public: bool) -> HostedPod {
         let (sub, _) = subscribe_as(url, build).await;
         let mut host = connect_as(url, build).await;
-        send_test_message(&mut host, &pod_frame(pod_size, public), false).await;
-        let (code, token) = loop {
-            match recv_server_message(&mut host).await {
-                ServerMessage::DraftCreated {
-                    draft_code,
-                    player_token,
-                    ..
-                } => break (draft_code, player_token),
-                ServerMessage::DraftActionRejected { reason } => panic!("create refused: {reason}"),
-                _ => {}
-            }
+        let (code, token) = match send_draft(&mut host, &pod_frame(pod_size, public)).await {
+            ServerMessage::DraftCommandAccepted {
+                result:
+                    DraftCommandResult::Created {
+                        draft_code,
+                        player_token,
+                        ..
+                    },
+                ..
+            } => (draft_code, player_token),
+            other => panic!("create refused: {other:?}"),
         };
         frames_until_lobby_snapshot(&mut host).await;
         let mut pod = HostedPod {
@@ -19513,10 +21661,19 @@ mod issue_4548_full_create_tests {
     }
 
     fn draft_join(code: &str) -> ClientMessage {
+        draft_join_with(code, None, next_draft_request_id())
+    }
+
+    fn draft_join_with(
+        code: &str,
+        password: Option<&str>,
+        request_id: DraftRequestId,
+    ) -> ClientMessage {
         ClientMessage::JoinDraftWithPassword {
             draft_code: code.to_string(),
             display_name: "Guest".to_string(),
-            password: None,
+            password: password.map(str::to_string),
+            request_id,
         }
     }
 
@@ -19524,23 +21681,29 @@ mod issue_4548_full_create_tests {
         ClientMessage::ReconnectDraft {
             draft_code: code.to_string(),
             player_token: token.to_string(),
+            request_id: next_draft_request_id(),
         }
     }
 
-    /// The reply that settles a draft join or reconnect.
+    /// The reply that settles a native draft command: its own correlated
+    /// result, which must carry the frame's request id. An uncorrelated
+    /// `Error` is returned at once, so the caller's read fails on it;
+    /// unsolicited views and lobby frames never settle a command.
     async fn send_draft(sock: &mut TestWs, frame: &ClientMessage) -> ServerMessage {
+        let id = draft_command_id(frame);
         send_test_message(sock, frame, false).await;
         loop {
             let reply = recv_server_message(sock).await;
-            if matches!(
-                reply,
-                ServerMessage::DraftJoined { .. }
-                    | ServerMessage::DraftActionRejected { .. }
-                    | ServerMessage::DraftStateUpdate { .. }
-                    | ServerMessage::PasswordRequired { .. }
-            ) {
-                return reply;
+            let answered = match &reply {
+                ServerMessage::DraftCommandAccepted { request_id, .. }
+                | ServerMessage::DraftCommandRefused { request_id, .. } => Some(*request_id),
+                ServerMessage::Error { .. } => None,
+                _ => continue,
+            };
+            if let Some(answered) = answered {
+                assert_eq!(answered, id, "a draft result must answer its own command");
             }
+            return reply;
         }
     }
 
@@ -19551,16 +21714,591 @@ mod issue_4548_full_create_tests {
 
     fn draft_refusal(reply: ServerMessage) -> String {
         match reply {
-            ServerMessage::DraftActionRejected { reason } => reason,
-            other => panic!("expected DraftActionRejected, got {other:?}"),
+            ServerMessage::DraftCommandRefused {
+                refusal: DraftCommandRefusal::Rejected { reason },
+                ..
+            } => reason,
+            other => panic!("expected a refused draft command, got {other:?}"),
         }
+    }
+
+    /// The private scheduler over a running server's own state.
+    fn private_scheduler(app: &AppState) -> super::fifo_scheduler::FifoScheduler {
+        super::fifo_scheduler::FifoScheduler {
+            draft_state: app.draft_sessions.clone(),
+            game_db: app.game_db.clone(),
+            connections: app.connections.clone(),
+            draft_spectators: app.draft_spectators.clone(),
+            lobby: app.lobby.clone(),
+            lobby_subscribers: app.lobby_subscribers.clone(),
+            clock: super::fifo_scheduler::FifoHostClock::starting_at(1000),
+        }
+    }
+
+    #[tokio::test]
+    async fn public_draft_entries_refuse_a_private_fifo_session() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let fifo_text = draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME;
+        let (fifo, tokens) = super::fifo_scheduler::create_private_fifo(
+            &private_scheduler(&app),
+            super::fifo_scheduler_tests::fifo_off_config(),
+            (0..8).map(|seat| format!("Player {seat}")).collect(),
+        )
+        .await
+        .expect("a private FIFO pod");
+        let legacy = host_pod(&url, "build-a", 8, false).await;
+
+        let join = draft_join(&fifo);
+        let id = draft_command_id(&join);
+        let reply = fresh_draft(&url, "build-a", &join).await;
+        assert!(matches!(
+            &reply,
+            ServerMessage::DraftCommandRefused { request_id, .. } if *request_id == id
+        ));
+        assert_eq!(draft_refusal(reply), fifo_text);
+        let reconnect = draft_reconnect(&fifo, &tokens[0]);
+        assert_eq!(
+            draft_refusal(fresh_draft(&url, "build-a", &reconnect).await),
+            fifo_text
+        );
+        assert!(!app.connections.lock().await.contains_key(&fifo));
+
+        // Spectating the FIFO session is refused and registers nothing.
+        let mut spectator = connect_as(&url, "build-a").await;
+        send_test_message(
+            &mut spectator,
+            &ClientMessage::SpectateDraft {
+                draft_code: fifo.clone(),
+            },
+            false,
+        )
+        .await;
+        match super::draft_socket_authority_tests::next_draft_result(&mut spectator).await {
+            ServerMessage::Error { message, .. } => assert_eq!(message, fifo_text),
+            other => panic!("expected the shared refusal, got {other:?}"),
+        }
+        assert!(!app.draft_spectators.lock().await.contains_key(&fifo));
+
+        // The legacy pod's are accepted.
+        assert!(matches!(
+            fresh_draft(&url, "build-a", &draft_join(&legacy.code)).await,
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Joined { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            fresh_draft(&url, "build-a", &legacy.reconnect()).await,
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Reconnected { .. },
+                ..
+            }
+        ));
+        send_test_message(
+            &mut spectator,
+            &ClientMessage::SpectateDraft {
+                draft_code: legacy.code.clone(),
+            },
+            false,
+        )
+        .await;
+        assert!(matches!(
+            super::draft_socket_authority_tests::next_draft_result(&mut spectator).await,
+            ServerMessage::DraftSpectatorView { .. }
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_late_create_listing_never_lists_a_fifo_owner() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        let code = held.code.clone();
+        let mut manager = app.draft_sessions.lock().await;
+        manager.remove_draft(&code).expect("the created pod");
+        let staged = manager
+            .stage_restored_fifo(super::fifo_scheduler_tests::started_fifo_row(
+                &code,
+                super::fifo_scheduler_tests::fifo_off_config(),
+            ))
+            .unwrap();
+        app.game_db.save_draft_session(&code, staged.row()).unwrap();
+        manager.install_fifo(staged).unwrap();
+        // The create is held between its registration and its recheck. The
+        // row is registered there, but a subscriber arriving then is not
+        // shown it.
+        assert!(app.lobby.lock().await.lobby().has_game(&code));
+        let window_snapshot = tokio::time::timeout(
+            Duration::from_secs(10),
+            snapshot_lists(&url, "build-a", &code),
+        )
+        .await
+        .expect("a lobby snapshot while the create waits on its recheck");
+        assert!(!window_snapshot);
+        drop(manager);
+        release_and_finish(&mut held).await;
+        assert!(!app.lobby.lock().await.lobby().has_game(&code));
+        assert!(matches!(
+            app.draft_sessions.lock().await.sessions[&code].schedule,
+            DraftSchedule::Fifo(_)
+        ));
+
+        // A second, unreplaced create on another socket is listed. That host
+        // stays connected, so its listing stands while the frames are read.
+        let mut other_host = connect_as(&url, "build-a").await;
+        let other = match send_draft(&mut other_host, &pod_frame(8, true)).await {
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Created { draft_code, .. },
+                ..
+            } => draft_code,
+            other => panic!("create refused: {other:?}"),
+        };
+        assert!(app.lobby.lock().await.lobby().has_game(&other));
+        let frames = frames_until_lobby_snapshot(&mut held.sub).await;
+        // The withdrawn row was never shown, so its withdrawal announces
+        // nothing either.
+        assert_eq!(listing_of(&frames, &code), Vec::<&str>::new());
+        assert_eq!(listing_of(&frames, &other), vec!["Added"]);
+        drop(other_host);
+        server.abort();
+    }
+
+    /// The code and host token of create `id`'s own accepted result.
+    fn created_pod(reply: ServerMessage, id: DraftRequestId) -> (String, String) {
+        match reply {
+            ServerMessage::DraftCommandAccepted {
+                request_id,
+                result:
+                    DraftCommandResult::Created {
+                        draft_code,
+                        player_token,
+                        ..
+                    },
+            } if request_id == id => (draft_code, player_token),
+            other => panic!("expected the create's accepted result, got {other:?}"),
+        }
+    }
+
+    /// A public pod's create, held after it registered its lobby row and
+    /// before it settles that row's listing.
+    struct HeldCreate {
+        sub: TestWs,
+        host: TestWs,
+        code: String,
+        token: String,
+        gate: Arc<socket_test_hooks::BootstrapGate>,
+    }
+
+    /// Creates a public pod from a `build-a` host, watched by a `build-a`
+    /// subscriber, and holds the create at its listing.
+    async fn create_held_at_listing(url: &str, app: &AppState) -> HeldCreate {
+        let (sub, _) = subscribe_as(url, "build-a").await;
+        let mut host = connect_as(url, "build-a").await;
+        let gate = app.context.socket_hooks.arm_draft_create_listing();
+        let create = pod_frame(8, true);
+        let id = draft_command_id(&create);
+        send_test_message(&mut host, &create, false).await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::draft_socket_authority_tests::next_draft_result(&mut host),
+        )
+        .await
+        .expect("the create's reply");
+        let (code, token) = created_pod(reply, id);
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .expect("the create reaches its listing");
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(
+                lob.lobby().host_build_commit(&code),
+                Some("build-a"),
+                "reach guard: the create registered its own row"
+            );
+            assert!(
+                lob.lobby().public_game(&code).is_none(),
+                "reach guard: the create has not listed its row yet"
+            );
+        }
+        HeldCreate {
+            sub,
+            host,
+            code,
+            token,
+            gate,
+        }
+    }
+
+    /// Registers another listed row under `code`, from a `build-z` host, as a
+    /// later owner of the code would.
+    async fn replace_row(app: &AppState, code: &str) {
+        let mut lob = app.lobby.lock().await;
+        lob.lobby_mut().register_game(
+            code,
+            RegisterGameRequest {
+                host_name: "Replacement".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                host_version: "v-build-z".to_string(),
+                host_build_commit: "build-z".to_string(),
+                current_players: 1,
+                max_players: 8,
+                format_config: None,
+                match_config: Default::default(),
+                room_name: None,
+                host_peer_id: String::new(),
+                draft_metadata: None,
+                ranked: false,
+            },
+            &SysEnv,
+        );
+        assert!(
+            lob.lobby().public_game(code).is_some(),
+            "reach guard: the replacement row is listed"
+        );
+    }
+
+    /// Releases the held create and returns once its handler has finished:
+    /// the socket's next create is refused only after the first returned.
+    async fn release_and_finish(held: &mut HeldCreate) {
+        held.gate.release.notify_one();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut held.host, &pod_frame(8, true)),
+        )
+        .await
+        .expect("the socket's next create is answered");
+        assert_eq!(draft_refusal(reply), DRAFT_SOCKET_FRESH_REJECTION);
+    }
+
+    /// The listing frames `sub` was sent for `code`, read through a fresh
+    /// lobby snapshot.
+    async fn lobby_frames(sub: &mut TestWs, code: &str) -> Vec<&'static str> {
+        let frames =
+            tokio::time::timeout(Duration::from_secs(10), frames_until_lobby_snapshot(sub))
+                .await
+                .expect("a lobby snapshot");
+        listing_of(&frames, code)
+    }
+
+    /// A newer `build-b` socket reconnects to the held create's host seat.
+    async fn reconnect_newer_host(url: &str, app: &AppState, held: &HeldCreate) -> TestWs {
+        let mut newer = connect_as(url, "build-b").await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut newer, &draft_reconnect(&held.code, &held.token)),
+        )
+        .await
+        .expect("the reconnect's reply");
+        assert!(reconnected(reply), "the newer socket takes the host seat");
+        assert_eq!(
+            app.lobby.lock().await.lobby().host_build_commit(&held.code),
+            Some("build-b"),
+            "reach guard: the reconnect stamped its own build"
+        );
+        newer
+    }
+
+    #[tokio::test]
+    async fn a_late_create_listing_leaves_a_replacement_row_unlisted_and_unstamped() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        replace_row(&app, &held.code).await;
+        app.lobby
+            .lock()
+            .await
+            .lobby_mut()
+            .mark_host_away(&held.code);
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-z"));
+            assert!(lob.lobby().public_game(&held.code).is_none());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_create_leaves_a_replacement_row_under_its_code() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        app.draft_sessions
+            .lock()
+            .await
+            .remove_draft(&held.code)
+            .expect("the created pod");
+        replace_row(&app, &held.code).await;
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-z"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_newer_host_reconnect_keeps_its_build_over_a_late_create_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        let newer = reconnect_newer_host(&url, &app, &held).await;
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        // The newer host's listing is withheld from a `build-a` subscriber.
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            Vec::<&str>::new()
+        );
+        drop(newer);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_departed_newer_host_stays_unlisted_after_a_late_create_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_listing(&url, &app).await;
+        let newer = reconnect_newer_host(&url, &app, &held).await;
+        drop(newer);
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            await_draft_seat_departed(&app, &held.code, 0),
+        )
+        .await
+        .expect("the newer host's departure");
+        assert!(
+            app.lobby
+                .lock()
+                .await
+                .lobby()
+                .public_game(&held.code)
+                .is_none(),
+            "reach guard: the departure delisted the row"
+        );
+        release_and_finish(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_none());
+        }
+        assert_eq!(
+            lobby_frames(&mut held.sub, &held.code).await,
+            vec!["Removed"]
+        );
+        server.abort();
+    }
+
+    /// A public pod's create, held after it issued the host's credentials and
+    /// before it registers the pod's lobby row.
+    struct UnregisteredCreate {
+        host: TestWs,
+        code: String,
+        token: String,
+        gate: Arc<socket_test_hooks::BootstrapGate>,
+    }
+
+    /// Creates a public pod from a `build-a` host and holds the create before
+    /// its lobby registration.
+    async fn create_held_at_registration(url: &str, app: &AppState) -> UnregisteredCreate {
+        let mut host = connect_as(url, "build-a").await;
+        let gate = app.context.socket_hooks.arm_draft_create_registration();
+        let create = pod_frame(8, true);
+        let id = draft_command_id(&create);
+        send_test_message(&mut host, &create, false).await;
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            super::draft_socket_authority_tests::next_draft_result(&mut host),
+        )
+        .await
+        .expect("the create's reply");
+        let (code, token) = created_pod(reply, id);
+        tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+            .await
+            .expect("the create reaches its registration");
+        assert!(
+            !app.lobby.lock().await.lobby().has_game(&code),
+            "reach guard: the pod has no lobby row yet"
+        );
+        UnregisteredCreate {
+            host,
+            code,
+            token,
+            gate,
+        }
+    }
+
+    /// Sends `frame` from a fresh `build` socket while `held` is before its
+    /// registration, releases the create, and returns the socket and the
+    /// frame's own result once the frame's handler has returned.
+    ///
+    /// The server reads the frame while the create is held. A handler that
+    /// does not wait on the create runs to completion inside the 500 ms the
+    /// window then stays open; one that waits is answered after the release.
+    async fn send_while_unregistered(
+        url: &str,
+        app: &AppState,
+        held: &UnregisteredCreate,
+        build: &str,
+        frame: &ClientMessage,
+    ) -> (TestWs, ServerMessage) {
+        let work = app.context.socket_hooks.arm_parser_work();
+        let mut sock = connect_as(url, build).await;
+        tokio::time::timeout(Duration::from_secs(10), work.wait_counts((1, 0)))
+            .await
+            .expect("the server decodes the socket's hello");
+        let id = draft_command_id(frame);
+        send_test_message(&mut sock, frame, false).await;
+        tokio::time::timeout(Duration::from_secs(10), work.wait_counts((2, 0)))
+            .await
+            .expect("reach guard: the server read the frame while the create was held");
+        assert!(
+            !app.lobby.lock().await.lobby().has_game(&held.code),
+            "reach guard: the create is still before its registration"
+        );
+        // A lobby snapshot on the same socket is answered only after the
+        // frame's handler returned.
+        send_test_message(&mut sock, &ClientMessage::SubscribeLobby, false).await;
+        let mut frames = Vec::new();
+        let handled_while_held = tokio::time::timeout(
+            Duration::from_millis(500),
+            collect_until_lobby_snapshot(&mut sock, &mut frames),
+        )
+        .await
+        .is_ok();
+        held.gate.release.notify_one();
+        if !handled_while_held {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                collect_until_lobby_snapshot(&mut sock, &mut frames),
+            )
+            .await
+            .expect("the frame's handler returns after the create's release");
+        }
+        let mut results = frames.into_iter().filter(|reply| {
+            matches!(
+                reply,
+                ServerMessage::DraftCommandAccepted { request_id, .. }
+                    | ServerMessage::DraftCommandRefused { request_id, .. }
+                    if *request_id == id
+            )
+        });
+        let reply = results.next().expect("the frame's own result");
+        assert!(results.next().is_none(), "the frame is answered once");
+        (sock, reply)
+    }
+
+    /// Returns once the held create's handler, its listing step included, has
+    /// finished: the socket's next create is refused only after the first
+    /// returned.
+    async fn finish_unregistered(held: &mut UnregisteredCreate) {
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            send_draft(&mut held.host, &pod_frame(8, true)),
+        )
+        .await
+        .expect("the socket's next create is answered");
+        assert_eq!(draft_refusal(reply), DRAFT_SOCKET_FRESH_REJECTION);
+    }
+
+    #[tokio::test]
+    async fn a_host_reconnect_before_the_create_registers_its_row_leaves_the_live_host_listed() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let reconnect = draft_reconnect(&held.code, &held.token);
+        let (newer, reply) =
+            send_while_unregistered(&url, &app, &held, "build-b", &reconnect).await;
+        assert!(reconnected(reply), "the newer socket takes the host seat");
+        finish_unregistered(&mut held).await;
+        {
+            let lob = app.lobby.lock().await;
+            assert_eq!(lob.lobby().host_build_commit(&held.code), Some("build-b"));
+            assert!(lob.lobby().public_game(&held.code).is_some());
+        }
+        drop(newer);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_join_before_the_create_registers_its_row_meets_the_hosts_build_gate() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let join = draft_join(&held.code);
+        let (guest, reply) = send_while_unregistered(&url, &app, &held, "build-z", &join).await;
+        // The refusal names the creator's build, so the gate read the
+        // create's own row.
+        assert_eq!(
+            draft_refusal(reply),
+            "Build mismatch: host is on build-a, you are on build-z. Refresh to update."
+        );
+        finish_unregistered(&mut held).await;
+        assert_eq!(filled_draft_seats(&app, &held.code).await, 1);
+        drop(guest);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_join_before_the_create_registers_its_row_is_counted_in_the_listing() {
+        let (url, server, _dir, app) = spawn_draft_server().await;
+        let mut held = create_held_at_registration(&url, &app).await;
+        let join = draft_join(&held.code);
+        let (guest, reply) = send_while_unregistered(&url, &app, &held, "build-a", &join).await;
+        assert_eq!(joined_seat(reply), 1, "the join takes the next seat");
+        finish_unregistered(&mut held).await;
+        assert_eq!(
+            app.lobby
+                .lock()
+                .await
+                .lobby()
+                .public_game(&held.code)
+                .expect("the live host's row is listed")
+                .current_players,
+            2
+        );
+        drop(guest);
+        server.abort();
     }
 
     fn joined_token(reply: ServerMessage) -> String {
         match reply {
-            ServerMessage::DraftJoined { player_token, .. } => player_token,
-            other => panic!("expected DraftJoined, got {other:?}"),
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Joined { player_token, .. },
+                ..
+            } => player_token,
+            other => panic!("expected an accepted join, got {other:?}"),
         }
+    }
+
+    fn joined_seat(reply: ServerMessage) -> u8 {
+        match reply {
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Joined { seat_index, .. },
+                ..
+            } => seat_index,
+            other => panic!("expected an accepted join, got {other:?}"),
+        }
+    }
+
+    /// Whether `reply` is an accepted reconnect.
+    fn reconnected(reply: ServerMessage) -> bool {
+        matches!(
+            reply,
+            ServerMessage::DraftCommandAccepted {
+                result: DraftCommandResult::Reconnected { .. },
+                ..
+            }
+        )
     }
 
     /// Writes `code`'s row now, as a flush would.
@@ -19632,6 +22370,252 @@ mod issue_4548_full_create_tests {
         }
     }
 
+    /// The number of claimed seats in `code`'s pod.
+    async fn filled_draft_seats(app: &AppState, code: &str) -> usize {
+        app.draft_sessions.lock().await.sessions[code]
+            .player_tokens
+            .iter()
+            .filter(|token| !token.is_empty())
+            .count()
+    }
+
+    #[tokio::test]
+    async fn draft_commands_answer_with_their_request_ids() {
+        use super::draft_socket_authority_tests::{
+            accepted_result, draft_request_id, next_draft_result, refused_reason,
+        };
+        let (url, server, _temp_dir, app) = spawn_draft_server().await;
+        timed(server, async {
+            let create = |id| pod_frame_with(8, false, None, draft_request_id(id));
+            // Two creators send before either reads: each socket's first result
+            // answers its own command.
+            let mut a = connect_as(&url, "build-a").await;
+            let mut b = connect_as(&url, "build-a").await;
+            send_test_message(&mut a, &create(41), false).await;
+            send_test_message(&mut b, &create(42), false).await;
+            let mut codes = Vec::new();
+            for (socket, id) in [(&mut a, 41), (&mut b, 42)] {
+                match accepted_result(next_draft_result(socket).await, id) {
+                    DraftCommandResult::Created {
+                        draft_code,
+                        seat_index: 0,
+                        ..
+                    } => codes.push(draft_code),
+                    other => panic!("draft command {id} must create a pod, got {other:?}"),
+                }
+            }
+            assert_ne!(codes[0], codes[1]);
+            {
+                let drafts = app.draft_sessions.lock().await;
+                assert!(codes.iter().all(|code| drafts.sessions.contains_key(code)));
+            }
+
+            let mut c = connect_as(&url, "build-a").await;
+            send_test_message(
+                &mut c,
+                &draft_join_with(&codes[0], None, draft_request_id(43)),
+                false,
+            )
+            .await;
+            match accepted_result(next_draft_result(&mut c).await, 43) {
+                DraftCommandResult::Joined {
+                    draft_code,
+                    seat_index: 1,
+                    view,
+                    ..
+                } => {
+                    assert_eq!(draft_code, codes[0]);
+                    assert_eq!(view.status, draft_core::types::DraftStatus::Lobby);
+                }
+                other => panic!("draft command 43 must join, got {other:?}"),
+            }
+            assert_eq!(filled_draft_seats(&app, &codes[0]).await, 2);
+
+            // A create the wire guard admits but whose source the server cannot
+            // resolve is refused in dispatch, still as its own command.
+            let mut unknown_set = create(44);
+            if let ClientMessage::CreateDraftWithSettings { set_codes, .. } = &mut unknown_set {
+                *set_codes = Some(vec!["ZZZ".to_string()]);
+            }
+            assert!(guard_client_message_before_dispatch(&unknown_set, ServerMode::Full).is_ok());
+            let mut d = connect_as(&url, "build-a").await;
+            send_test_message(&mut d, &unknown_set, false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut d).await, 44),
+                "No draft pool data for set: ZZZ"
+            );
+            assert_eq!(app.draft_sessions.lock().await.sessions.len(), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn protected_draft_join_settles_password_refusals() {
+        use super::draft_socket_authority_tests::{
+            accepted_result, draft_request_id, next_draft_result, refused_reason,
+        };
+        let (url, server, _temp_dir, app) = spawn_draft_server().await;
+        timed(server, async {
+            let mut host = connect_as(&url, "build-a").await;
+            send_test_message(
+                &mut host,
+                &pod_frame_with(8, false, Some("pw"), draft_request_id(50)),
+                false,
+            )
+            .await;
+            let code = match accepted_result(next_draft_result(&mut host).await, 50) {
+                DraftCommandResult::Created { draft_code, .. } => draft_code,
+                other => panic!("draft command 50 must create a pod, got {other:?}"),
+            };
+            let mut guest = connect_as(&url, "build-a").await;
+
+            send_test_message(
+                &mut guest,
+                &draft_join_with(&code, None, draft_request_id(51)),
+                false,
+            )
+            .await;
+            match next_draft_result(&mut guest).await {
+                ServerMessage::DraftCommandRefused {
+                    request_id,
+                    refusal: DraftCommandRefusal::PasswordRequired,
+                } if request_id == draft_request_id(51) => {}
+                other => panic!("expected the password refusal of draft command 51, got {other:?}"),
+            }
+            assert_eq!(filled_draft_seats(&app, &code).await, 1);
+
+            send_test_message(
+                &mut guest,
+                &draft_join_with(&code, Some("bad"), draft_request_id(52)),
+                false,
+            )
+            .await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut guest).await, 52),
+                "Wrong password"
+            );
+            assert_eq!(filled_draft_seats(&app, &code).await, 1);
+
+            send_test_message(
+                &mut guest,
+                &draft_join_with(&code, Some("pw"), draft_request_id(53)),
+                false,
+            )
+            .await;
+            assert!(matches!(
+                accepted_result(next_draft_result(&mut guest).await, 53),
+                DraftCommandResult::Joined { seat_index: 1, .. }
+            ));
+            assert_eq!(filled_draft_seats(&app, &code).await, 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn draft_create_refusals_before_dispatch_answer_their_request() {
+        use super::draft_socket_authority_tests::{
+            accepted_result, draft_request_id, next_draft_result, refused_reason,
+        };
+        let (url, server, _temp_dir, app) = spawn_draft_server().await;
+        timed(server, async {
+            let create = |id| pod_frame_with(8, false, None, draft_request_id(id));
+            let mut socket = connect_as(&url, "build-a").await;
+
+            let mut long_name = create(91);
+            if let ClientMessage::CreateDraftWithSettings { display_name, .. } = &mut long_name {
+                *display_name = "N".repeat(lobby_broker::validation::MAX_DISPLAY_NAME_LEN + 1);
+            }
+            send_test_message(&mut socket, &long_name, false).await;
+            let reason = refused_reason(next_draft_result(&mut socket).await, 91);
+            assert!(reason.contains("display_name"), "{reason}");
+
+            let mut with_policy = create(101);
+            if let ClientMessage::CreateDraftWithSettings { fifo_policy, .. } = &mut with_policy {
+                *fifo_policy = Some(server_core::protocol::NativeFifoPolicyIntent {
+                    selection: draft_core::types::DraftSelectionPolicy::default(),
+                    review_seconds: 0,
+                });
+            }
+            send_test_message(&mut socket, &with_policy, false).await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 101),
+                draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME
+            );
+
+            // A request id outside its bound fails typed decoding, so the frame
+            // has no identity to answer and is refused uncorrelated.
+            let mut zero_id = serde_json::to_value(create(1)).unwrap();
+            zero_id["data"]["request_id"] = 0.into();
+            socket
+                .send(WsMessage::Text(zero_id.to_string().into()))
+                .await
+                .unwrap();
+            match next_draft_result(&mut socket).await {
+                ServerMessage::Error { message, .. } => {
+                    assert!(message.starts_with("Invalid message:"), "{message}")
+                }
+                other => panic!("an undecodable draft frame must stay uncorrelated: {other:?}"),
+            }
+            assert!(app.draft_sessions.lock().await.sessions.is_empty());
+
+            send_test_message(&mut socket, &create(102), false).await;
+            assert!(matches!(
+                accepted_result(next_draft_result(&mut socket).await, 102),
+                DraftCommandResult::Created { .. }
+            ));
+            assert_eq!(app.draft_sessions.lock().await.sessions.len(), 1);
+
+            // A spectator frame awaits no outcome and keeps the uncorrelated
+            // `Error` for its bounds.
+            send_test_message(
+                &mut socket,
+                &ClientMessage::SpectateDraft {
+                    draft_code: "C".repeat(lobby_broker::validation::MAX_GAME_CODE_LEN + 1),
+                },
+                false,
+            )
+            .await;
+            match next_draft_result(&mut socket).await {
+                ServerMessage::Error { message, .. } => {
+                    assert!(message.contains("draft_code"), "{message}")
+                }
+                other => panic!("a spectator refusal is uncorrelated: {other:?}"),
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lobby_only_refuses_a_draft_create_as_its_own_command() {
+        use super::draft_socket_authority_tests::{
+            draft_request_id, next_draft_result, refused_reason,
+        };
+        let (url, server, _temp_dir, app) = spawn_server_with_mode(ServerMode::LobbyOnly).await;
+        timed(server, async {
+            let mut socket = connect_and_hello(url).await;
+            // Reach guard: this socket's commands run under the LobbyOnly dispatch.
+            let reply = create_outcome(
+                &mut socket,
+                &create_frame(Some("BOTLB2"), Some("peer-2"), vec![]),
+            )
+            .await;
+            assert_eq!(created_code(reply), "BOTLB2");
+
+            send_test_message(
+                &mut socket,
+                &pod_frame_with(8, false, None, draft_request_id(121)),
+                false,
+            )
+            .await;
+            assert_eq!(
+                refused_reason(next_draft_result(&mut socket).await, 121),
+                "Server is in lobby-only mode — this message is not supported"
+            );
+            assert!(app.draft_sessions.lock().await.sessions.is_empty());
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn a_draft_join_is_refused_while_the_host_is_away() {
         let (url, server, _temp_dir, app) = spawn_draft_server().await;
@@ -19644,15 +22628,14 @@ mod issue_4548_full_create_tests {
             drop(seated);
             await_draft_seat_departed(&app, &pod.code, 1).await;
             assert!(pod.listing().await.is_empty());
-            assert!(matches!(
-                fresh_draft(&url, "build-a", &draft_join(&pod.code)).await,
-                ServerMessage::DraftJoined { seat_index: 2, .. }
-            ));
+            assert_eq!(
+                joined_seat(fresh_draft(&url, "build-a", &draft_join(&pod.code)).await),
+                2
+            );
             assert_eq!(pod.listing().await, ["Updated"]);
             let mut seated = connect_as(&url, "build-a").await;
-            assert!(matches!(
-                send_draft(&mut seated, &draft_reconnect(&pod.code, &seated_token)).await,
-                ServerMessage::DraftStateUpdate { .. }
+            assert!(reconnected(
+                send_draft(&mut seated, &draft_reconnect(&pod.code, &seated_token)).await
             ));
             assert!(pod.listing().await.is_empty());
             assert!(snapshot_lists(&url, "build-a", &pod.code).await);
@@ -19662,9 +22645,8 @@ mod issue_4548_full_create_tests {
             await_draft_seat_departed(&app, &pod.code, 1).await;
             let _seated = {
                 let mut sock = connect_as(&url, "build-a").await;
-                assert!(matches!(
-                    send_draft(&mut sock, &draft_reconnect(&pod.code, &seated_token)).await,
-                    ServerMessage::DraftStateUpdate { .. }
+                assert!(reconnected(
+                    send_draft(&mut sock, &draft_reconnect(&pod.code, &seated_token)).await
                 ));
                 sock
             };
@@ -19710,16 +22692,13 @@ mod issue_4548_full_create_tests {
 
             let _host = {
                 let mut sock = connect_as(&url, "build-a").await;
-                assert!(matches!(
-                    send_draft(&mut sock, &pod.reconnect()).await,
-                    ServerMessage::DraftStateUpdate { .. }
-                ));
+                assert!(reconnected(send_draft(&mut sock, &pod.reconnect()).await));
                 sock
             };
-            assert!(matches!(
-                fresh_draft(&url, "build-a", &draft_join(&pod.code)).await,
-                ServerMessage::DraftJoined { seat_index: 3, .. }
-            ));
+            assert_eq!(
+                joined_seat(fresh_draft(&url, "build-a", &draft_join(&pod.code)).await),
+                3
+            );
         })
         .await;
     }
@@ -19734,10 +22713,10 @@ mod issue_4548_full_create_tests {
             assert!(
                 app.draft_sessions.lock().await.sessions[&pod.code].player_tokens[1].is_empty()
             );
-            assert!(matches!(
-                fresh_draft(&url, "build-a", &draft_join(&pod.code)).await,
-                ServerMessage::DraftJoined { seat_index: 1, .. }
-            ));
+            assert_eq!(
+                joined_seat(fresh_draft(&url, "build-a", &draft_join(&pod.code)).await),
+                1
+            );
 
             let mut room_host = connect_as(&url, "build-a").await;
             let room =
@@ -19791,10 +22770,7 @@ mod issue_4548_full_create_tests {
                 ["Removed"]
             );
             let mut host = connect_as(&url, "build-b").await;
-            assert!(matches!(
-                send_draft(&mut host, &pod.reconnect()).await,
-                ServerMessage::DraftStateUpdate { .. }
-            ));
+            assert!(reconnected(send_draft(&mut host, &pod.reconnect()).await));
             assert!(pod.listing().await.is_empty());
             let frames = frames_until_lobby_snapshot(&mut sub_b).await;
             assert_eq!(listing_of(&frames, &pod.code), ["Added"]);
@@ -19806,10 +22782,7 @@ mod issue_4548_full_create_tests {
 
             let stale = draft_refusal(fresh_draft(&url, "build-a", &draft_join(&pod.code)).await);
             assert!(stale.starts_with("Build mismatch"), "{stale}");
-            assert!(matches!(
-                fresh_draft(&url, "build-b", &draft_join(&pod.code)).await,
-                ServerMessage::DraftJoined { .. }
-            ));
+            joined_seat(fresh_draft(&url, "build-b", &draft_join(&pod.code)).await);
         })
         .await;
     }
@@ -19865,10 +22838,7 @@ mod issue_4548_full_create_tests {
             let (mut sub_b, _) = subscribe_as(&url, "build-b").await;
             let _host = {
                 let mut sock = connect_as(&url, "build-b").await;
-                assert!(matches!(
-                    send_draft(&mut sock, &away.reconnect()).await,
-                    ServerMessage::DraftStateUpdate { .. }
-                ));
+                assert!(reconnected(send_draft(&mut sock, &away.reconnect()).await));
                 sock
             };
             assert!(away.listing().await.is_empty());
@@ -19974,10 +22944,7 @@ mod issue_4548_full_create_tests {
             let (mut sub_b, _) = subscribe_as(&url, "build-b").await;
             let _host = {
                 let mut sock = connect_as(&url, "build-b").await;
-                assert!(matches!(
-                    send_draft(&mut sock, &pod.reconnect()).await,
-                    ServerMessage::DraftStateUpdate { .. }
-                ));
+                assert!(reconnected(send_draft(&mut sock, &pod.reconnect()).await));
                 sock
             };
             assert!(pod.listing().await.is_empty());
@@ -20040,6 +23007,8 @@ mod issue_4548_full_create_tests {
             .await;
             let armed_by = std::time::Instant::now() + Duration::from_secs(1);
             while app.draft_sessions.lock().await.sessions[&code]
+                .legacy_schedule()
+                .expect("a legacy pod")
                 .timer_task
                 .is_none()
             {
@@ -20050,6 +23019,8 @@ mod issue_4548_full_create_tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
             assert!(app.draft_sessions.lock().await.sessions[&lobby_code]
+                .legacy_schedule()
+                .expect("a legacy pod")
                 .timer_task
                 .is_none());
 
@@ -20091,9 +23062,8 @@ mod issue_4548_full_create_tests {
 
             let _seat0 = {
                 let mut sock = connect_as(&url, "build-a").await;
-                assert!(matches!(
-                    send_draft(&mut sock, &draft_reconnect(&code, &tokens[0])).await,
-                    ServerMessage::DraftStateUpdate { .. }
+                assert!(reconnected(
+                    send_draft(&mut sock, &draft_reconnect(&code, &tokens[0])).await
                 ));
                 sock
             };
@@ -20182,18 +23152,17 @@ mod issue_4548_full_create_tests {
                 ),
                 "Invalid player token"
             );
-            assert!(matches!(
-                fresh_draft(&url, "build-a", &draft_join(&lapsed.code)).await,
-                ServerMessage::DraftJoined { seat_index: 1, .. }
-            ));
-            assert!(matches!(
+            assert_eq!(
+                joined_seat(fresh_draft(&url, "build-a", &draft_join(&lapsed.code)).await),
+                1
+            );
+            assert!(reconnected(
                 fresh_draft(
                     &url,
                     "build-a",
                     &draft_reconnect(&waiting.code, &waiting_token)
                 )
-                .await,
-                ServerMessage::DraftStateUpdate { .. }
+                .await
             ));
         })
         .await;
@@ -21218,6 +24187,77 @@ mod game_submission_tests {
     }
 
     #[tokio::test]
+    async fn full_websocket_refuses_previous_protocol_before_draft_commands() {
+        use super::draft_socket_authority_tests::{
+            accepted_result, draft_request_id, next_draft_result,
+        };
+        use super::issue_4548_full_create_tests::{spawn_server, tst_draft_pools};
+        let (url, server, _temp_dir, app) = spawn_server(
+            ServerMode::Full,
+            tst_draft_pools(),
+            Arc::new(CardDatabase::default()),
+            ServerContext::default(),
+        )
+        .await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let create = ClientMessage::CreateDraftWithSettings {
+                display_name: "Alice".to_string(),
+                source: None,
+                set_codes: Some(vec!["TST".to_string()]),
+                kind: draft_core::types::DraftKind::Premier,
+                public: false,
+                password: None,
+                timer_seconds: None,
+                tournament_format: draft_core::types::TournamentFormat::Swiss,
+                pod_policy: draft_core::types::PodPolicy::Competitive,
+                pod_size: 8,
+                fifo_policy: None,
+                request_id: draft_request_id(111),
+            };
+
+            let previous = PROTOCOL_VERSION - 1;
+            let (mut outdated, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut outdated).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            let mut hello = test_client_hello(Vec::new());
+            let ClientMessage::ClientHello { protocol_version, .. } = &mut hello else {
+                unreachable!("test_client_hello builds ClientHello");
+            };
+            *protocol_version = previous;
+            send_test_message(&mut outdated, &hello, false).await;
+            send_test_message(&mut outdated, &create, false).await;
+
+            let refusal = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&refusal, ServerMessage::Error { message, .. } if *message == format!(
+                    "Protocol version mismatch (client={previous} server={PROTOCOL_VERSION}). Please update your client."
+                )),
+                "expected a protocol refusal as the first reply, got {refusal:?}"
+            );
+            let reply = recv_server_message(&mut outdated).await;
+            assert!(
+                matches!(&reply, ServerMessage::Error { message, .. }
+                    if message == "ClientHello required before any other message"),
+                "expected the draft command to be refused before dispatch, got {reply:?}"
+            );
+            assert!(app.draft_sessions.lock().await.sessions.is_empty());
+
+            let mut current = connect_and_hello(url).await;
+            send_test_message(&mut current, &create, false).await;
+            assert!(matches!(
+                accepted_result(next_draft_result(&mut current).await, 111),
+                DraftCommandResult::Created { .. }
+            ));
+            assert_eq!(app.draft_sessions.lock().await.sessions.len(), 1);
+        })
+        .await;
+        server.abort();
+        result.expect("Full WebSocket draft protocol admission timed out");
+    }
+
+    #[tokio::test]
     async fn reconnect_after_an_action_observes_the_post_action_full_snapshot() {
         let (url, server, _temp_dir, app_state) = spawn_full_mode_server().await;
         let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -21850,19 +24890,24 @@ mod mode_gate_tests {
                 tournament_format: draft_core::types::TournamentFormat::Swiss,
                 pod_policy: draft_core::types::PodPolicy::Competitive,
                 pod_size: 8,
+                fifo_policy: None,
+                request_id: DraftRequestId::try_from(21).unwrap(),
             },
             ClientMessage::JoinDraftWithPassword {
                 draft_code: "X".into(),
                 display_name: "B".into(),
                 password: None,
+                request_id: DraftRequestId::try_from(22).unwrap(),
             },
             ClientMessage::DraftAction {
                 draft_code: "X".into(),
                 action: draft_core::types::DraftAction::StartDraft,
+                request_id: DraftRequestId::try_from(23).unwrap(),
             },
             ClientMessage::ReconnectDraft {
                 draft_code: "X".into(),
                 player_token: "t".into(),
+                request_id: DraftRequestId::try_from(24).unwrap(),
             },
             ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },
@@ -22004,10 +25049,13 @@ mod mode_gate_tests {
                 tournament_format: draft_core::types::TournamentFormat::Swiss,
                 pod_policy: draft_core::types::PodPolicy::Competitive,
                 pod_size: 8,
+                fifo_policy: None,
+                request_id: DraftRequestId::try_from(31).unwrap(),
             },
             ClientMessage::DraftAction {
                 draft_code: "X".into(),
                 action: draft_core::types::DraftAction::StartDraft,
+                request_id: DraftRequestId::try_from(32).unwrap(),
             },
             ClientMessage::RequestTakeback(None),
             ClientMessage::RespondTakeback { approve: true },

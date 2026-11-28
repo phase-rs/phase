@@ -21,6 +21,8 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    draft_create_listing: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    draft_create_registration: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     resync: Arc<Mutex<ResyncGates>>,
 }
 
@@ -241,6 +243,34 @@ impl Hooks {
 
     pub(crate) async fn before_hello_accept(&self) {
         let gate = self.hello_accept.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) fn arm_draft_create_listing(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.draft_create_listing.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) async fn before_draft_create_listing(&self) {
+        let gate = self.draft_create_listing.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) fn arm_draft_create_registration(&self) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.draft_create_registration.lock() = Some(gate.clone());
+        gate
+    }
+
+    pub(crate) async fn before_draft_create_registration(&self) {
+        let gate = self.draft_create_registration.lock().take();
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;
@@ -1272,15 +1302,29 @@ fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
                 session.player_tokens[1].clone()
             };
             let mut draft_player = connect_and_hello(url.clone()).await;
-            let reconnect = ClientMessage::ReconnectDraft {
-                draft_code,
-                player_token: draft_token,
+            use crate::draft_socket_authority_tests::{accepted_result, draft_request_id};
+            let reconnect = |id: u64| ClientMessage::ReconnectDraft {
+                draft_code: draft_code.clone(),
+                player_token: draft_token.clone(),
+                request_id: draft_request_id(id),
             };
-            send_test_message(&mut draft_player, &reconnect, false).await;
-            while !matches!(
-                recv_server_message(&mut draft_player).await,
-                ServerMessage::DraftStateUpdate { .. }
-            ) {}
+            send_test_message(&mut draft_player, &reconnect(501), false).await;
+            // The bootstrap's match frames precede the reconnect's own result.
+            let settled = loop {
+                let reply = recv_server_message(&mut draft_player).await;
+                if matches!(
+                    reply,
+                    ServerMessage::DraftCommandAccepted { .. }
+                        | ServerMessage::DraftCommandRefused { .. }
+                        | ServerMessage::Error { .. }
+                ) {
+                    break reply;
+                }
+            };
+            assert!(matches!(
+                accepted_result(settled, 501),
+                server_core::protocol::DraftCommandResult::Reconnected { .. }
+            ));
             let mut opponent = connect_and_hello(url).await;
             send_test_message(
                 &mut opponent,
@@ -1306,7 +1350,7 @@ fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
                 }
             }
             let gate = app.context.socket_hooks.arm_cutover();
-            send_test_message(&mut draft_player, &reconnect, false).await;
+            send_test_message(&mut draft_player, &reconnect(502), false).await;
             gate.entered.notified().await;
             send_test_message(
                 &mut opponent,
