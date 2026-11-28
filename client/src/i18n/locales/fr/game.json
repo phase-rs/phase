@@ -2180,6 +2180,14 @@
     "attachments": "Avec {{names}}"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "Payer le coût de duplication ?",
+      "again": "Payer à nouveau le coût de duplication ? (Payé {{times}} fois)",
+      "decline": "Terminer",
+      "tapSubtype": "Engagez un {{subtype}} dégagé que vous contrôlez",
+      "tapCreature": "Engagez une créature dégagée",
+      "payEnergy": "Payez {{amount}} énergies"
+    },
     "gift": {
       "title": "Promettre un cadeau ?",
       "pay": "Promettre {{gift}}",

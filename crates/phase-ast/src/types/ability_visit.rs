@@ -1299,10 +1299,11 @@ macro_rules! define_granter_walk {
 use crate::types::ability::{
     AbilityCondition, AbilityCost, ActivationRestriction, BlightCount, CardTypeSetSource,
     ContinuousModification, Duration, Effect, FilterProp, ObjectScope, ParsedCondition,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition,
-    TargetFilter, TriggerCondition,
+    PerpetualModification, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    StaticCondition, TargetFilter, TriggerCondition,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::keywords::{Keyword, ReplicateCost};
 use crate::types::statics::{BlockExceptionKind, StaticMode};
 use super::{$Node, $nodes};
 use std::ops::ControlFlow;
@@ -1456,6 +1457,17 @@ fn effect(e: &$($mut_)? Effect, v: &mut impl FnMut(Symbol<'_>)) {
         Effect::BecomeCopy { duration: Some(d), .. }
         | Effect::CastFromZone { duration: Some(d), .. }
         | Effect::GenericEffect { duration: Some(d), .. } => duration(d, v),
+        Effect::ApplyPerpetual {
+            modification:
+                PerpetualModification::GrantKeywords { keywords }
+                | PerpetualModification::ModifyPowerToughness { keywords, .. }
+                | PerpetualModification::Become { keywords, .. },
+            ..
+        } => {
+            for granted in keywords {
+                keyword(granted, v);
+            }
+        }
         _ => {}
     }
 }
@@ -1466,7 +1478,8 @@ fn ability_cost(cost: &$($mut_)? AbilityCost, v: &mut impl FnMut(Symbol<'_>)) {
         AbilityCost::Exile { filter: Some(f), .. }
         | AbilityCost::RemoveCounter { target: Some(f), .. }
         | AbilityCost::ReturnToHand { filter: Some(f), .. }
-        | AbilityCost::Reveal { filter: Some(f), .. } => filter(f, v),
+        | AbilityCost::Reveal { filter: Some(f), .. }
+        | AbilityCost::TapCreatures { filter: f, .. } => filter(f, v),
         AbilityCost::Blight {
             count: BlightCount::AnnouncedX { maximum },
         } => quantity(maximum, v),
@@ -1642,7 +1655,14 @@ fn static_mode(mode: &$($mut_)? StaticMode, v: &mut impl FnMut(Symbol<'_>)) {
     match mode {
         StaticMode::CantBeBlockedBy { filter: f }
         | StaticMode::CantBeBlockedExceptBy { kind: BlockExceptionKind::Quality(f) } => filter(f, v),
+        StaticMode::CastWithKeyword { keyword: granted } => keyword(granted, v),
         _ => {}
+    }
+}
+
+fn keyword(keyword: &$($mut_)? Keyword, v: &mut impl FnMut(Symbol<'_>)) {
+    if let Keyword::Replicate(ReplicateCost::TapOne(f)) = keyword {
+        filter(f, v);
     }
 }
 
@@ -1656,6 +1676,8 @@ pub(crate) fn modification(m: &$($mut_)? ContinuousModification, v: &mut impl Fn
         | ContinuousModification::AddDynamicPower { value }
         | ContinuousModification::AddDynamicToughness { value } => quantity(value, v),
         ContinuousModification::AddStaticMode { mode } => static_mode(mode, v),
+        ContinuousModification::AddKeyword { keyword: granted }
+        | ContinuousModification::RemoveKeyword { keyword: granted } => keyword(granted, v),
         _ => {}
     }
 }

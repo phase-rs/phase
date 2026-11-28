@@ -25,6 +25,7 @@ use super::lower::{
     strip_trailing_where_x, WhereXBinding,
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect_with_context};
+use super::subject::parse_chosen_controller_target;
 use super::token::try_parse_token;
 use super::{
     attach_controller_if_absent, hand_reveal_target_to_controller_ref, is_bare_object_pronoun,
@@ -2603,7 +2604,11 @@ pub(super) fn parse_targeted_action_ast(
         // Vigor) bind to `TriggeringSource` (the entering permanent). Without a
         // subject (a true parent-target chain, "tap target creature. untap it")
         // the guard falls through to `parse_target_with_ctx` → `ParentTarget`.
-        let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
+        let target = if let Some(target) =
+            parse_chosen_controller_target(&target_text.to_ascii_lowercase())
+        {
+            target
+        } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
             let (target, rem) = parse_target_with_ctx(target_text, ctx);

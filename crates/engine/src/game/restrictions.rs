@@ -1077,6 +1077,24 @@ pub(crate) fn payment_tap_reserved(
         .is_some_and(|pending| pending.holds_tap_reservation(id))
 }
 
+/// CR 107.14 and CR 601.2h: energy held for a spell's locked costs is
+/// unavailable to the mana abilities used to pay that same spell.
+pub(crate) fn energy_available_for_payment(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+) -> u32 {
+    let held = state
+        .pending_cast
+        .as_deref()
+        .or_else(|| state.waiting_for.pending_cast_ref())
+        .filter(|pending| pending.ability.controller == player)
+        .map_or(0, |pending| pending.unpaid_replicate_energy);
+    state
+        .players
+        .get(player.0 as usize)
+        .map_or(0, |payer| payer.energy.saturating_sub(held))
+}
+
 /// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
 /// ("can't become tapped") restriction. Single authority for every cost-driven
 /// creature/permanent tap ({T} activation costs, convoke, crew, station, saddle,

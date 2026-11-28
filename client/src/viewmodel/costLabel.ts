@@ -7,6 +7,7 @@ import type {
   RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
+  TapOneDisplay,
   UnlessDrawCostView,
 } from "../adapter/types.ts";
 import i18n from "../i18n";
@@ -117,6 +118,7 @@ type SerializedCost = {
   costs?: SerializedCost[];
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
+  tap_display?: TapOneDisplay;
   zone?: string | null;
   effect?: {
     type: string;
@@ -192,6 +194,16 @@ function formatFilteredCard(filter: SerializedCost["filter"], plural: boolean): 
     `game:resolutionOptionalPayment.cost.${plural ? "filteredCards" : "filteredCard"}`,
     { types: meaningful.map(formatTypeFilter).join(" ") },
   );
+}
+
+export function formatTapOneCost(display: TapOneDisplay | undefined): string {
+  return display?.type === "ControlledSubtype"
+    ? i18n.t("game:optionalCost.replicate.tapSubtype", { subtype: display.subtype })
+    : i18n.t("game:optionalCost.replicate.tapCreature");
+}
+
+export function formatEnergyCost(amount: SerializedCost["amount"]): string {
+  return i18n.t("game:optionalCost.replicate.payEnergy", { amount: formatQuantity(amount) });
 }
 
 function formatZone(zone: string | null | undefined): string {
@@ -398,6 +410,9 @@ export function formatKnownCost(cost: SerializedCost): string | null {
       return parts.join("") || "{0}";
     }
     case "PayLife": return `Pay ${formatQuantity(cost.amount, 1)} life`;
+    case "PayEnergy": return formatEnergyCost(cost.amount);
+    case "TapCreatures":
+      return cost.tap_display ? formatTapOneCost(cost.tap_display) : null;
     case "Sacrifice": return "Sacrifice";
     case "Discard": {
       const label = formatQuantity(cost.count, 1);
@@ -755,9 +770,21 @@ export interface AdditionalCostOption {
 export function additionalCostChoices(
   cost: AdditionalCost,
   timesKicked = 0,
+  origin?: string,
 ): { title: string; options: AdditionalCostOption[] } {
   switch (cost.type) {
     case "Optional": {
+      if (origin === "Replicate" && cost.data.cost.type !== "Mana") {
+        return {
+          title: timesKicked > 0
+            ? i18n.t("game:optionalCost.replicate.again", { times: timesKicked })
+            : i18n.t("game:optionalCost.replicate.title"),
+          options: [
+            { id: "0", label: formatAbilityCost(cost.data.cost) },
+            { id: "1", label: i18n.t("game:optionalCost.replicate.decline") },
+          ],
+        };
+      }
       const label = formatAbilityCost(cost.data.cost);
       if (cost.data.repeatable) {
         if (timesKicked > 0) {

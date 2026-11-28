@@ -9493,10 +9493,15 @@ fn collect_pending_triggers_with_collection(
                         .iter()
                         .find(|entry| entry.id == *cast_obj_id)
                         .is_some_and(|entry| {
-                            entry
-                                .ability()
-                                .is_some_and(|ability| ability.context.additional_cost_paid)
+                            entry.ability().is_some_and(|ability| {
+                                ability.context.instance_payment_count_for_ordinal(
+                                    AdditionalCostOrigin::Conspire,
+                                    0,
+                                ) > 0
+                            })
                         });
+                    // CR 702.78a + CR 603.4: A paid Conspire instance
+                    // triggers; an unpaid one does not.
                     paid.then_some(obj.controller)
                 })
                 .map(|controller| {
@@ -51220,7 +51225,9 @@ pub mod tests {
             Zone::Battlefield,
         );
         let grant = StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Replicate(ManaCost::SelfManaCost),
+            keyword: Keyword::Replicate(crate::types::keywords::ReplicateCost::Mana(
+                ManaCost::SelfManaCost,
+            )),
         })
         .affected(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Subtype("Sliver".into())).controller(ControllerRef::You),
@@ -51560,7 +51567,11 @@ pub mod tests {
         // CR 702.78a: the conspire cost was paid — surfaced on the cast spell's
         // stack-entry context, which the granted-Conspire block reads to gate
         // the copy trigger.
-        ability.context.additional_cost_paid = true;
+        ability.context.record_additional_cost_instance_payment(
+            AdditionalCostOrigin::Conspire,
+            0,
+            1,
+        );
         state.stack.push_back(StackEntry {
             id: spell,
             source_id: spell,

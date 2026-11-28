@@ -1,7 +1,8 @@
 //! One instruction naming several independent targets.
 //!
 //! "Destroy up to one target artifact, up to one target creature, and up to one
-//! target land." / "Return up to one target A card and up to one target B card
+//! target land." / "Choose up to one target artifact, up to one target creature,
+//! and up to one target land." / "Return up to one target A card and up to one target B card
 //! from your graveyard to your hand." Each conjunct is its own announced target
 //! slot, so the instruction is lowered as one clause per slot: the first stays
 //! on the primary effect and the rest chain as `sub_ability` links, each with
@@ -105,15 +106,12 @@ pub(super) fn try_split_multi_target_list(
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_ascii_lowercase();
     let (head_lower, _) = nom_primitives::scan_split_at_phrase(&lower, slot_start)?;
-    // "Choose target A and target B" declares its slots through its own
-    // dedicated parser (`try_parse_two_targets`).
-    if head_lower.is_empty()
-        || tag::<_, _, OracleError<'_>>("choose ")
-            .parse(head_lower)
-            .is_ok()
-    {
+    if head_lower.is_empty() {
         return None;
     }
+    let is_choose = tag::<_, _, OracleError<'_>>("choose ")
+        .parse(head_lower)
+        .is_ok();
     let head = &text[..head_lower.len()];
 
     // Probe pass on a throwaway context: collect each slot's source text.
@@ -135,6 +133,15 @@ pub(super) fn try_split_multi_target_list(
         }
     };
     if slots.len() < 2 {
+        return None;
+    }
+    // Two-target choose clauses have a dedicated parser because the second
+    // slot may be relative to the first choice ("target creature they
+    // control"). Keep that binding authority intact; this splitter owns the
+    // independent three-or-more-slot list shape, including Teferi's
+    // "up to one target artifact, up to one target creature, and up to one
+    // target land".
+    if is_choose && slots.len() < 3 {
         return None;
     }
     if starts_conjunction(&tail.trim_start().to_ascii_lowercase()).is_ok() {
@@ -209,6 +216,18 @@ pub(super) fn try_split_multi_target_list(
         return None;
     }
     *ctx = tentative;
+    if is_choose {
+        // CR 601.2c: all target occurrences in one choose instruction are
+        // independent announced slots. Publish the complete declaration to
+        // the enclosing chain so later slot-qualified anaphors see the same
+        // ordered set as the targeting driver.
+        let mut declared_slots = Vec::with_capacity(1 + links.len());
+        declared_slots.push(primary.effect.target_filter()?.clone());
+        for (clause, _) in &links {
+            declared_slots.push(clause.effect.target_filter()?.clone());
+        }
+        ctx.declared_target_slots = declared_slots;
+    }
     primary.sub_ability = links
         .into_iter()
         .rev()
@@ -285,7 +304,9 @@ pub(super) fn fail_closed_optional_list(clause: &mut ParsedEffectClause, text: &
 
 #[cfg(test)]
 mod instruction_join_tests {
-    use crate::types::ability::{AbilityDefinition, AbilityKind, EffectKind, InstructionJoin};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, EffectKind, InstructionJoin, MultiTargetSpec,
+    };
 
     use super::super::parse_effect_chain;
 
@@ -383,6 +404,11 @@ mod instruction_join_tests {
                 EffectKind::ChangeZone,
                 2,
             ),
+            (
+                "Choose up to one target artifact, up to one target creature, and up to one target land.",
+                EffectKind::TargetOnly,
+                3,
+            ),
         ];
         for &(text, kind, slots) in lists {
             let shape = chain_shape(text);
@@ -404,6 +430,27 @@ mod instruction_join_tests {
                 );
             }
         }
+    }
+
+    /// CR 115.1c + CR 115.6: Teferi's three independent "up to one target"
+    /// occurrences must remain three announced slots, each independently
+    /// declinable. This is the real parser path that previously retained only
+    /// the first artifact slot.
+    #[test]
+    fn choose_three_target_slots_preserves_each_optional_slot() {
+        let def = parse_effect_chain(
+            "Choose up to one target artifact, up to one target creature, and up to one target land.",
+            AbilityKind::Spell,
+        );
+        let nodes: Vec<&AbilityDefinition> =
+            std::iter::successors(Some(&def), |node| node.sub_ability.as_deref()).collect();
+        assert_eq!(nodes.len(), 3, "all three target slots must be retained");
+        assert!(nodes
+            .iter()
+            .all(|node| matches!(*node.effect, Effect::TargetOnly { .. })));
+        assert!(nodes
+            .iter()
+            .all(|node| node.multi_target == Some(MultiTargetSpec::fixed(0, 1))));
     }
 
     /// CR 608.2c: "then" joins separate instructions in order, and a conjunct
