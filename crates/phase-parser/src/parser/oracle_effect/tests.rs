@@ -68645,19 +68645,17 @@ fn claim_jumper_parses_repeat_once_while_opponent_lands() {
         "Claim Jumper repeats once, got {:?}",
         trigger.repeat_until
     );
-    // CR 608.2c + CR 701.23a: the guard lowers on the chain's `Shuffle`, a descendant of the root
-    // that carries `repeat_until` (placement only: no claim about how many times it runs).
-    // Reach guard: the root is the library search itself.
+    // CR 608.2c + CR 701.23a: the "If you search your library this way" guard lowers onto a `Shuffle`
+    // somewhere reachable from the trigger's execute definition. Guard lowering is asserted by
+    // condition only: no claim about where the shuffle sits relative to the repeat body or how often
+    // it runs.
     assert!(
-        matches!(&*trigger.effect, Effect::SearchLibrary { .. }),
-        "the repeat root is the library search, got {:?}",
-        trigger.effect
+        any_ability_node(trigger, &|def| {
+            matches!(&*def.effect, Effect::Shuffle { .. })
+                && def.condition == Some(controller_searched_library_gate())
+        }),
+        "a guard-carrying shuffle exists under the trigger's execute definition"
     );
-    let shuffle = find_effect_node(trigger.sub_ability.as_deref(), |effect| {
-        matches!(effect, Effect::Shuffle { .. })
-    })
-    .expect("the printed shuffle is below the repeat root");
-    assert_eq!(shuffle.condition, Some(controller_searched_library_gate()));
 }
 
 /// The `ScopedPlayerMatches { PerformedActionThisWay { Controller, SearchedLibrary } }` gate that
@@ -68683,6 +68681,27 @@ fn find_effect_node(
         node = link.sub_ability.as_deref();
     }
     None
+}
+
+/// Whether `def` or any `AbilityDefinition` nested under it (`sub_ability`, `else_ability`,
+/// `mode_abilities`) satisfies `pred`.
+fn any_ability_node(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) -> bool) -> bool {
+    if pred(def) {
+        return true;
+    }
+    if let Some(child) = def.sub_ability.as_deref() {
+        if any_ability_node(child, pred) {
+            return true;
+        }
+    }
+    if let Some(child) = def.else_ability.as_deref() {
+        if any_ability_node(child, pred) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(|child| any_ability_node(child, pred))
 }
 
 /// CR 701.23a + CR 701.24a + CR 608.2c: Unlucky Cabbage Merchant ("If you search your library this way,

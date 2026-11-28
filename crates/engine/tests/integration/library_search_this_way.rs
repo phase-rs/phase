@@ -834,6 +834,9 @@ struct Obs {
     decision: Option<bool>,
     /// Set only when `drive` exits at priority with an empty stack: the resolution completed, not the iteration cap.
     completed: bool,
+    /// Shuffle count when the first entry-choice prompt (CopyTargetChoice or NamedChoice) was reached;
+    /// None if none.
+    shuffles_before_choice: Option<usize>,
 }
 
 fn variant_name(w: &WaitingFor) -> String {
@@ -905,6 +908,7 @@ fn drive(runner: &mut GameRunner, found: ObjectId, obs: &mut Obs, accept: bool) 
             }
             WaitingFor::CopyTargetChoice { valid_targets, .. } => {
                 obs.prompts.push(name);
+                obs.shuffles_before_choice.get_or_insert(obs.shuffles);
                 runner.act(GameAction::ChooseTarget {
                     target: valid_targets
                         .first()
@@ -913,6 +917,7 @@ fn drive(runner: &mut GameRunner, found: ObjectId, obs: &mut Obs, accept: bool) 
             }
             WaitingFor::NamedChoice { .. } => {
                 obs.prompts.push(name);
+                obs.shuffles_before_choice.get_or_insert(obs.shuffles);
                 runner.act(GameAction::ChooseOption {
                     choice: "Red".to_string(),
                 })
@@ -1177,7 +1182,8 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
             if !pay.is_empty() {
                 a = a.pay_with(&pay);
             }
-            let _ = a.resolve();
+            let outcome = a.resolve();
+            count_events(&mut obs, outcome.events(), found);
         }
         // CR 503.1a + CR 500.6: the engine's own turn structure puts the beginning-of-upkeep
         // trigger on the stack — the event is never fabricated by the test.
@@ -1214,21 +1220,8 @@ fn run_case_deciding(spec: &Spec, variant: &str, accept: bool) -> Obs {
     obs
 }
 
-/// Members whose search starts from an activation: the harness discards the events of the activation
-/// call itself, so `SearchedLibrary` is not counted for them (the shuffle column is the proof).
-const ACTIVATED_MEMBERS: &[&str] = &[
-    "Grand Master of Flowers",
-    "Dark Supplicant",
-    "Gate to the Afterlife",
-    "Arachnus Spinner",
-];
-
 fn spec_named(n: &str) -> &'static Spec {
     SPECS.iter().find(|s| s.name == n).unwrap()
-}
-
-fn counts_search_events(spec: &Spec) -> bool {
-    !ACTIVATED_MEMBERS.contains(&spec.name)
 }
 
 /// CR 701.23a + CR 701.24a + CR 608.2c: with a printed Mindlock Orb ("Players can't search libraries.") the
@@ -1247,7 +1240,7 @@ fn muzzled_search_does_not_shuffle_for_every_member() {
         let found_it = o.pick_offered
             && o.moves_of_found >= 1
             && matches!(o.found_zone, Some(Zone::Hand | Zone::Battlefield));
-        let library_searched = counts_search_events(spec) && o.searched != 0;
+        let library_searched = o.searched != 0;
         if o.stuck.is_some() || !o.completed || !found_it || library_searched || o.shuffles != 0 {
             failures.push(format!("{}: {o:?}", spec.name));
         }
@@ -1263,7 +1256,7 @@ fn library_search_shuffles_once_for_every_member() {
     for spec in SPECS.iter().filter(|s| s.variants.contains(&"L")) {
         let o = run_case(spec, "L");
         let found_elsewhere = matches!(o.found_zone, Some(Zone::Hand | Zone::Battlefield));
-        let search_counted = !counts_search_events(spec) || o.searched == 1;
+        let search_counted = o.searched == 1;
         if o.stuck.is_some()
             || !o.completed
             || !found_elsewhere
@@ -1342,6 +1335,11 @@ fn copy_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
     assert!(o.completed, "the resolution completed: {o:?}");
     assert_eq!(o.found_zone, Some(Zone::Battlefield), "{o:?}");
     assert_eq!(o.searched, 1, "{o:?}");
+    assert_eq!(
+        o.shuffles_before_choice,
+        Some(0),
+        "the shuffle runs after the copy choice: {o:?}"
+    );
     assert_eq!(o.shuffles, 1, "{o:?}");
 }
 
@@ -1364,6 +1362,11 @@ fn copy_choice_entry_with_muzzled_library_does_not_shuffle() {
     );
     assert!(o.completed, "the resolution completed: {o:?}");
     assert_eq!(o.found_zone, Some(Zone::Battlefield), "{o:?}");
+    assert_eq!(
+        o.shuffles_before_choice,
+        Some(0),
+        "no shuffle ran before the copy choice: {o:?}"
+    );
     assert_eq!(o.shuffles, 0, "{o:?}");
 }
 
@@ -1403,6 +1406,12 @@ fn as_enters_choice_entry_between_search_and_shuffle_keeps_the_shuffle() {
             o.found_zone,
             Some(Zone::Battlefield),
             "{}: {o:?}",
+            spec.name
+        );
+        assert_eq!(
+            o.shuffles_before_choice,
+            Some(0),
+            "{}: the shuffle runs after the as-enters choice: {o:?}",
             spec.name
         );
         assert_eq!(o.shuffles, 1, "{}: {o:?}", spec.name);
