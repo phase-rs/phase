@@ -1034,6 +1034,8 @@ pub struct ParseContext {
     /// accumulator; defaults to `Absent` via `derive(Default)` so standalone
     /// clause parsing is unaffected.
     pub chain_prior_publishers: ChainPriorPublishers,
+    /// Producer action for a bare, during-resolution cast from the prior batch.
+    pub bare_cast_batch_cause: Option<crate::types::ability::ThisWayCause>,
     /// CR 608.2c: The current effect-chain chunk's MOST-RECENT prior object
     /// referent is a just-created token (Token/CopyTokenOf/Populate), so a bare
     /// "it" anaphor in this chunk binds to that token (`TargetFilter::LastCreated`)

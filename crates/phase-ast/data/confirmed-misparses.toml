@@ -1139,7 +1139,6 @@ face = [
   { key = "izzet staticaster", class = "missing_effect", clauses = ["{T}: This creature deals 1 damage to target creature and each other creature with the same name as that creature."] },
   { key = "izzet steam maze", class = "dropped_qualifier", clauses = ["Whenever a player casts an instant or sorcery spell, that player copies it.", "The player may choose new targets for the copy.", "Whenever chaos ensues, instant and sorcery spells you cast this turn cost {3} less to cast."] },
   { key = "jabs, mistress of mockery", class = "dropped_qualifier", clauses = ["If a triggered ability of a permanent you control but don't own triggers, that ability triggers an additional time."] },
-  { key = "jace's mindseeker", class = "wrong_zone", clauses = ["You may cast an instant or sorcery spell from among them without paying its mana cost."] },
   { key = "jace's ruse", class = "extra_effect", clauses = ["You may search your library and/or graveyard for a card named Jace, Arcane Strategist, reveal it, and put it into your hand.", "If you search your library this way, shuffle."] },
   { key = "jace, telepath unbound", class = "condition_wrong", clauses = ["If that spell would be put into your graveyard, exile it instead."] },
   { key = "jace, the living guildpact", class = "wrong_player", clauses = ["Put one of them into your graveyard.", "You draw seven cards."] },

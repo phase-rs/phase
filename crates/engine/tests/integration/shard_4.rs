@@ -380,6 +380,7 @@ mod metalworker_reveal_mana;
 mod metamorphic_alteration;
 mod midnight_reaper_sacrifice;
 mod militant_angel_attacked_opponents;
+mod mill_cast_from_among_them;
 mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
 mod mill_this_way_graveyard_destination;
