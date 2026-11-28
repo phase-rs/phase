@@ -923,6 +923,8 @@ pub(crate) struct ClauseIr {
     pub(crate) parsed: ParsedEffectClause,
     /// Clause boundary from split_clause_sequence.
     pub(crate) boundary: Option<ClauseBoundary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) incoming_link: Option<crate::types::ability::SubAbilityLink>,
     /// CR 608.2c: Leading or suffix conditional guard.
     pub(crate) condition: Option<AbilityCondition>,
     /// CR 608.2d: "You may" optional effect.
@@ -1055,6 +1057,14 @@ pub(crate) struct ClauseIr {
 }
 
 impl ClauseIr {
+    pub(crate) fn incoming_link(
+        &self,
+        previous: Option<ClauseBoundary>,
+    ) -> crate::types::ability::SubAbilityLink {
+        self.incoming_link
+            .unwrap_or_else(|| super::ast::sub_link_after_boundary(previous))
+    }
+
     /// CR 107.3i + CR 608.2c: this clause's where-X clause paired with the
     /// antecedents its count's controller anaphor binds to. The single spelling
     /// assembly uses, so the expression and its antecedents cannot drift apart
@@ -1092,6 +1102,7 @@ impl ClauseIr {
             disposition,
             parsed,
             boundary: _,
+            incoming_link,
             condition,
             is_optional,
             opponent_may_scope,
@@ -1122,6 +1133,7 @@ impl ClauseIr {
         *sibling_condition = SiblingCondition::Dependent;
         *instruction_join = InstructionJoin::Own;
         *reads_return_result = None;
+        *incoming_link = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
             intrinsic: None,
@@ -1930,6 +1942,7 @@ impl ClauseDraft<'_> {
             disposition: self.disposition,
             parsed: self.parsed,
             boundary: self.boundary,
+            incoming_link: None,
             condition: self.condition,
             is_optional: self.is_optional,
             opponent_may_scope: self.opponent_may_scope,

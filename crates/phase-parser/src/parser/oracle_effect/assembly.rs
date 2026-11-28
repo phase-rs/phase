@@ -3563,7 +3563,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // SEPARATED the previous clause from this one, translated by the single
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
-        def.sub_link = sub_link_after_boundary(prev_boundary);
+        def.sub_link = clause_ir.incoming_link(prev_boundary);
         def.sibling_condition = clause_ir.sibling_condition;
         // CR 608.2c: a chunk the chunk loop stamped as a further target slot
         // keeps that identity; a clause parse's own list marker (a splitter

@@ -12,6 +12,346 @@ const REFUSED_NAMED_SEARCH: &str = "Search your library for an Equipment card an
 const REPRESENTED_FARMER_SEARCH: &str = "Search your library for a basic Plains card and reveal it. If an opponent controls more lands than you, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.";
 const ORESKOS_SEARCH: &str = "Search your library for up to X Plains cards, where X is the number of players who control more lands than you. Reveal those cards, put them into your hand, then shuffle.";
 const PRISMATIC_SEARCH: &str = "Search your library for up to X basic land cards, where X is the number of colors among permanents you control. Reveal those cards, put them into your hand, then shuffle.";
+const HELLKITE_BODY: &str = "Destroy target nonbasic land an opponent controls. Its controller searches their library for a basic land card, puts it onto the battlefield tapped with a stun counter on it, then shuffles.";
+
+#[test]
+fn magmatic_hellkite_has_one_tapped_stun_delivery_before_shuffle() {
+    use crate::types::ability::LibraryInstructionActor;
+    use crate::types::zones::EtbTapState;
+
+    let oracle = format!(
+        "Flying\nWhen this creature enters, destroy{} (If a permanent with a stun counter would become untapped, remove one from it instead.)",
+        HELLKITE_BODY.strip_prefix("Destroy").unwrap()
+    );
+    let parsed = parse_card(&oracle, "Magmatic Hellkite", &["Flying"], &["Creature"]);
+    assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected a single ETB trigger");
+    };
+    assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.destination, Some(Zone::Battlefield));
+    let destroy = trigger.execute.as_deref().expect("destroy instruction");
+    assert!(matches!(
+        destroy.effect.as_ref(),
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter { type_filters, controller: Some(ControllerRef::Opponent), properties }),
+            cant_regenerate: false,
+        } if type_filters.as_slice() == [TypeFilter::Land]
+            && properties.as_slice() == [FilterProp::NotSupertype { value: Supertype::Basic }]
+    ));
+    let search = destroy
+        .sub_ability
+        .as_deref()
+        .expect("land controller's search");
+    assert!(matches!(
+        search.effect.as_ref(),
+        Effect::SearchLibrary {
+            target_player: Some(TargetFilter::ParentTargetController),
+            reveal: false,
+            ..
+        }
+    ));
+    let delivery = search.sub_ability.as_deref().expect("found-card delivery");
+    assert!(matches!(
+        delivery.effect.as_ref(),
+        Effect::ChangeZone {
+            actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTarget },
+            origin: Some(Zone::Library),
+            destination: Zone::Battlefield,
+            target: TargetFilter::Any,
+            enter_tapped,
+            enter_with_counters,
+            enters_under: None,
+            ..
+        } if *enter_tapped == EtbTapState::from_legacy_bool(true)
+            && enter_with_counters.as_slice() == [(CounterType::Stun, QuantityExpr::Fixed { value: 1 })]
+    ));
+    assert!(!delivery.forward_result);
+    let shuffle = delivery
+        .sub_ability
+        .as_deref()
+        .expect("independent shuffle");
+    assert_eq!(
+        *shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(!shuffle.forward_result);
+    assert!(shuffle.sub_ability.is_none());
+}
+
+#[test]
+fn inherited_battlefield_search_carries_the_parsed_counter_list() {
+    // SHAPE: no printed card has another counter list on this delivery, so the
+    // Hellkite body is spliced with a counted and a two-element list.
+    for (rider, expected) in [
+        (
+            "with two stun counters on it",
+            vec![(CounterType::Stun, QuantityExpr::Fixed { value: 2 })],
+        ),
+        (
+            "with a stun counter and a +1/+1 counter on it",
+            vec![
+                (CounterType::Stun, QuantityExpr::Fixed { value: 1 }),
+                (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+            ],
+        ),
+    ] {
+        let body = HELLKITE_BODY.replace("with a stun counter on it", rider);
+        let ir = parse_effect_chain_ir_ability_root(
+            &body,
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let [_, search, put, _] = ir.clauses.as_slice() else {
+            panic!("destroy, search, put, shuffle: {:?}", ir.clauses);
+        };
+        assert!(matches!(
+            put.parsed.effect,
+            Effect::ChangeZone { ref enter_with_counters, .. } if *enter_with_counters == expected
+        ));
+        assert!(matches!(
+            search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { entry_counters, .. }) if *entry_counters == expected
+        ));
+        let lowered = lower_effect_chain_ir(&ir);
+        let delivery = std::iter::successors(Some(&lowered), |def| def.sub_ability.as_deref())
+            .nth(2)
+            .expect("found-card delivery");
+        assert!(matches!(
+            delivery.effect.as_ref(),
+            Effect::ChangeZone { enter_with_counters, .. } if *enter_with_counters == expected
+        ));
+    }
+}
+
+#[test]
+fn inherited_battlefield_search_represents_only_the_ordinary_adjacent_delivery() {
+    let parse = |body: &str| {
+        parse_effect_chain_ir_ability_root(body, AbilityKind::Spell, &mut ParseContext::default())
+    };
+    let ir = parse(HELLKITE_BODY);
+    let [destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!("destroy, search, put, shuffle: {:?}", ir.clauses);
+    };
+    assert!(
+        matches!(chain_declared_slot_registry(std::slice::from_ref(destroy)),
+            DeclaredSlotRegistry::Known(slots) if matches!(slots.as_slice(), [DeclaredSlotEntry { index: Some(0), .. }])
+        )
+    );
+    assert_eq!(search.id, ClauseId(destroy.id.0 + 1));
+    assert!(matches!(
+        search.disposition.intrinsic(),
+        Some(ContinuationAst::SearchDestination {
+            entry_counters,
+            ..
+        }) if entry_counters.as_slice() == [(CounterType::Stun, QuantityExpr::Fixed { value: 1 })]
+    ));
+    let span = put.source.span();
+    assert_eq!(
+        &HELLKITE_BODY[span.start_byte..span.end_byte],
+        "puts it onto the battlefield tapped with a stun counter on it"
+    );
+    assert_eq!(put.boundary, Some(ClauseBoundary::Then));
+    assert!(matches!(
+        put.disposition.followup(),
+        Some(ContinuationAst::SearchResultClauseHandled)
+    ));
+    assert_eq!(
+        shuffle.incoming_link,
+        Some(SubAbilityLink::SequentialSibling)
+    );
+
+    // Synthetic variants of Hellkite isolate actor, adjacency, and the put shell.
+    for (tail, shuffle_actor, draw, guarded) in [
+        ("puts it onto the battlefield tapped with a stun counter on it, then you shuffle.", TargetFilter::Controller, false, false),
+        ("puts it onto the battlefield tapped with a stun counter on it, then draws a card, then shuffles.", TargetFilter::ParentTargetController, true, false),
+        ("puts it onto the battlefield tapped with a stun counter on it if it's your turn, then shuffles.", TargetFilter::ParentTargetController, false, true),
+    ] {
+        let body = format!("Destroy target nonbasic land an opponent controls. Its controller searches their library for a basic land card, {tail}");
+        let ir = parse(&body);
+        let [_, search, put, rest @ ..] = ir.clauses.as_slice() else {
+            panic!("search and put must reach the gate: {:?}", ir.clauses);
+        };
+        assert!(matches!(search.disposition.intrinsic(),
+            Some(ContinuationAst::SearchDestination { destination: Zone::Battlefield, entry_counters, .. }) if entry_counters.is_empty()
+        ));
+        assert!(matches!(put.parsed.effect, Effect::ChangeZone { destination: Zone::Battlefield, .. }));
+        assert!(matches!(put.disposition, ClauseDisposition::Emit { followup: None, intrinsic: None }));
+        if guarded {
+            assert!(put.condition.is_some() || put.parsed.condition.is_some());
+        }
+        let shuffle = rest.last().expect("printed shuffle must reach ordinary lowering");
+        assert_eq!(shuffle.parsed.effect, Effect::Shuffle { target: shuffle_actor });
+        assert!(matches!(shuffle.disposition, ClauseDisposition::Emit { followup: None, intrinsic: None }));
+        assert_eq!(rest.len(), if draw { 2 } else { 1 });
+        if draw {
+            assert!(matches!(rest[0].parsed.effect, Effect::Draw { .. }));
+        }
+        for (previous, clause) in ir.clauses.iter().zip(ir.clauses.iter().skip(1)) {
+            assert!(clause.incoming_link.is_none());
+            assert_eq!(clause.incoming_link(previous.boundary), sub_link_after_boundary(previous.boundary));
+        }
+        let lowered = lower_effect_chain_ir(&ir);
+        let mut lowered_followers =
+            std::iter::successors(Some(&lowered), |def| def.sub_ability.as_deref()).skip(3);
+        for (previous, expected) in ir.clauses[1..].iter().zip(&ir.clauses[2..]) {
+            let actual = lowered_followers.next().expect("ordinary follower lowers");
+            assert_eq!(actual.effect.as_ref(), &expected.parsed.effect);
+            assert_eq!(actual.sub_link, sub_link_after_boundary(previous.boundary));
+        }
+        assert!(lowered_followers.next().is_none());
+    }
+}
+
+#[test]
+fn inherited_battlefield_search_declines_a_finalized_put_shell() {
+    // SHAPE: Magmatic Hellkite supplies the verbatim search, put, and shuffle.
+    // Leading-duration expansion declines subject-inheriting conjuncts, so
+    // supply its typed output at the existing parser seam. The put text still
+    // provides the same delivery evidence, and ClauseDraft::push stamps the shell.
+    let ir = parse_effect_chain_ir_body(
+        HELLKITE_BODY,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+        0,
+        None,
+        |chunks, ctx| {
+            let mut chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
+            let [_, _, put, _] = chunks.as_mut_slice() else {
+                panic!("expected destroy, search, put, and shuffle");
+            };
+            put.leading_duration = Some(Duration::UntilEndOfTurn);
+            chunks
+        },
+    );
+    let [_, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!(
+            "expected destroy, search, put, and shuffle: {:?}",
+            ir.clauses
+        );
+    };
+    assert_eq!(put.parsed.duration, Some(Duration::UntilEndOfTurn));
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+}
+
+#[test]
+fn inherited_battlefield_search_declines_a_delayed_payload() {
+    // SHAPE: prepend Codie's delayed installer to Magmatic Hellkite's body
+    // to exercise delayed placement with the printed search-delivery shape.
+    let body = format!(
+        "When you next cast a spell this turn, exile cards from the top of your library \
+         until you exile an instant or sorcery card with lesser mana value. {HELLKITE_BODY}"
+    );
+    let ir =
+        parse_effect_chain_ir_ability_root(&body, AbilityKind::Spell, &mut ParseContext::default());
+    let [installer, destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!(
+            "expected a delayed installer and four clauses: {:?}",
+            ir.clauses
+        );
+    };
+    assert!(matches!(
+        installer.parsed.effect,
+        Effect::CreateDelayedTrigger { .. }
+    ));
+    assert_eq!(put.placement, ClausePlacement::NestedInDelayedPayload);
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+    assert_eq!(
+        search.incoming_link(destroy.boundary),
+        SubAbilityLink::SequentialSibling
+    );
+}
+
+#[test]
+fn inherited_battlefield_search_stays_uncommitted_in_a_reminted_guarded_body() {
+    // SHAPE: Magmatic Hellkite is the nearest printed search. Use an outer
+    // conditional to exercise the flattening path with its same delivery rider.
+    let body = "Draw a card. If it's your turn, destroy target nonbasic land an opponent controls, then its controller searches their library for a basic land card, puts it onto the battlefield tapped with a stun counter on it, then shuffles.";
+    let ir =
+        parse_effect_chain_ir_ability_root(body, AbilityKind::Spell, &mut ParseContext::default());
+    let [draw, destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!("expected draw and four guarded clauses: {:?}", ir.clauses);
+    };
+    assert!(matches!(draw.parsed.effect, Effect::Draw { .. }));
+    assert!(matches!(destroy.parsed.effect, Effect::Destroy { .. }));
+    assert!(destroy.condition.is_some());
+    for (offset, clause) in [destroy, search, put, shuffle].into_iter().enumerate() {
+        assert_eq!(clause.condition, destroy.condition);
+        assert_eq!(clause.id, ClauseId(draw.id.0 + 1 + offset as u32));
+        let span = clause.source.span();
+        assert_eq!(
+            clause.source.fragment(),
+            Some(&body[span.start_byte..span.end_byte])
+        );
+    }
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+    assert_eq!(
+        search.incoming_link(destroy.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+}
+
+fn assert_uncommitted_battlefield_search(search: &ClauseIr, put: &ClauseIr, shuffle: &ClauseIr) {
+    use crate::types::ability::LibraryInstructionActor;
+
+    assert!(matches!(
+        search.disposition,
+        ClauseDisposition::Emit {
+            followup: None,
+            intrinsic: Some(ContinuationAst::SearchDestination {
+                destination: Zone::Battlefield,
+                enters_under: EntersUnderSpec::Default,
+                enter_tapped: true,
+                reveal: false,
+                attach_host: None,
+                actor: LibraryInstructionActor::Controller,
+                ref entry_counters,
+            }),
+        } if entry_counters.is_empty()
+    ));
+    assert!(matches!(
+        put.parsed.effect,
+        Effect::ChangeZone {
+            destination: Zone::Battlefield,
+            ..
+        }
+    ));
+    assert_eq!(
+        shuffle.parsed.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ParentTargetController
+        }
+    );
+    for follower in [put, shuffle] {
+        assert!(matches!(
+            follower.disposition,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None
+            }
+        ));
+    }
+    for clause in [search, put, shuffle] {
+        assert_eq!(clause.incoming_link, None);
+    }
+    assert_eq!(
+        put.incoming_link(search.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+    assert_eq!(
+        shuffle.incoming_link(put.boundary),
+        SubAbilityLink::ContinuationStep
+    );
+}
 
 // Chapter IV of The Hunger Tide Rises reads “Sacrifice any number of creatures.
 // Search your library and/or graveyard for a creature card with mana value
@@ -1393,6 +1733,8 @@ fn search_result_guard_source_relation_refuses_intervening_or_guarded_authority(
             enters_under: Default::default(),
             reveal: false,
             attach_host: None,
+            actor: Default::default(),
+            entry_counters: Vec::new(),
         })
     };
     folded

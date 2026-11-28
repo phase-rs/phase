@@ -1369,7 +1369,6 @@ face = [
   { key = "magic designer", class = "dropped_qualifier", clauses = ["You may reveal a playtest card from among them and put it into your hand", "then put the rest on the bottom of your library in a random order."] },
   { key = "magmablood archaic", class = "wrong_object", clauses = ["Whenever you cast an instant or sorcery spell, creatures you control get +1/+0 until end of turn for each color of mana spent to cast that spell."] },
   { key = "magmatic channeler", class = "wrong_object", clauses = ["then choose one of them."] },
-  { key = "magmatic hellkite", class = "extra_effect", clauses = ["puts it onto the battlefield tapped with a stun counter on it"] },
   { key = "magnanimous magistrate", class = "wrong_object", clauses = ["you may remove that many reprieve counters from this creature.", "If you do, return that card to the battlefield under its owner's control."] },
   { key = "magnigoth treefolk", class = "wrong_object", clauses = ["For each basic land type among lands you control, this creature has landwalk of that type."] },
   { key = "magus of the arena", class = "wrong_player", clauses = ["and target creature of an opponent's choice they control.", "Those creatures fight each other."] },

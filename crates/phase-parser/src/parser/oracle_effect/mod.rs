@@ -80,7 +80,7 @@ use crate::parser::oracle_static::parse_passive_cant_be_cast_spell_filter;
 use crate::parser::oracle_trigger::parse_trigger_line;
 use crate::parser::oracle_trigger::{split_spell_or_activation_disjunction, SubjectPerson};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{
     alpha1, anychar, multispace0, multispace1, one_of, satisfy, space0, space1,
 };
@@ -90,7 +90,7 @@ use nom::combinator::{
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_reflexive_conditional_connector;
@@ -34491,7 +34491,7 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
         // assembler stamps it from (every clause advances `prev_boundary`,
         // including the special/absorbed ones that emit no definition).
         gated_publisher_reaches &= spine_reaches
-            && sub_link_after_boundary(idx.checked_sub(1).and_then(|p| clauses[p].boundary))
+            && prev.incoming_link(idx.checked_sub(1).and_then(|p| clauses[p].boundary))
                 == SubAbilityLink::ContinuationStep;
         // Carrier / non-referent clause (e.g. "It gains haste") — keep scanning.
     }
@@ -51550,9 +51550,11 @@ fn plural_hand_search_owner(
                 enters_under: EntersUnderSpec::Default,
                 reveal: true,
                 attach_host: None,
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                ref entry_counters,
             }),
             followup: None,
-        }
+        } if entry_counters.is_empty()
     ) {
         return None;
     }
@@ -51576,6 +51578,168 @@ fn plural_hand_search_owner(
     let bound =
         lower::apply_where_x_quantity_expression(max.as_ref().clone(), search.where_x_binding())?;
     (bound != **max).then_some(*owner)
+}
+
+#[derive(Clone, Copy)]
+struct SearchActorCarry {
+    search: ClauseId,
+    announced_slot: usize,
+}
+
+struct SearchDeliveryEvidence {
+    ordinal: usize,
+    actor: SearchActorCarry,
+    /// The put's parsed entry counters; empty for the search and the shuffle.
+    entry_counters: Vec<(CounterType, QuantityExpr)>,
+}
+
+fn plain_search_delivery_clause(clause: &ClauseIr) -> bool {
+    !clause.is_optional
+        && !clause.parsed.optional
+        && !clause.parsed.optional_targeting
+        && clause.condition.is_none()
+        && clause.parsed.condition.is_none()
+        && clause.parsed.unlowered_guard.is_none()
+        && clause.unless_pay.is_none()
+        && clause.parsed.unless_pay.is_none()
+        && clause.parsed.duration.is_none()
+        && clause.parsed.sub_ability.is_none()
+        && clause.delayed_condition.is_none()
+        && clause.prefix_delayed_condition.is_none()
+        && clause.player_scope.is_none()
+        && clause.opponent_may_scope.is_none()
+        && clause.repeat_for.is_none()
+        && clause.multi_target.is_none()
+        && clause.parsed.multi_target.is_none()
+        && clause.parsed.distribute.is_none()
+        && clause.head_window.is_none()
+        && clause.accepting_player_bindings.is_empty()
+        && clause.sibling_condition == Default::default()
+        && clause.instruction_join == InstructionJoin::Own
+}
+
+// CR 608.2c + CR 122.6: treat the printed entry rider as part of the search
+// delivery only when both following instructions read the same search actor.
+// CR 603.7a: preserve the relocation of instructions into a delayed payload.
+fn commit_inherited_search_delivery(
+    clauses: &mut [ClauseIr],
+    evidence: &HashMap<ClauseId, SearchDeliveryEvidence>,
+) {
+    use crate::types::ability::{
+        LibraryInstructionActor, LibraryShuffleMode, SearchSelectionConstraint,
+    };
+    use crate::types::zones::EtbTapState;
+
+    for index in 0..clauses.len().saturating_sub(2) {
+        let [search, put, shuffle] = &mut clauses[index..index + 3] else {
+            unreachable!();
+        };
+        let (Some(owner), Some(move_read), Some(shuffle_read)) = (
+            evidence.get(&search.id),
+            evidence.get(&put.id),
+            evidence.get(&shuffle.id),
+        ) else {
+            continue;
+        };
+        let counters = &move_read.entry_counters;
+        if counters.is_empty() {
+            continue;
+        }
+        if owner.ordinal + 1 != move_read.ordinal
+            || move_read.ordinal + 1 != shuffle_read.ordinal
+            || owner.actor.search != search.id
+            || move_read.actor.search != search.id
+            || shuffle_read.actor.search != search.id
+            || move_read.actor.announced_slot != owner.actor.announced_slot
+            || shuffle_read.actor.announced_slot != owner.actor.announced_slot
+            || put.boundary != Some(ClauseBoundary::Then)
+            || ![&*search, &*put, &*shuffle].into_iter().all(|clause| {
+                clause.placement == ClausePlacement::Sibling && plain_search_delivery_clause(clause)
+            })
+            || !matches!(
+                put.disposition,
+                ClauseDisposition::Emit {
+                    intrinsic: None,
+                    followup: None
+                }
+            )
+            || !matches!(
+                shuffle.disposition,
+                ClauseDisposition::Emit {
+                    intrinsic: None,
+                    followup: None
+                }
+            )
+            || !matches!(
+                search.parsed.effect,
+                Effect::SearchLibrary {
+                    ref source_zones,
+                    filter: TargetFilter::Typed(_),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    reveal: false,
+                    target_player: Some(TargetFilter::ParentTargetController),
+                    selection_constraint: SearchSelectionConstraint::None,
+                    split: None,
+                } if source_zones.as_slice() == [Zone::Library]
+            )
+            || !matches!(
+                put.parsed.effect,
+                Effect::ChangeZone {
+                    actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTargetController },
+                    library_shuffle: LibraryShuffleMode::PerObject,
+                    origin: None,
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: false,
+                    up_to: false,
+                    ref enter_with_counters,
+                    ref conditional_enter_with_counters,
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                } if enter_with_counters == counters
+                    && conditional_enter_with_counters.is_empty()
+            )
+            || !matches!(
+                shuffle.parsed.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::ParentTargetController
+                }
+            )
+        {
+            continue;
+        }
+        let ClauseDisposition::Emit {
+            intrinsic:
+                Some(ContinuationAst::SearchDestination {
+                    destination: Zone::Battlefield,
+                    enters_under: EntersUnderSpec::Default,
+                    enter_tapped: true,
+                    reveal: false,
+                    attach_host: None,
+                    actor: actor @ LibraryInstructionActor::Controller,
+                    entry_counters,
+                }),
+            followup: None,
+        } = &mut search.disposition
+        else {
+            continue;
+        };
+        if !entry_counters.is_empty() {
+            continue;
+        }
+        *actor = LibraryInstructionActor::Player {
+            player: TargetFilter::ParentTarget,
+        };
+        entry_counters.clone_from(counters);
+        put.disposition = ClauseDisposition::Continue {
+            continuation: Some(ContinuationAst::SearchResultClauseHandled),
+        };
+        shuffle.incoming_link = Some(SubAbilityLink::SequentialSibling);
+    }
 }
 
 // The unsupported State policy is unchanged outside this proven search-result
@@ -51880,6 +52044,8 @@ fn parse_effect_chain_ir_body(
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
     let mut builder = ClauseIrBuilder::new(full_text);
     let mut search_local_where_x = HashSet::new();
+    let mut search_delivery_evidence = HashMap::new();
+    let mut search_actor_carry = None;
     // CR 608.2c: the gate a chain root took on its own target's controller,
     // checked against the assembled chain by `keep_own_target_gate_readable`.
     let mut own_target_gate: Option<AbilityCondition> = None;
@@ -55378,6 +55544,30 @@ fn parse_effect_chain_ir_body(
                     && !is_optional
                     && subject::find_predicate_start(&text) == Some(0)));
         let inherited_player_subject = carried_player.clone().filter(|_| continues_elided_subject);
+        let inherited_search_actor = search_actor_carry.filter(|_| {
+            inherited_player_subject
+                .as_ref()
+                .is_some_and(|subject| *subject.reference() == TargetFilter::ParentTargetController)
+        });
+        // A guarded body can be flattened and its clauses re-minted by
+        // absorb_clause. Only the ability-root entry proves that this triple
+        // will reach assembly intact.
+        let printed_search_slot = match &ctx.chain_declared_slots {
+            DeclaredSlotRegistry::Known(entries)
+                if enclosing_damage_context.is_none()
+                    && leading_subject_application.as_ref().is_some_and(|subject| {
+                        subject.affected == TargetFilter::ParentTargetController
+                            && subject.player_anaphor
+                                == Some(nom_target::PlayerAnaphor::ItsController)
+                    }) =>
+            {
+                match entries.as_slice() {
+                    [entry] if !target_filter_can_target_player(&entry.filter) => entry.index,
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         // CR 608.2c: An independently named actor ends the distributive
         // instruction even when both instructions occupy the same sentence.
         if carried_player == Some(CarriedPlayerSubject::TargetPopulation)
@@ -56450,6 +56640,7 @@ fn parse_effect_chain_ir_body(
             },
             &mut ctx.clause_declared_group,
         ) {
+            search_actor_carry = None;
             let text_lower_for_anchor = text.to_lowercase();
             apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
             carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
@@ -58174,6 +58365,25 @@ fn parse_effect_chain_ir_body(
             // CR 115.1 + CR 701.9b: `target_selection_mode` snapshots the parser's
             // per-chunk selection mode. Set to `Random` by `parse_target_with_ctx`
             // when "random " was stripped from this chunk's target phrase.
+            // The chunk's inherited duration is stamped by ClauseDraft::push.
+            // Admission checks it on the finalized shell.
+            let original_plain = !is_optional
+                && !clause.optional
+                && condition.is_none()
+                && clause.condition.is_none()
+                && clause.unlowered_guard.is_none()
+                && unless_pay.is_none()
+                && clause.unless_pay.is_none()
+                && !is_distributed_chunk
+                && delayed_condition.is_none()
+                && player_scope.is_none()
+                && opponent_may_scope.is_none()
+                && repeat_for.is_none()
+                && multi_target.is_none()
+                && clause.multi_target.is_none()
+                && clause.distribute.is_none()
+                && clause.duration.is_none()
+                && clause.sub_ability.is_none();
             builder
                 .clause(
                     normalized_text,
@@ -58213,6 +58423,47 @@ fn parse_effect_chain_ir_body(
             // that instruction.
             if let Some(pushed) = builder.last_mut() {
                 pushed.instruction_join = chunk_instruction_join;
+                if original_plain && enclosing_damage_context.is_none() {
+                    let source = strip_leading_sequence_connector(&chunk.text).trim();
+                    if let (
+                        Some(announced_slot),
+                        Effect::SearchLibrary {
+                            target_player: Some(TargetFilter::ParentTargetController),
+                            ..
+                        },
+                    ) = (printed_search_slot, &pushed.parsed.effect)
+                    {
+                        let actor = SearchActorCarry {
+                            search: pushed.id,
+                            announced_slot,
+                        };
+                        search_actor_carry = Some(actor);
+                        search_delivery_evidence.insert(
+                            pushed.id,
+                            SearchDeliveryEvidence {
+                                ordinal: chunk_idx,
+                                actor,
+                                entry_counters: Vec::new(),
+                            },
+                        );
+                    } else if let Some(actor) = inherited_search_actor {
+                        let entry_counters = sequence::inherited_search_delivery_counters(source);
+                        let bare_shuffle =
+                            all_consuming(tag_no_case::<_, _, OracleError<'_>>("shuffles"))
+                                .parse(source.trim_end_matches('.').trim_end())
+                                .is_ok();
+                        if entry_counters.is_some() || bare_shuffle {
+                            search_delivery_evidence.insert(
+                                pushed.id,
+                                SearchDeliveryEvidence {
+                                    ordinal: chunk_idx,
+                                    actor,
+                                    entry_counters: entry_counters.unwrap_or_default(),
+                                },
+                            );
+                        }
+                    }
+                }
                 if has_local_where_x && matches!(pushed.parsed.effect, Effect::SearchLibrary { .. })
                 {
                     search_local_where_x.insert(pushed.id);
@@ -58439,6 +58690,7 @@ fn parse_effect_chain_ir_body(
     // `GenericEffect` whose duration field is `None`; the CR baseline per
     // CR 611.2a is "until end of the game", which is not what we want either).
     let mut clauses = builder.finish();
+    commit_inherited_search_delivery(&mut clauses, &search_delivery_evidence);
     try_fold_loses_other_sibling(&mut clauses);
 
     let mut ir = EffectChainIr {

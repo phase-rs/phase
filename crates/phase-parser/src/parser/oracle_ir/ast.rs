@@ -429,6 +429,12 @@ pub(crate) enum ContinuationAst {
         /// When `Some`, the found card enters attached to this host filter.
         /// Adds `forward_result` on the ChangeZone and chains an Attach sub_ability.
         attach_host: Option<TargetFilter>,
+        #[serde(skip_serializing_if = "LibraryInstructionActor::is_controller")]
+        actor: LibraryInstructionActor,
+        /// CR 122.6: counters the searched card enters with, each with its
+        /// parsed quantity; lowered unchanged into `ChangeZone.enter_with_counters`.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        entry_counters: Vec<(CounterType, QuantityExpr)>,
     },
     RevealHandFilter {
         card_filter: Option<TargetFilter>,

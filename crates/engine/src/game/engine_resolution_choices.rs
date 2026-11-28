@@ -2208,9 +2208,7 @@ fn finalize_standard_search_selection(
                 &frame.pending.chain,
             );
         state.resolving_continuation_attach_host = frame.pending.search_attach_host;
-        let targets = search_selection_targets(&frame.pending.chain, player, chosen);
-        frame.pending.chain.set_unpinned_targets(targets.clone());
-        propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
+        bind_standard_search_selection(&mut frame.pending.chain, player, chosen);
         // CR 701.23a + CR 701.23b + CR 614.6 + CR 608.2c: Only delivered
         // survivors bind the search referent; success clears an older reason.
         frame.pending.chain.parent_target_missing_reason = chosen
@@ -2225,16 +2223,11 @@ fn finalize_standard_search_selection(
             state,
             &continuation.pending.chain,
         );
-        let targets = search_selection_targets(&continuation.pending.chain, player, chosen);
         let continuation = state
             .outer_ability_continuation_of_active_post_replacement_draw_mut()
             .expect("checked paired continuation must remain resident while the draw is active");
         continuation.pending.search_attach_host = search_attach_host;
-        continuation
-            .pending
-            .chain
-            .set_unpinned_targets(targets.clone());
-        propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
+        bind_standard_search_selection(&mut continuation.pending.chain, player, chosen);
         // CR 701.23a + CR 701.23b + CR 614.6 + CR 608.2c: Only delivered
         // survivors bind the search referent; success clears an older reason.
         continuation.pending.chain.parent_target_missing_reason = chosen
@@ -12635,6 +12628,18 @@ fn resume_with_error_propagation(
     super::engine::resume_pending_continuation_if_priority(state, events)
 }
 
+fn bind_standard_search_selection(
+    chain: &mut ResolvedAbility,
+    player: crate::types::player::PlayerId,
+    chosen: &[ObjectId],
+) {
+    if !effects::bind_inherited_search_delivery(chain, player, chosen) {
+        let targets = search_selection_targets(chain, player, chosen);
+        chain.set_unpinned_targets(targets.clone());
+        propagate_targets_through_search_shuffle(chain, &targets);
+    }
+}
+
 /// CR 608.2c + CR 701.23a: A search selection replaces the continuation's
 /// object targets with the found cards. Preserve the existing player target
 /// only when a later node still resolves a parent reference: the found-card
@@ -12715,6 +12720,222 @@ mod tests {
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use crate::types::resolution::{MultiDrawFrame, ResolutionFrame};
+
+    fn inherited_delivery_frame() -> (GameState, ObjectId, PendingContinuation) {
+        use crate::types::counter::CounterType;
+
+        inherited_delivery_frame_entering(
+            EtbTapState::Tapped,
+            vec![(CounterType::Stun, QuantityExpr::Fixed { value: 1 })],
+        )
+    }
+
+    fn inherited_delivery_frame_entering(
+        entry_tap: EtbTapState,
+        entry_counters: Vec<(crate::types::counter::CounterType, QuantityExpr)>,
+    ) -> (GameState, ObjectId, PendingContinuation) {
+        use crate::types::ability::LibraryInstructionActor;
+
+        let (mut state, found) = standard_delivery_state();
+        let mut pending = state
+            .take_active_ability_continuation()
+            .unwrap()
+            .unwrap()
+            .pending;
+        let delivery = &mut pending.chain;
+        delivery.context.face_down_in_exile = Default::default();
+        let Effect::ChangeZone {
+            actor,
+            destination,
+            target,
+            enter_tapped,
+            enter_with_counters,
+            ..
+        } = &mut delivery.effect
+        else {
+            panic!("standard search parks a delivery");
+        };
+        *actor = LibraryInstructionActor::Player {
+            player: TargetFilter::ParentTarget,
+        };
+        *destination = Zone::Battlefield;
+        *target = TargetFilter::Any;
+        *enter_tapped = entry_tap;
+        *enter_with_counters = entry_counters;
+        let competing = TargetRef::Player(PlayerId(1));
+        delivery.set_unpinned_targets(vec![competing.clone()]);
+        delivery.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+        let mut shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![competing],
+            delivery.source_id,
+            P0,
+        );
+        shuffle.sub_link = SubAbilityLink::SequentialSibling;
+        delivery.sub_ability = Some(Box::new(shuffle));
+        (state, found, pending)
+    }
+
+    #[test]
+    fn inherited_search_delivery_rebinds_active_frame_for_survivor_and_empty_result() {
+        use crate::types::counter::CounterType;
+
+        // The binder keys on the delivery's actor and shuffle, not on how the
+        // card enters: Hellkite's tapped single stun counter, and a counted
+        // list without the tapped rider that no printed card has on this delivery.
+        let entries = [
+            (
+                EtbTapState::Tapped,
+                vec![(CounterType::Stun, QuantityExpr::Fixed { value: 1 })],
+            ),
+            (
+                EtbTapState::Unspecified,
+                vec![
+                    (CounterType::Stun, QuantityExpr::Fixed { value: 2 }),
+                    (CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 }),
+                ],
+            ),
+        ];
+        for ((entry_tap, entry_counters), choose) in entries
+            .into_iter()
+            .flat_map(|entry| [false, true].map(|choose| (entry.clone(), choose)))
+        {
+            let (mut state, found, pending) =
+                inherited_delivery_frame_entering(entry_tap, entry_counters.clone());
+            state.park_ability_continuation(pending);
+            assert!(state.active_ability_continuation().is_some());
+            let chosen = if choose {
+                std::slice::from_ref(&found)
+            } else {
+                &[]
+            };
+            let mut events = Vec::new();
+            finalize_standard_search_selection(&mut state, P0, chosen, &mut events);
+            assert_eq!(
+                state.objects[&found].zone,
+                if choose {
+                    Zone::Battlefield
+                } else {
+                    Zone::Library
+                }
+            );
+            if choose {
+                let entered = &state.objects[&found];
+                assert_eq!(entered.tapped, entry_tap.is_tapped());
+                for (counter, quantity) in &entry_counters {
+                    let QuantityExpr::Fixed { value } = quantity else {
+                        unreachable!("fixture counters are fixed");
+                    };
+                    assert_eq!(entered.counters.get(counter).copied(), Some(*value as u32));
+                }
+            }
+            let shuffles: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PlayerPerformedAction {
+                        player_id,
+                        action: PlayerActionKind::ShuffledLibrary,
+                        ..
+                    } => Some(*player_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(shuffles, [P0]);
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.resolution_stack.is_empty());
+        }
+    }
+
+    #[test]
+    fn inherited_search_delivery_rebinds_resident_frame_for_survivor_and_empty_result() {
+        use crate::types::ability::{DrawReplacementScope, QuantityModification};
+
+        for choose in [false, true] {
+            let (mut state, found, pending) = inherited_delivery_frame();
+            let source = pending.chain.source_id;
+            for modification in [
+                QuantityModification::Times { factor: 2 },
+                QuantityModification::Plus { value: 1 },
+            ] {
+                let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+                    .draw_scope(DrawReplacementScope::IndividualDraw);
+                replacement.valid_player = Some(ReplacementPlayerScope::You);
+                replacement.quantity_modification = Some(modification);
+                replacement.consume_on_apply = true;
+                state.objects[&source]
+                    .replacement_definitions
+                    .push(replacement);
+            }
+            let mut drains = PostReplacementDrainStack::default();
+            assert!(drains.install(
+                PostReplacementDrain::ready(PostReplacementContinuation::Resolved(Box::new(
+                    ResolvedAbility::new(
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 0 },
+                            target: TargetFilter::Controller
+                        },
+                        vec![],
+                        source,
+                        P0,
+                    )
+                ))),
+                ResidentDrainPolicy::KeepResident,
+            ));
+            let (_, dispatch) = drains.begin_dispatch().unwrap();
+            assert!(drains.pause_dispatch(dispatch));
+            let mut draws = DrawSequenceStack::default();
+            draws.push(P0, 1);
+            state
+                .resolution_stack
+                .install_adjacent_post_replacement_draw(
+                    ResolutionFrame::PostReplacement(drains),
+                    ResolutionFrame::MultiDraw(MultiDrawFrame {
+                        draw_sequences: draws,
+                        connive_reentry: None,
+                    }),
+                )
+                .unwrap();
+            state
+                .insert_ability_continuation_outside_active_post_replacement_draw(pending)
+                .unwrap();
+            assert!(state.active_ability_continuation().is_none());
+            assert!(state
+                .resolution_stack
+                .has_active_post_replacement_draw_pair());
+            let chosen = if choose {
+                std::slice::from_ref(&found)
+            } else {
+                &[]
+            };
+            finalize_standard_search_selection(&mut state, P0, chosen, &mut Vec::new());
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let delivery = &state
+                .outer_ability_continuation_of_active_post_replacement_draw()
+                .expect("draw replacement keeps the exact outer delivery resident")
+                .pending
+                .chain;
+            let expected: Vec<_> = chosen
+                .iter()
+                .copied()
+                .map(TargetRef::Object)
+                .chain(std::iter::once(TargetRef::Player(P0)))
+                .collect();
+            assert_eq!(delivery.targets, expected);
+            assert_eq!(
+                delivery.sub_ability.as_ref().unwrap().targets,
+                [TargetRef::Player(P0)]
+            );
+            assert_eq!(
+                delivery.parent_target_missing_reason,
+                (!choose).then_some(ParentTargetMissingReason::SearchLibrary)
+            );
+        }
+    }
 
     /// CR 608.2c + CR 614.6: Both standard-finalize writers replace old
     /// absence with the delivered survivor set. These are typed authority

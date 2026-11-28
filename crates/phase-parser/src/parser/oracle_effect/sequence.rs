@@ -260,20 +260,48 @@ pub(super) fn parse_put_into_your_hand_prefix(
     Ok((input, referent))
 }
 
-/// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
-/// after a search compound — library-only (Assassin's Trophy comma-split) or
-/// multi-zone (The Hunger Tide Rises: "library and/or graveyard … and put it
-/// onto the battlefield"). Composed from independent verb/pronoun/tapped axes
-/// so Field-of-Ruin "puts it" and Winds-of-Abandon "those cards tapped" share
-/// one grammar instead of N! enumerated sentences.
+#[derive(Clone, Copy)]
+enum PutAgreement {
+    Bare,
+    ThirdPerson,
+}
+
+/// CR 701.23a + CR 608.2c: The common prefix of a search-result Battlefield
+/// delivery, retaining agreement and referent for the continuation's caller.
 fn parse_search_result_put_onto_battlefield_restatement(
     input: &str,
-) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-    let (input, _) = alt((tag::<_, _, OracleError<'_>>("put "), tag("puts "))).parse(input)?;
-    let (input, _) = parse_search_result_referent(input)?;
+) -> OracleResult<'_, (PutAgreement, SearchResultReferent, bool)> {
+    let (input, agreement) = alt((
+        value(PutAgreement::Bare, tag("put ")),
+        value(PutAgreement::ThirdPerson, tag("puts ")),
+    ))
+    .parse(input)?;
+    let (input, referent) = parse_search_result_referent(input)?;
     let (input, _) = tag("onto the battlefield").parse(input)?;
-    let (input, _) = opt(tag(" tapped")).parse(input)?;
-    Ok((input, ()))
+    let (input, tapped) = opt(tag(" tapped")).parse(input)?;
+    Ok((input, (agreement, referent, tapped.is_some())))
+}
+
+pub(super) fn inherited_search_delivery_counters(
+    source: &str,
+) -> Option<Vec<(CounterType, QuantityExpr)>> {
+    let lower = source
+        .trim()
+        .trim_end_matches('.')
+        .trim_end()
+        .to_ascii_lowercase();
+    let (rest, (PutAgreement::ThirdPerson, SearchResultReferent::It, true)) =
+        parse_search_result_put_onto_battlefield_restatement(&lower).ok()?
+    else {
+        return None;
+    };
+    let (_, counters) = all_consuming(preceded(
+        tag(" "),
+        super::lower::parse_enter_counters_clause_body,
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(counters)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -5795,6 +5823,8 @@ pub(super) fn apply_clause_continuation(
             enters_under,
             reveal,
             attach_host,
+            actor,
+            entry_counters,
         } => {
             // CR 110.2a: fail closed before touching either representation of
             // the put step. Search lowering may already have installed a
@@ -5855,7 +5885,7 @@ pub(super) fn apply_clause_continuation(
                 Some(Zone::Library)
             };
             let put_effect = Effect::ChangeZone {
-                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                actor,
                 library_shuffle: Default::default(),
                 origin: put_origin,
                 destination,
@@ -5866,7 +5896,7 @@ pub(super) fn apply_clause_continuation(
                 enter_tapped: crate::types::zones::EtbTapState::from_legacy_bool(enter_tapped),
                 enters_attacking: false,
                 up_to: false,
-                enter_with_counters: vec![],
+                enter_with_counters: entry_counters,
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
                 enters_modified_if: None,
@@ -8289,6 +8319,8 @@ pub(super) fn parse_intrinsic_continuation_ast(
                 ),
                 reveal: *reveal,
                 attach_host,
+                actor: Default::default(),
+                entry_counters: Vec::new(),
             })
         }
         _ => None,
