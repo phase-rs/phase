@@ -75154,7 +75154,7 @@ fn assimilated_with_the_source_reads_the_recorded_permanent() {
     }
 }
 
-/// CR 607.3 + CR 608.2c: The Best of Both Worlds chapter III — "Exile the Borg
+/// CR 607.1 + CR 608.2c: The Best of Both Worlds chapter III — "Exile the Borg
 /// assimilated with this Saga, then return it to the battlefield under its
 /// owner's control." The exile moves every recorded Borg (a copied chapter I
 /// records two), and "it" after that mass move returns the whole moved set.

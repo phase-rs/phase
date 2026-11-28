@@ -1012,7 +1012,7 @@ pub(super) fn normalize_exile_until_hit_bottom_cleanup(effect: &mut Effect) {
     }
 }
 
-/// CR 608.2c + CR 607.3: an anaphor in the instruction after a mass zone move
+/// CR 608.2c: an anaphor in the instruction after a mass zone move
 /// ("Exile the Borg assimilated with this Saga, then return it to the
 /// battlefield" — The Best of Both Worlds, whose exile moves every recorded
 /// Borg) names every object that move affected, so a one-object move of the

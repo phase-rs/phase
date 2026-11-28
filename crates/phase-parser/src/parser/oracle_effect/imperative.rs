@@ -14075,7 +14075,7 @@ pub(super) fn parse_exile_ast(
         ctx,
         EffectScope::Single,
     );
-    // CR 607.3: a singular reference to a linked ability's remembered object
+    // CR 607.1: a singular reference to a linked ability's remembered object
     // ("the Borg assimilated with this Saga") refers to each object the paired
     // ability recorded (several when it was copied), so the exile moves the whole
     // record — mirroring the `ExiledBySource` return's set-wide lowering.
