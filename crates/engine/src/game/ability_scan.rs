@@ -14689,10 +14689,37 @@ mod tests {
         }
     }
 
+    /// Chocobo Camp's REAL parsed `abilities[0]` sub-ability effect, with the real
+    /// condition kept and the body swapped for the read-free one: the card's real body
+    /// now parses as a pinned entry replacement, which the scan keeps conservative, so
+    /// the paired positives below would otherwise measure that body instead of their own
+    /// coordinate. `uses_tracked_set` is kept as parsed.
+    fn chocobo_delayed_node() -> Effect {
+        let node = chocobo_real_delayed_node();
+        let Effect::CreateDelayedTrigger {
+            condition,
+            effect,
+            uses_tracked_set,
+        } = node
+        else {
+            panic!("fixture pin: the parsed sub-ability effect is a `CreateDelayedTrigger`");
+        };
+        assert!(
+            matches!(effect.effect.as_ref(), Effect::AddTargetReplacement { .. }),
+            "fixture pin: the real body is the entry replacement the scan keeps \
+             conservative; the swap below is what restores the paired positives"
+        );
+        Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(inert_delayed_body()),
+            uses_tracked_set,
+        }
+    }
+
     /// Chocobo Camp's REAL parsed `abilities[0]` sub-ability effect — the
     /// `Effect::CreateDelayedTrigger` this arm classifies — from the card's VERBATIM
-    /// Oracle text, never a paraphrase.
-    fn chocobo_delayed_node() -> Effect {
+    /// Oracle text, never a paraphrase. Body included, unlike `chocobo_delayed_node`.
+    fn chocobo_real_delayed_node() -> Effect {
         let parsed = crate::parser::parse_oracle_text(
             "This land enters tapped unless you control a legendary creature.\n\
              {T}: Add {G}. When you next cast a Bird creature spell this turn, it enters with \
@@ -15027,13 +15054,14 @@ mod tests {
              against. The unclassifiable read surface fails closed"
         );
 
-        // PAIRED POSITIVE: the same printed definition without the flag is relieved, so the
-        // veto above is the flag's and not the payload's.
+        // PAIRED POSITIVE: the same definition with the read-free body, without the flag,
+        // is relieved, so the veto above is the flag's and not the payload's.
         let printed = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall).detached();
         assert_eq!(
             (printed.event, printed.sibling.is_read(), printed.projected),
             (false, false, false),
-            "paired positive: one field apart, the printed definition is relieved"
+            "paired positive: one field apart, the parsed definition with the read-free \
+             body is relieved"
         );
     }
 
@@ -15051,7 +15079,7 @@ mod tests {
             inert_delayed_body(),
         );
         for (label, node) in [
-            ("printed card", chocobo_delayed_node()),
+            ("chocobo camp body", chocobo_delayed_node()),
             ("filter-bearing", filter_bearing),
         ] {
             let axes = scan_effect(&node, ScanMode::Conservative);
@@ -15064,8 +15092,8 @@ mod tests {
             );
         }
 
-        // PAIRED POSITIVE: the same printed definition under `LoopFirewall` descends, so the
-        // row above is byte-identity and not an assertion that nothing ever descends.
+        // PAIRED POSITIVE: the same fixture under `LoopFirewall` descends, so the row
+        // above is byte-identity and not an assertion that nothing ever descends.
         let firewall = scan_effect(&chocobo_delayed_node(), ScanMode::LoopFirewall).detached();
         assert_eq!(
             (
@@ -15075,6 +15103,22 @@ mod tests {
             ),
             (false, false, false),
             "paired positive: the identical node descends under `LoopFirewall`"
+        );
+    }
+
+    /// Chocobo Camp's OWN parsed delayed body is a pinned entry replacement, which the
+    /// scan keeps conservative: the fixture above swaps it out so each paired positive
+    /// isolates its own coordinate.
+    ///
+    /// REVERT-PROBE: relieve `Effect::AddTargetReplacement` in `scan_effect` ⇒ **FAILS**.
+    #[test]
+    fn chocobo_camp_real_delayed_body_stays_conservative_under_loop_firewall() {
+        let axes = scan_effect(&chocobo_real_delayed_node(), ScanMode::LoopFirewall).detached();
+        assert_eq!(
+            (axes.event, axes.sibling.is_read(), axes.projected),
+            (true, true, true),
+            "CR 732.2a: the real body is an entry replacement the scan cannot classify, \
+             so it fails closed even under the loop firewall"
         );
     }
 
