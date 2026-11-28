@@ -15172,7 +15172,7 @@ fn apply_non_priority_pass_action(
             wf
         }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
-            // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
+            // CR 601.2 + CR 733.1: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
             // its origin zone via `cancel_pending_cast`.
             ensure_assist_cancellation_is_allowed(state)?;
@@ -15228,7 +15228,7 @@ fn apply_non_priority_pass_action(
             waiting_for
         }
         (WaitingFor::ChooseXValue { player, .. }, GameAction::CancelCast) => {
-            // CR 601.2f + CR 601.2i: Caster may back out before committing to an
+            // CR 601.2f + CR 733.1: Caster may back out before committing to an
             // X value. Pop the stack entry placed at announcement and restore.
             ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
@@ -15682,7 +15682,7 @@ fn apply_non_priority_pass_action(
                 )?,
             }
         }
-        // CR 601.2i: CancelCast during Phyrexian payment rolls back the cast —
+        // CR 601.2 + CR 733.1: CancelCast during Phyrexian payment rolls back the cast —
         // mirrors the ManaPayment CancelCast path.
         (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
             ensure_assist_cancellation_is_allowed(state)?;

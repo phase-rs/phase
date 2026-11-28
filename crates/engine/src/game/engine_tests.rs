@@ -11977,7 +11977,7 @@ fn non_morph_creature_in_graveyard_offers_no_face_down_cast() {
     );
 }
 
-/// CR 601.2i + CR 708.4: canceling a face-down cast during mana payment must roll
+/// CR 601.2 + CR 733.1 + CR 708.4: canceling a face-down cast during mana payment must roll
 /// the object back to its REAL face in its origin zone — not leave it blanked /
 /// nameless / no-cost. `continue_cast_face_down` blanks the object before payment,
 /// so a `CancelCast` from `WaitingFor::ManaPayment` has to reveal the stashed real
@@ -12030,13 +12030,13 @@ fn face_down_cast_cancel_at_mana_payment_restores_real_card() {
         "precondition: the object must be blanked face down with the real card stashed"
     );
 
-    // Back out of the cast during mana payment (CR 601.2i).
+    // Back out of the cast during mana payment (CR 601.2 + CR 733.1).
     apply_as_current(&mut state, GameAction::CancelCast).expect("cancel must be accepted");
 
     let obj = &state.objects[&morph];
     assert!(
         !obj.face_down,
-        "CR 601.2i: canceling the face-down cast must clear the face-down blank"
+        "CR 601.2 + CR 733.1: canceling the face-down cast must clear the face-down blank"
     );
     assert_eq!(
         obj.name, "Secret Beast",
@@ -12059,7 +12059,7 @@ fn face_down_cast_cancel_at_mana_payment_restores_real_card() {
     assert_eq!(
         obj.zone,
         Zone::Hand,
-        "CR 601.2i: the object returns to its origin zone (hand), not stranded on the stack"
+        "CR 601.2 + CR 733.1: the object returns to its origin zone (hand), not stranded on the stack"
     );
 }
 

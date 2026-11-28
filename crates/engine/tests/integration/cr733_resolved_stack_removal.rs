@@ -4,7 +4,7 @@
 //! drops the entry together with the two per-entry side tables keyed on it: the
 //! CR 405.5 resolution pop and the drain loops (batched resolution, inert no-op
 //! batches, CR 724.1b end-phase exile) via the `pop_top_stack_entry` wrapper,
-//! the CR 701.6a counter, and the CR 601.2a / CR 601.2i cast rollbacks.
+//! the CR 701.6a counter, and the CR 733.1 cast rollbacks.
 //!
 //! ONE COMMAND PARAMETERIZED BY `index`, not a pop/remove-at pair. A top pop is
 //! the removal at `index == resulting_depth`, so a separate pop command would

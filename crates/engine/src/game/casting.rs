@@ -959,7 +959,7 @@ struct PreparedSpellCast {
     cast_timing_permission: Option<CastTimingRoute>,
     /// CR 601.2a: Zone the card was in before announcement (hand / command /
     /// graveyard / exile). Threaded onto `PendingCast.origin_zone` so that
-    /// CancelCast (CR 601.2i) can return the object to its origin zone.
+    /// CancelCast (CR 601.2 + CR 733.1) can return the object to its origin zone.
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
     /// CR 601.2a + CR 601.2b: the graveyard permission this cast is announced
@@ -21695,7 +21695,7 @@ fn ensure_graveyard_slot_announced(prepared: &PreparedSpellCast) -> Result<(), E
 /// CR-visible invariant — "the spell is on the stack" — is expressed by the
 /// presence of the StackEntry, not the object's zone field.
 ///
-/// If the cast is aborted at any step (CR 601.2i), `handle_cancel_cast` pops
+/// If the cast is aborted at any step (CR 601.2 + CR 733.1), `handle_cancel_cast` pops
 /// this entry; no zone reversion is needed because `obj.zone` never changed.
 fn announce_spell_on_stack(
     state: &mut GameState,
@@ -35017,7 +35017,7 @@ pub fn stamp_announced_activation_record(
     pending.ability.activation_record = Some(Box::new(record));
 }
 
-/// CR 601.2i: If the player is unable or unwilling to complete a cast, the
+/// CR 601.2 + CR 733.1: If the player is unable or unwilling to complete a cast, the
 /// process is reversed: the spell is removed from the stack and any costs
 /// paid/choices made are rewound. The engine exposes this as
 /// `GameAction::CancelCast` at each interactive WaitingFor step before mana is
@@ -35146,7 +35146,7 @@ pub fn handle_cancel_cast(
         }
         // CR 733.1 + CR 400.7: the undone cast's cost links end with its announcement.
         super::exile_links::end_cast_cost_links(state, pending.object_id);
-        // CR 601.2i: Remove the placeholder stack entry pushed at announcement.
+        // CR 601.2 + CR 733.1: Remove the placeholder stack entry pushed at announcement.
         // No other player can interject between announce and cancel, so the
         // entry is still the topmost object for this cast.
         if let Some(pos) = state
@@ -35171,7 +35171,7 @@ pub fn handle_cancel_cast(
             .get(&pending.object_id)
             .is_some_and(|obj| obj.modal_back_face);
     if restore_swapped_cast_face {
-        // CR 601.2i + CR 712.11a / CR 709.3: backing out of a cast with an
+        // CR 601.2 + CR 733.1 + CR 712.11a / CR 709.3: backing out of a cast with an
         // alternative spell face before it completes restores the card's normal
         // front face in its origin zone.
         super::stack::restore_alternative_spell_normal_face(
@@ -35191,7 +35191,7 @@ pub fn handle_cancel_cast(
     }
 
     if pending.casting_variant == CastingVariant::Prototype {
-        // CR 601.2i + CR 702.160a: backing out of a prototyped cast before
+        // CR 601.2 + CR 733.1 + CR 702.160a: backing out of a prototyped cast before
         // costs are committed restores the printed characteristics in hand.
         if let Some(obj) = state.objects.get_mut(&pending.object_id) {
             clear_prototype_form(obj);
@@ -35199,7 +35199,7 @@ pub fn handle_cancel_cast(
     }
 
     if pending.casting_variant == CastingVariant::FaceDown {
-        // CR 601.2i + CR 708.4 + CR 702.37c / CR 702.168b: backing out of a
+        // CR 601.2 + CR 733.1 + CR 708.4 + CR 702.37c / CR 702.168b: backing out of a
         // face-down cast before it completes reveals the stashed real card and
         // clears the face-down blank, so the object rolls back to its real face in
         // its origin zone instead of stranding blanked / nameless / no-cost.
@@ -35216,7 +35216,7 @@ pub fn handle_cancel_cast(
     }
 
     if let Some(source_id) = pending.cancel_restore_prepared_source {
-        // CR 601.2i + CR 722.3c: Prepare-copy cast cancellation must restore
+        // CR 601.2 + CR 733.1 + CR 722.3c: Prepare-copy cast cancellation must restore
         // the source's prepared marker and leave its linked copy in exile.
         // Announcement never committed the Exile -> Stack zone change, so the
         // same copy remains the CR 722.3c object authorized for a later cast.

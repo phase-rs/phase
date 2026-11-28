@@ -343,8 +343,13 @@ pub(crate) fn finalize_outside_game_card_entry(
     });
 }
 
-/// Why this zone change is happening. Determines pipeline engagement (PLAN §3)
-/// and is carried onto `ProposedEvent::ZoneChange.cause` / `ZoneChangeRecord`.
+/// Why this zone change is happening. Determines pipeline engagement (PLAN §3).
+///
+/// The kind travels with the move request (`ZoneMoveRequest::cause`, saved as
+/// `PendingBatchZoneChangeCause` while a move is parked). It is not recorded on
+/// `ProposedEvent::ZoneChange` or `ZoneChangeRecord`: the proposed event's
+/// `cause` holds only the source object, when the kind has one
+/// (`ZoneMoveRequest::source`).
 ///
 /// The non-exempt variants run the full pipeline (replacement consult + CR 616.1
 /// ordering); the exempt variants are pipeline-internal and skip the replacement

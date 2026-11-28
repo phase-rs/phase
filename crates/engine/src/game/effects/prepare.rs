@@ -783,7 +783,7 @@ pub fn cast_prepared_copy(
         }
     };
 
-    // CR 601.2i + CR 722.3c: If the cast is cancelled before completion,
+    // CR 601.2 + CR 733.1 + CR 722.3c: If the cast is cancelled before completion,
     // restore the source's prepared marker and leave the linked copy waiting in
     // exile (the cast announcement never moved it).
     mark_prepare_copy_cancel_rollback(state, &mut waiting, source_id, copy_id);

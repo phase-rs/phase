@@ -12831,7 +12831,7 @@ pub struct PendingCast {
     /// resource (damage, counters, life) among the chosen targets via DistributeAmong.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribute: Option<DistributionUnit>,
-    /// CR 601.2a + CR 601.2i: Zone the spell was in before announcement. The spell
+    /// CR 601.2a + CR 733.1: Zone the spell was in before announcement. The spell
     /// moves to the stack at announcement time; if the cast is aborted at any step
     /// (modal/target/cost), the object is returned to this zone and all choices
     /// are reversed. Defaults to `Zone::Hand` — the common case — so legacy
@@ -12938,7 +12938,7 @@ pub struct PendingCast {
     /// stays in the pool and is consumed by the normal finalize spend.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pinned_pool_units: Vec<ManaPipId>,
-    /// CR 601.2i + CR 722.3c: Optional source permanent to re-mark as
+    /// CR 601.2 + CR 733.1 + CR 722.3c: Optional source permanent to re-mark as
     /// prepared if this cast is cancelled and rolled back. Used by the
     /// prepared-copy special action to restore pre-cast state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27299,7 +27299,7 @@ impl WaitingFor {
             )
     }
 
-    /// CR 601.2i + CR 602.2b: Whether the current prompt permits withdrawing
+    /// CR 733.1 + CR 602.2b: Whether the current prompt permits withdrawing
     /// the pending spell-cast or a pre-cost keyword-activation announcement.
     /// Spell casts complete only after CR 601.2a-h, so an in-flight cast can
     /// still be withdrawn; keyword activations follow CR 601.2b-i (CR 602.2b),
@@ -30313,7 +30313,7 @@ declare_game_state! {
     pub has_pending_cast: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) foreign_library_look_snapshot: Option<Box<ForeignLibraryLookSnapshot>>,
-    /// CR 601.2i: display-only authority for whether the current pending cast
+    /// CR 733.1: display-only authority for whether the current pending cast
     /// may be withdrawn. Separate from `has_pending_cast` so choice prompts
     /// can expose an in-flight cast without encouraging an illegal cancel.
     #[serde(skip_deserializing, default)]

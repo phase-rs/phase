@@ -24148,7 +24148,7 @@ fn cancel_cast_during_target_selection_returns_to_priority() {
     assert_eq!(state.stack[0].id, obj_id);
     assert!(!state.players[0].hand.is_empty());
 
-    // CR 601.2i: Cancel -> the placeholder stack entry is popped and the
+    // CR 601.2 + CR 733.1: Cancel -> the placeholder stack entry is popped and the
     // card remains in hand (no zone revert needed because no zone change
     // has been committed yet).
     let result = apply_as_current(&mut state, GameAction::CancelCast).unwrap();
@@ -24227,7 +24227,7 @@ fn spell_is_on_stack_during_target_selection() {
     }
 }
 
-/// CR 601.2i: Cancelling from `ManaPayment` pops the placeholder stack
+/// CR 601.2 + CR 733.1: Cancelling from `ManaPayment` pops the placeholder stack
 /// entry pushed at announcement. Exercises the Convoke path which keeps
 /// the PendingCast on outer `GameState::pending_cast`.
 #[test]
