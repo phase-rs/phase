@@ -104,7 +104,7 @@ describe("AnimationOverlay effect timeScale", () => {
     expect(vi.mocked(DeathShatter).mock.calls[0]?.[0].timeScale).toBe(0.4);
   });
 
-  it("caps a ripple reveal at timeScale 1 while compressing it under pressure", () => {
+  it("caps a ripple reveal at timeScale 1 when the speed preference exceeds 1", () => {
     usePreferencesStore.setState({ animationSpeedMultiplier: 1.5 });
     seed({ type: "CardsRevealed", data: { player: 0, card_names: ["Opt"] } });
     render(<AnimationOverlay containerRef={containerRef} />);
