@@ -599,6 +599,27 @@ impl UnitEvidence {
         })
     }
 
+    /// Is a slot named `key` populated by something other than the carriers `represented`
+    /// accounts for?
+    ///
+    /// The typed sibling of [`Self::has_slot`] for a slot that a lowered node fills on behalf
+    /// of text the detector has already stripped: that node must not also vouch for the
+    /// residual text. A value that does not deserialize as `T` counts as "other" (the slot
+    /// stays populated, exactly the previous `has_slot` behavior), so composed or differently
+    /// typed carriers sharing the key are never discounted.
+    pub(super) fn has_slot_other_than<T: DeserializeOwned>(
+        &self,
+        key: &str,
+        represented: impl Fn(&T) -> bool,
+    ) -> bool {
+        Self::visit(&self.root, None, &mut |node, _| match node {
+            Value::Object(map) => map.get(key).is_some_and(|v| {
+                !v.is_null() && !T::deserialize(v).is_ok_and(|value| represented(&value))
+            }),
+            _ => false,
+        })
+    }
+
     /// Build a probe straight from a JSON fixture.
     ///
     /// Test-only, and deliberately so: production evidence must come from a real
@@ -783,6 +804,48 @@ mod tests {
         Effect, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::oracle_diagnostic::OracleDiagnostic;
+
+    const SEARCH_GATE: &str = r#"{"type":"ScopedPlayerMatches","filter":{"type":"PerformedActionThisWay","relation":{"type":"Controller"},"action":"SearchedLibrary"}}"#;
+    const OTHER_CONDITION: &str =
+        r#"{"type":"PreviousEffectAmount","comparator":"LE","rhs":{"type":"Fixed","value":3}}"#;
+
+    fn is_scoped_gate(condition: &crate::types::ability::AbilityCondition) -> bool {
+        matches!(
+            condition,
+            crate::types::ability::AbilityCondition::ScopedPlayerMatches { .. }
+        )
+    }
+
+    fn slot_other_than_gate(json: &str) -> bool {
+        UnitEvidence::from_json_for_test(json)
+            .has_slot_other_than::<crate::types::ability::AbilityCondition>(
+                "condition",
+                is_scoped_gate,
+            )
+    }
+
+    /// `has_slot_other_than` discounts only carriers the predicate accounts for.
+    #[test]
+    fn has_slot_other_than_discounts_only_the_represented_carrier() {
+        // (a) only the represented gate under `condition` -> not "other".
+        assert!(!slot_other_than_gate(&format!(
+            r#"{{"abilities":[{{"condition":{SEARCH_GATE}}}]}}"#
+        )));
+        // (b) the gate in one node plus a different AbilityCondition in another -> "other".
+        assert!(slot_other_than_gate(&format!(
+            r#"{{"abilities":[{{"condition":{SEARCH_GATE}}},{{"condition":{OTHER_CONDITION}}}]}}"#
+        )));
+        // (c) a carrier that does not deserialize as the typed condition (e.g. a
+        // StaticCondition-shaped value) -> "other" (undecodable: keeps the previous populated-slot behavior).
+        assert!(slot_other_than_gate(
+            r#"{"statics":[{"condition":{"type":"NotAnAbilityCondition"}}]}"#
+        ));
+        // (d) key absent or null -> false.
+        assert!(!slot_other_than_gate(r#"{"abilities":[{"effect":{}}]}"#));
+        assert!(!slot_other_than_gate(
+            r#"{"abilities":[{"condition":null}]}"#
+        ));
+    }
 
     #[test]
     fn cycling_history_discharges_this_turn_warning() {

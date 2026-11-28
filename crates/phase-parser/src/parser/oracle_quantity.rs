@@ -3099,11 +3099,34 @@ pub(crate) fn parse_who_action_this_way(
     Ok((input, action))
 }
 
+/// CR 608.2c + CR 109.5: the controller-subject `"you [verb] this way"` counterpart of
+/// [`parse_who_action_this_way`], reading the same `PlayerActionKind` table in the active voice
+/// ("If you search your library this way, shuffle."): the `"you "` subject, the verb arm and the
+/// `" this way"` anaphor terminator. The subject is the ability's controller, so the caller
+/// supplies `PlayerRelation::Controller`. Composed from `tag` over the verb arm.
+pub(crate) fn parse_you_action_this_way(
+    input: &str,
+) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = tag("you ").parse(input)?;
+    let (input, action) = parse_you_searched_arm(input)?;
+    let (input, _) = tag(" this way").parse(input)?;
+    Ok((input, action))
+}
+
 /// "searches/searched a/their library" → `SearchedLibrary` (Tempting Offer cycle).
 fn parse_searched_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
     let (input, _) = alt((tag("searches"), tag("searched"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
     let (input, _) = alt((tag("a "), tag("their "))).parse(input)?;
+    let (input, _) = tag("library").parse(input)?;
+    Ok((input, PlayerActionKind::SearchedLibrary))
+}
+
+/// "search your library" → `SearchedLibrary`: the active-voice, controller-subject form of
+/// [`parse_searched_arm`] ("If you search your library this way, shuffle.").
+fn parse_you_searched_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = tag("search ").parse(input)?;
+    let (input, _) = tag("your ").parse(input)?;
     let (input, _) = tag("library").parse(input)?;
     Ok((input, PlayerActionKind::SearchedLibrary))
 }

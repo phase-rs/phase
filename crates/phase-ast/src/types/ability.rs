@@ -25598,12 +25598,12 @@ pub enum Effect {
         /// (the overwhelming majority of tutors). God-Pharaoh's-Gift-class cards
         /// (Gate to the Afterlife, Dark Supplicant, Say Its Name, Boonweaver
         /// Giant, Mishra) search graveyard + hand + library. The trailing "If you
-        /// search your library this way, shuffle" is the effect's own Shuffle
-        /// sub-ability and is always reached in the multi-zone case because
-        /// Library is in the set. CR 701.23 + CR 609.3: a `CantSearchLibrary`
-        /// muzzle suppresses only the library component — the other zones are
-        /// still searched, and the per-turn "searched a library" tracking fires
-        /// only when Library is actually among the searched zones.
+        /// search your library this way, shuffle" is a `Shuffle` sub-ability gated on
+        /// `ScopedPlayerMatches { PerformedActionThisWay { Controller, SearchedLibrary } }`:
+        /// it runs only when Library was actually searched. CR 701.23 + CR 609.3: a
+        /// `CantSearchLibrary` muzzle suppresses only the library component — the other
+        /// zones are still searched, and the per-turn "searched a library" tracking
+        /// fires only when Library is actually among the searched zones.
         #[serde(
             default = "default_search_zones",
             skip_serializing_if = "is_default_search_zones"
@@ -41010,6 +41010,24 @@ impl AbilityCondition {
                 signal: EffectOutcomeSignal::OptionalEffectPerformed
             }
         )
+    }
+
+    /// CR 608.2c: does this condition, or any condition it composes, read the player actions
+    /// an earlier instruction of the same chain performed ("if you search your library this
+    /// way")? One authority: the shared [`Self::any_filter_grammar`] walk, which already recurses
+    /// the `Not` / `ConditionInstead` / `And` / `Or` wrappers and the `AnyOf` / `AllExcept`
+    /// player filters the evaluator recurses through (it may also see one nested in a compared
+    /// quantity, which only stamps more often).
+    pub fn reads_performed_action_this_way(&self) -> bool {
+        self.any_filter_grammar(&|node| {
+            matches!(
+                node,
+                FilterGrammarNode::Player(PlayerFilter::PerformedActionThisWay {
+                    relation: _,
+                    action: _
+                })
+            )
+        })
     }
 
     /// CR 608.2d + CR 101.4: `Not(OptionalEffectPerformed)` — the "if no one

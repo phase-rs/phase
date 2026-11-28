@@ -13443,6 +13443,28 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
     ))
 }
 
+/// CR 701.23a + CR 701.24a + CR 608.2c: Parse "you search your library this way": the guard of
+/// "search your library for …, put it into your hand. If you search your library this way,
+/// shuffle." True only when the preceding search instruction of the same chain searched the
+/// controller's library (a `CantSearchLibrary` effect leaves a graveyard- or hand-only search
+/// without a library search). Reads the performed-action snapshot the chain carries, the same
+/// `PlayerActionKind::SearchedLibrary` that "each player who searched their library this way"
+/// reads from the per-resolution ledger.
+pub fn parse_you_search_library_this_way_condition(
+    input: &str,
+) -> OracleResult<'_, AbilityCondition> {
+    map(
+        crate::parser::oracle_quantity::parse_you_action_this_way,
+        |action| AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action,
+            },
+        },
+    )
+    .parse(input)
+}
+
 /// CR 603.12 + CR 608.2c: the affirmative connector set. Literal "when you do"
 /// creates a reflexive triggered ability; literal "if ... do" continues the
 /// resolving effect when its preceding instruction was performed.
@@ -27625,6 +27647,47 @@ mod tests {
             ),
             "got {c:?}"
         );
+    }
+
+    /// CR 701.23a + CR 608.2c: only the controller's own "you search your library this way" is
+    /// the guard; the past tense, another player and another zone are not.
+    #[test]
+    fn parse_you_search_library_this_way_condition_reads_only_the_controller_search() {
+        let (rest, condition) =
+            parse_you_search_library_this_way_condition("you search your library this way")
+                .unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            condition,
+            AbilityCondition::ScopedPlayerMatches {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Controller,
+                    action: PlayerActionKind::SearchedLibrary,
+                },
+            }
+        );
+        for text in [
+            "you searched your library this way",
+            "an opponent searches their library this way",
+            "you search your graveyard this way",
+            "they search their library this way",
+            "you search a library this way",
+            "you draw a card this way",
+            "you search your library",
+        ] {
+            assert!(
+                parse_you_search_library_this_way_condition(text).is_err(),
+                "{text}"
+            );
+        }
+        // Regression guard: the population "who ... this way" path ("each player who searched their
+        // library this way", Natural Balance) still reads the same action from the shared verb table.
+        let (rest, action) = crate::parser::oracle_quantity::parse_who_action_this_way(
+            "who searched their library this way",
+        )
+        .unwrap();
+        assert!(rest.is_empty(), "leftover {rest:?}");
+        assert_eq!(action, PlayerActionKind::SearchedLibrary);
     }
 
     /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and

@@ -19704,6 +19704,18 @@ fn hunger_tide_rises_chapter_iv_sacrifice_search_put_chain() {
         "expected Shuffle tail, got {:?}",
         shuffle.effect
     );
+    // CR 701.23a + CR 608.2c: the printed "If you search your library this way" guard is carried on
+    // the Shuffle (reach guard: the Shuffle tail above is the node asserted here).
+    assert_eq!(
+        shuffle.condition,
+        Some(AbilityCondition::ScopedPlayerMatches {
+            filter: crate::types::ability::PlayerFilter::PerformedActionThisWay {
+                relation: crate::types::ability::PlayerRelation::Controller,
+                action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+            },
+        }),
+        "the shuffle must be gated on the controller's library search"
+    );
 }
 
 /// CR 608.2c + CR 117.3a + CR 701.23a: Winds of
@@ -68633,6 +68645,169 @@ fn claim_jumper_parses_repeat_once_while_opponent_lands() {
         "Claim Jumper repeats once, got {:?}",
         trigger.repeat_until
     );
+    // CR 608.2c + CR 701.23a: the "If you search your library this way" guard lowers onto a `Shuffle`
+    // somewhere reachable from the trigger's execute definition. Guard lowering is asserted by
+    // condition only: no claim about where the shuffle sits relative to the repeat body or how often
+    // it runs.
+    assert!(
+        any_ability_node(trigger, &|def| {
+            matches!(&*def.effect, Effect::Shuffle { .. })
+                && def.condition == Some(controller_searched_library_gate())
+        }),
+        "a guard-carrying shuffle exists under the trigger's execute definition"
+    );
+}
+
+/// The `ScopedPlayerMatches { PerformedActionThisWay { Controller, SearchedLibrary } }` gate that
+/// "If you search your library this way" lowers to (CR 701.23a + CR 608.2c).
+fn controller_searched_library_gate() -> AbilityCondition {
+    AbilityCondition::ScopedPlayerMatches {
+        filter: crate::types::ability::PlayerFilter::PerformedActionThisWay {
+            relation: crate::types::ability::PlayerRelation::Controller,
+            action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+        },
+    }
+}
+
+/// First node of the `sub_ability` chain starting at `node` whose effect satisfies `is_wanted`.
+fn find_effect_node(
+    mut node: Option<&AbilityDefinition>,
+    is_wanted: impl Fn(&Effect) -> bool,
+) -> Option<&AbilityDefinition> {
+    while let Some(link) = node {
+        if is_wanted(&link.effect) {
+            return Some(link);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    None
+}
+
+/// Whether `def` or any `AbilityDefinition` nested under it (`sub_ability`, `else_ability`,
+/// `mode_abilities`) satisfies `pred`.
+fn any_ability_node(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) -> bool) -> bool {
+    if pred(def) {
+        return true;
+    }
+    if let Some(child) = def.sub_ability.as_deref() {
+        if any_ability_node(child, pred) {
+            return true;
+        }
+    }
+    if let Some(child) = def.else_ability.as_deref() {
+        if any_ability_node(child, pred) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(|child| any_ability_node(child, pred))
+}
+
+/// CR 701.23a + CR 701.24a + CR 608.2c: Unlucky Cabbage Merchant ("If you search your library this way,
+/// put this creature on the bottom of its owner's library, then shuffle.") lowers the guard onto the
+/// head clause it guards, the `PutAtLibraryPosition`, not onto a `Shuffle`. Parse-only: the card stays
+/// unsupported (its "then shuffle" is not parsed), so no support is claimed here.
+#[test]
+fn unlucky_cabbage_merchant_guard_lands_on_the_put_on_bottom_clause() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, create a Food token. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\nWhenever you sacrifice a Food, you may search your library for a basic land card and put it onto the battlefield tapped. If you search your library this way, put this creature on the bottom of its owner's library, then shuffle.",
+        "Unlucky Cabbage Merchant",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let sacrifice_trigger = parsed
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_deref())
+        .find(|execute| {
+            find_effect_node(Some(*execute), |effect| {
+                matches!(effect, Effect::SearchLibrary { .. })
+            })
+            .is_some()
+        })
+        .expect("reach guard: the Food-sacrifice trigger carries the library search");
+    assert!(
+        find_effect_node(Some(sacrifice_trigger), |effect| {
+            matches!(effect, Effect::Unimplemented { .. })
+        })
+        .is_none(),
+        "the Food-sacrifice trigger chain parses without an Unimplemented node"
+    );
+    let put_on_bottom = find_effect_node(Some(sacrifice_trigger), |effect| {
+        matches!(effect, Effect::PutAtLibraryPosition { .. })
+    })
+    .expect("the put-on-bottom clause is parsed");
+    assert_eq!(
+        put_on_bottom.condition,
+        Some(controller_searched_library_gate())
+    );
+}
+
+/// CR 701.24a + CR 608.2c: negative with a reach guard. A tutor that shuffles with no "this way" guard
+/// (Demonic Tutor: "Search your library for a card, put that card into your hand, then shuffle.") keeps an
+/// unconditional `Shuffle`; the gate is not applied to every shuffle after a search.
+#[test]
+fn unguarded_tutor_shuffle_stays_unconditional() {
+    use crate::types::ability::AbilityKind;
+    let def = parse_effect_chain(
+        "Search your library for a card, put that card into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        find_effect_node(Some(&def), |effect| matches!(
+            effect,
+            Effect::SearchLibrary { .. }
+        ))
+        .is_some(),
+        "reach guard: the tutor parsed its library search"
+    );
+    let shuffle = find_effect_node(Some(&def), |effect| {
+        matches!(effect, Effect::Shuffle { .. })
+    })
+    .expect("the tutor parsed its shuffle");
+    assert_eq!(shuffle.condition, None);
+}
+
+/// CR 701.24a + CR 608.2c: Natural Balance's population shuffle ("Then each player who searched their
+/// library this way shuffles.") is the who-path, not the controller guard: its `Shuffle` keeps no
+/// `condition` and stays scoped to every player who searched (`PerformedActionThisWay`), unchanged.
+#[test]
+fn natural_balance_population_shuffle_is_not_given_the_controller_gate() {
+    let parsed = parse_oracle_text(
+        "Each player who controls six or more lands chooses five lands they control and sacrifices the rest. Each player who controls four or fewer lands may search their library for up to X basic land cards and put them onto the battlefield, where X is five minus the number of lands they control. Then each player who searched their library this way shuffles.",
+        "Natural Balance",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let spell = parsed
+        .abilities
+        .first()
+        .expect("reach guard: the spell parsed an ability");
+    assert!(
+        find_effect_node(Some(spell), |effect| matches!(
+            effect,
+            Effect::SearchLibrary { .. }
+        ))
+        .is_some(),
+        "reach guard: the card parsed its library search"
+    );
+    let shuffle = find_effect_node(Some(spell), |effect| {
+        matches!(effect, Effect::Shuffle { .. })
+    })
+    .expect("the card parsed its shuffle");
+    assert_eq!(shuffle.condition, None);
+    assert_eq!(
+        shuffle.player_scope,
+        Some(
+            crate::types::ability::PlayerFilter::PerformedActionThisWay {
+                relation: crate::types::ability::PlayerRelation::All,
+                action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
+            }
+        )
+    );
 }
 
 /// CR 705.2 + CR 608.2c: the resolution-scoped coin-flip loop gate — the flip
@@ -109099,6 +109274,107 @@ fn otherwise_one_of_those_tokens_clones_the_then_branch_token() {
         "{:?}",
         otherwise.effect
     );
+}
+
+/// CR 701.23a + CR 701.24a + CR 608.2c: "If you search your library this way, shuffle." lowers its guard onto
+/// the `Shuffle` (it was dropped, so the shuffle was unconditional). Verbatim Oracle text of Ashiok's
+/// Forerunner (MTGJSON); the guard reads the controller's `SearchedLibrary` action.
+#[test]
+fn if_you_search_your_library_this_way_shuffle_is_gated() {
+    use crate::types::ability::{PlayerFilter, PlayerRelation};
+    use crate::types::event_kinds::PlayerActionKind;
+
+    let def = parse_effect_chain(
+        "You may search your library and/or graveyard for a card named Ashiok, Sculptor of Fears, reveal it, and put it into your hand. If you search your library this way, shuffle.",
+        AbilityKind::Spell,
+    );
+    let mut node = Some(&def);
+    let mut shuffle = None;
+    while let Some(link) = node {
+        if matches!(&*link.effect, Effect::Shuffle { .. }) {
+            shuffle = Some(link);
+        }
+        node = link.sub_ability.as_deref();
+    }
+    let shuffle = shuffle.expect("the chain ends in the printed shuffle");
+    assert_eq!(
+        shuffle.condition,
+        Some(AbilityCondition::ScopedPlayerMatches {
+            filter: PlayerFilter::PerformedActionThisWay {
+                relation: PlayerRelation::Controller,
+                action: PlayerActionKind::SearchedLibrary,
+            },
+        })
+    );
+}
+
+/// The guard is the controller's own library search only: another reading keeps its prior parse (no gate on
+/// the shuffle), so the rung does not widen to any "... this way" text.
+#[test]
+fn search_this_way_guard_rung_does_not_widen() {
+    for text in [
+        "Search your library for a card, put it into your hand. If an opponent searches their library this way, shuffle.",
+        "Search your library for a card, put it into your hand. If you searched your library this way, shuffle.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let mut node = Some(&def);
+        let mut shuffles_seen = 0;
+        while let Some(link) = node {
+            if matches!(&*link.effect, Effect::Shuffle { .. }) {
+                shuffles_seen += 1;
+                assert!(
+                    !matches!(
+                        link.condition,
+                        Some(AbilityCondition::ScopedPlayerMatches { .. })
+                    ),
+                    "{text}: {:?}",
+                    link.condition
+                );
+            }
+            node = link.sub_ability.as_deref();
+        }
+        assert!(shuffles_seen > 0, "reach guard: {text} parsed a Shuffle");
+    }
+}
+
+/// The two sentences above are constructed: no printed card says "an opponent searches their library this way"
+/// or "you searched your library this way" (MTGJSON 5.3.0+20261115 has no hit for either). The printed neighbours of
+/// the clause are pinned here with their verbatim Oracle text: Auditore Ambush ("they", a targeted player's
+/// search) keeps an unguarded `Shuffle`, and
+/// Prishe's Wanderings (a "when you search your library this way" reflexive trigger) is not turned into a
+/// guard either. Each has a reach guard: the parse still carries its `Shuffle` or its counter effect.
+#[test]
+fn search_this_way_guard_rung_leaves_printed_neighbours_alone() {
+    let cases = [
+        (
+            "Auditore Ambush",
+            "Choose one or both \u{2014}\n\u{2022} Return target creature to its owner's hand.\n\u{2022} Target player searches their library and/or graveyard for a card named Ezio, Blade of Vengeance, reveals it, and puts it into their hand. If they search their library this way, they shuffle.",
+            "Sorcery",
+            "\"Shuffle\"",
+            "reach guard: the modal ability parsed a Shuffle",
+        ),
+        (
+            "Prishe's Wanderings",
+            "Search your library for a basic land card or Town card, put it onto the battlefield tapped, then shuffle. When you search your library this way, put a +1/+1 counter on target creature you control.",
+            "Instant",
+            "\"PutCounter\"",
+            "reach guard: the reflexive trigger parsed its counter effect",
+        ),
+    ];
+    for (name, text, card_type, reach, reach_msg) in cases {
+        let parsed = parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+        let json = serde_json::to_string(&parsed).expect("serialize parsed abilities");
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            json.contains(reach),
+            "{name}: {reach_msg}"
+        );
+        assert!(
+            // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+            !json.contains("\"ScopedPlayerMatches\""),
+            "{name}: the printed neighbour must not gain a PerformedActionThisWay guard"
+        );
+    }
 }
 
 /// CR 603.2b + CR 608.2c + CR 611.2a + CR 702.1d: the shared-predicate

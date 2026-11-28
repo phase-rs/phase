@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SpellContext gains performed_actions_this_way, the player actions an instruction of the resolving chain performed, so a later \"if you search your library this way\" gate reads its own chain's search. It is serialized inside the stack's and a parked continuation's ResolvedAbility, defaulted and omitted when empty, so an older peer reading a newer state drops the mark and would skip a printed shuffle after a parked library search. Full-game peers and P2P move in lockstep; no lobby carrier names it."
+}

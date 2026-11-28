@@ -6920,6 +6920,15 @@ pub(super) fn condition_names_an_event(cond_text: &str) -> bool {
     nom_primitives::scan_contains(&cond_text.to_lowercase(), "would")
 }
 
+/// CR 701.23a + CR 608.2c: the whole guard text is "you search your library this way" (a plain
+/// leading guard of a `Shuffle`, with no "instead"); `lower_instead_condition` is the one authority
+/// that lowers leading guard text of this kind.
+fn parse_search_library_this_way_condition_text(cond_text: &str) -> Option<AbilityCondition> {
+    nom_parse_lower(&cond_text.trim().to_lowercase(), |input| {
+        all_consuming(nom_condition::parse_you_search_library_this_way_condition).parse(input)
+    })
+}
+
 /// CR 608.2c + CR 614.15: the SINGLE AUTHORITY for lowering the condition of an
 /// "instead" self-replacement override — wherever that override is printed.
 ///
@@ -6937,11 +6946,15 @@ pub(super) fn condition_names_an_event(cond_text: &str) -> bool {
 /// and was published as an UNCONDITIONAL sibling ability — the engine ran the base
 /// effect AND the replacement, every time (CR 614.6). One authority, one
 /// vocabulary, so the two paths cannot drift apart again.
+///
+/// `parse_clause_ast` also reaches it for a plain leading guard that carries no "instead"
+/// ("If you search your library this way, shuffle.").
 pub(crate) fn lower_instead_condition(
     cond_text: &str,
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
     parse_target_color_condition_text(cond_text)
+        .or_else(|| parse_search_library_this_way_condition_text(cond_text))
         .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
