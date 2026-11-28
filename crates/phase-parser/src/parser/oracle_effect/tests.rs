@@ -57132,7 +57132,8 @@ fn next_cast_counter_riders_install_the_pinned_entry_replacement() {
         else {
             panic!("{card}: expected CreateDelayedTrigger, got {:?}", def.effect);
         };
-        // CR 603.7c: the body belongs to a one-shot SpellCast delayed trigger.
+        // CR 603.7: "When you next cast ..." creates a delayed SpellCast trigger;
+        // the printed "next" limits it to the next matching cast.
         assert!(
             matches!(
                 condition,
