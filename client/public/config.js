@@ -4,9 +4,9 @@
 //
 // Self-hosting? Replace this file (the phase-server helm chart renders it from
 // `web.defaultMultiplayerServerUrl` and `web.previewSiteUrl`; the phase-web image
-// renders it from PHASE_MULTIPLAYER_SERVER_URL and PHASE_PREVIEW_SITE_URL) — the
-// bundle needs no rebuild. Every key is optional, and the app ignores a
-// malformed value:
+// renders it from PHASE_MULTIPLAYER_SERVER_URL, PHASE_PREVIEW_SITE_URL,
+// PHASE_SUPABASE_URL and PHASE_SUPABASE_ANON_KEY) — the bundle needs no
+// rebuild. Every key is optional, and the app ignores a malformed value:
 //
 //   window.__PHASE_CONFIG__ = {
 //     multiplayerServerUrl: "wss://your-host/ws",

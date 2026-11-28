@@ -6,6 +6,13 @@
 #
 #   PHASE_MULTIPLAYER_SERVER_URL   -> multiplayerServerUrl  (wss://host/ws)
 #   PHASE_PREVIEW_SITE_URL         -> previewSiteUrl        (https://preview.host/)
+#   PHASE_SUPABASE_URL             -> supabaseUrl           (https://ref.supabase.co)
+#   PHASE_SUPABASE_ANON_KEY        -> supabaseAnonKey       (the project's anon key)
+#
+# The two Supabase variables name one project for cloud sync, so set both or
+# neither: the client ignores a lone one and keeps its build-time project. That
+# project's auth redirect allow-list must include this site's origin. The anon
+# key is public by design; Row-Level Security is the access control.
 #
 # Every variable is optional. An unset or empty one leaves its key out, as the
 # phase-server chart's ConfigMap does, and the client then keeps its build-time
@@ -61,10 +68,26 @@ set_keys=
   done <<EOF
 multiplayerServerUrl PHASE_MULTIPLAYER_SERVER_URL
 previewSiteUrl PHASE_PREVIEW_SITE_URL
+supabaseUrl PHASE_SUPABASE_URL
+supabaseAnonKey PHASE_SUPABASE_ANON_KEY
 EOF
   echo "};"
 } >"$tmp"
 mv "$tmp" "$out_dir/config.js"
+
+# A lone Supabase key is written like any other, but the client reads the pair
+# or nothing, so a deployment with one would quietly keep syncing with the
+# build-time project. Say so where the operator looks. Checked on the keys
+# written, so a variable dropped above for a line break counts as unset.
+supabase_keys=0
+for key in supabaseUrl supabaseAnonKey; do
+  case " $set_keys " in
+    *" $key "*) supabase_keys=$((supabase_keys + 1)) ;;
+  esac
+done
+if [ "$supabase_keys" -eq 1 ]; then
+  entrypoint_log "PHASE_SUPABASE_URL and PHASE_SUPABASE_ANON_KEY name one project: with only one usable, the client ignores both" >&2
+fi
 
 if [ -n "$set_keys" ]; then
   entrypoint_log "wrote $out_dir/config.js, setting:$set_keys"
