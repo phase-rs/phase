@@ -20,11 +20,13 @@ vi.mock("../dice3d/loaders", () => ({
 }));
 
 import { DiceRollOverlay } from "../DiceRollOverlay";
+import { GAME_Z_LAYER } from "../../../constants/ui";
 import {
   DICE_RESULT_HOLD_MS,
   DICE_RESULT_MIN_HOLD_MS,
   DICE_ROLL_LANDING_TIMEOUT_MS,
 } from "../../../animation/types";
+import { useGameStore } from "../../../stores/gameStore";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
@@ -232,5 +234,90 @@ describe("DiceRollOverlay reveals a roll's result when it lands", () => {
     expect(screen.queryByText(/reroll/i)).toBeNull();
     await advance(1);
     expect(screen.getByText(/reroll/i)).toBeInTheDocument();
+  });
+});
+
+describe("DiceRollOverlay yields to a decision prompt opened by its roll (#11411)", () => {
+  /** Put the game at a prompt the way a committed snapshot does. */
+  async function waitOn(type: string, player: number): Promise<void> {
+    await act(async () => {
+      useGameStore.setState({
+        gameState: { active_player: 0 } as never,
+        waitingFor: { type, data: { player } } as never,
+      });
+    });
+  }
+
+  function pressEscape(): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  afterEach(() => {
+    useGameStore.setState({ gameState: null, waitingFor: null });
+  });
+
+  it("stops blocking clicks and Escape when the prompt arrives, without restarting the roll", async () => {
+    await waitOn("Priority", 0);
+    render(<DiceRollOverlay />);
+    const roll = twoDiceRoll();
+    await showRoll(roll);
+    const overlay = screen.getByRole("status");
+    // Reach guard: before the prompt the roll covers the screen and is skippable.
+    expect(screen.getByRole("button")).toBeInTheDocument();
+    const dice = renderers.mounted.size;
+
+    await waitOn("SearchChoice", 0);
+
+    expect(overlay).toHaveClass(GAME_Z_LAYER.boardChoiceGrid);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(overlay).toHaveClass("pointer-events-none");
+    expect(overlay.querySelector(".pointer-events-auto")).toBeNull();
+    expect(screen.queryByText(/tap to skip/i)).toBeNull();
+    expect(pressEscape().defaultPrevented).toBe(false);
+    expect(useUiStore.getState().diceRoll).toBe(roll);
+    expect(renderers.mounted.size).toBe(dice);
+
+    await land("3");
+    await land("9");
+    expect(screen.getByText("9")).toBeInTheDocument();
+    await advance(DICE_RESULT_HOLD_MS * 2);
+    expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+
+  it("yields to a physical contest, whose prompt names no single player", async () => {
+    await act(async () => {
+      useGameStore.setState({
+        gameState: { active_player: 1 } as never,
+        waitingFor: { type: "PhysicalContest", data: {} } as never,
+      });
+    });
+    render(<DiceRollOverlay />);
+    await showRoll(lostCoinFlip());
+
+    expect(screen.getByRole("status")).toHaveClass(GAME_Z_LAYER.boardChoiceGrid);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(pressEscape().defaultPrevented).toBe(false);
+  });
+
+  it("stays skippable while another player is deciding", async () => {
+    await waitOn("SearchChoice", 1);
+    render(<DiceRollOverlay />);
+    await showRoll(lostCoinFlip());
+
+    expect(screen.getByRole("button")).toBeInTheDocument();
+    expect(pressEscape().defaultPrevented).toBe(true);
+    expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+
+  it("keeps the starting-player contest dismissable at a prompt", async () => {
+    await waitOn("UnlessPayment", 0);
+    render(<DiceRollOverlay />);
+    await showRoll(tiedContest());
+
+    expect(screen.getByRole("button")).toBeInTheDocument();
   });
 });
