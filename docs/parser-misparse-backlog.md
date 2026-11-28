@@ -67,7 +67,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 150 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
-| 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
+| 12 | Modal 'choose one/N' parsed as independent abilities | 131 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 124 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
 | 15 | Multi-target / 'up to N' optionality or count dropped | 77 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
@@ -3691,7 +3691,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 
 </details>
 
-### 12. Modal 'choose one/N' parsed as independent abilities  (132 cards)
+### 12. Modal 'choose one/N' parsed as independent abilities  (131 cards)
 
 **Signature.** Modal header (Choose one/two/one-or-both) not detected; bullet modes emitted as flat independent Spell abilities with no ChooseOneOf/Modal wrapper, so all modes resolve.
 
@@ -3842,7 +3842,6 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 - Typhoid Mary, Fractured
 - Umbral Juke
 - Umezawa's Charm
-- Unbury
 - Unite the Coalition
 - Urza's Avenger
 - Urza's Command

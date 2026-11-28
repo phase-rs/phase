@@ -18835,6 +18835,13 @@ pub(crate) fn validate_retarget_submission(
                 .unwrap_or(false)
         })
     };
+    if !crate::game::ability_utils::changed_target_runs_satisfy_shared_qualities(
+        state, &mutated, &derived, &changed,
+    ) {
+        return Err(EngineError::InvalidAction(
+            "Retarget: targets do not satisfy the declaration's shared quality".into(),
+        ));
+    }
     crate::game::ability_utils::unchanged_targets_stay_legal(
         state,
         pre,

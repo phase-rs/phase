@@ -224,10 +224,23 @@ fn retire_damage_history_on_zone_change(
 
 /// CR 608.2h: preserve the departing incarnation before its characteristics
 /// are reset. A caller outside zone cleanup supplies the pre-move attachments.
+/// Which last-known-information records an exit snapshot writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExitLkiScope {
+    /// The object-keyed record that readers take as its most recent
+    /// departure, plus the record for the departing incarnation.
+    Latest,
+    /// Only the departing incarnation's record. The object-keyed record keeps
+    /// an earlier departure's snapshot (a creature's death, read after the
+    /// card later leaves the graveyard).
+    IncarnationOnly,
+}
+
 pub(super) fn capture_exit_lki(
     state: &mut GameState,
     object_id: ObjectId,
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
+    scope: ExitLkiScope,
 ) {
     let Some(obj) = state.objects.get(&object_id) else {
         return;
@@ -266,7 +279,9 @@ pub(super) fn capture_exit_lki(
         attachments,
         produceable_mana_types: Vec::new(),
     };
-    state.lki_cache.insert(object_id, lki.clone());
+    if scope == ExitLkiScope::Latest {
+        state.lki_cache.insert(object_id, lki.clone());
+    }
     state
         .lki_by_incarnation
         .entry(object_id)
@@ -278,7 +293,9 @@ pub(super) fn capture_exit_lki(
             .entry(object_id)
             .or_default()
             .insert(incarnation, values.clone());
-        state.lki_copiable_values.insert(object_id, values);
+        if scope == ExitLkiScope::Latest {
+            state.lki_copiable_values.insert(object_id, values);
+        }
     }
 }
 
@@ -404,7 +421,13 @@ pub(crate) fn apply_zone_exit_cleanup(
                 .get(&object_id)
                 .is_some_and(|history| history.contains_key(&occurrence.incarnation)))
     {
-        capture_exit_lki(state, object_id, attachments);
+        capture_exit_lki(state, object_id, attachments, ExitLkiScope::Latest);
+    } else if from == Zone::Graveyard {
+        // CR 115.7d + CR 608.2h: a target may be kept after it leaves the
+        // graveyard, and a relational restriction is then compared against
+        // that card as it last existed there, so the departing incarnation
+        // keeps its own record.
+        capture_exit_lki(state, object_id, attachments, ExitLkiScope::IncarnationOnly);
     }
 
     // CR 122.2 + CR 113.6b: Decide counter persistence using the still-current
