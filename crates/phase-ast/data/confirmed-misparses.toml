@@ -1909,6 +1909,7 @@ face = [
   { key = "rushed rebirth", class = "wrong_object", clauses = ["When that creature dies this turn,", "search your library for a creature card with lesser mana value,"] },
   { key = "rust", class = "dropped_qualifier", clauses = ["Counter target activated ability from an artifact source."] },
   { key = "ruthless instincts", class = "target_wrong", clauses = ["Target nonattacking creature gains reach and deathtouch until end of turn."] },
+  { key = "ryan sinclair", class = "missing_effect", clauses = ["You may cast the exiled card without paying its mana cost if it's a spell with mana value less than or equal to Ryan's power."] },
   { key = "sabertooth alley cat", class = "dropped_qualifier", clauses = ["{1}{R}: Creatures without defender can't block this creature this turn."] },
   { key = "sacellum godspeaker", class = "dropped_qualifier", clauses = ["{T}: Reveal any number of creature cards with power 5 or greater from your hand."] },
   { key = "sacred guide", class = "dropped_qualifier", clauses = ["Reveal cards from the top of your library until you reveal a white card."] },
