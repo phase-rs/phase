@@ -450,7 +450,7 @@ mod tests {
         ManaProduction, ObjectScope, PlayerScope, PtValue, QuantityExpr, QuantityModification,
         QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
         ReplacementPlayerScope, SacrificeCost, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        TypedFilter, EXILE_COST_ANY_NUMBER,
     };
     use engine::types::card_type::CoreType;
     use engine::types::counter::{CounterMatch, CounterType};
@@ -1485,6 +1485,27 @@ mod tests {
             &verdict_for(&state, source, plain_features()),
             "self_cost_trivial_benefit",
         );
+    }
+
+    #[test]
+    fn exile_any_number_prices_the_marginal_unit() {
+        // March of Otherworldly Light's exile-any-number cost must not price
+        // at its compact sentinel value (~4e9 cards): the count is chosen at
+        // payment time, so it prices one card — the marginal unit.
+        let state = GameState::new_two_player(42);
+        let penalties = crate::config::PolicyPenalties::default();
+        let price = real_self_cost(
+            &state,
+            AI,
+            ObjectId(7),
+            &AbilityCost::Exile {
+                count: EXILE_COST_ANY_NUMBER,
+                zone: Some(Zone::Hand),
+                filter: None,
+            },
+            &penalties,
+        );
+        assert_eq!(price, penalties.self_cost_discard_per_card);
     }
 
     // --- Row 8: ExilesCards siblings never fire the gate ------------------

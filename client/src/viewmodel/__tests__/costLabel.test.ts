@@ -497,6 +497,53 @@ describe("additionalCostChoices — option ids are engine option indices", () =>
   });
 });
 
+describe("additionalCostChoices — engine-interpreted exile count tags (F1-T3)", () => {
+  // Exact production wire shape from F1-T1 (March of Otherworldly Light's
+  // Optional offer), with the post-serde "any-number" tag in `count`.
+  // `formatFilteredCard` ignores filter properties (pre-existing gap), so
+  // the white-card filter renders the generic "cards" noun.
+  const marchOffer: AdditionalCost = {
+    type: "Optional",
+    data: {
+      cost: {
+        type: "Exile",
+        count: "any-number",
+        zone: "Hand",
+        filter: {
+          type: "Typed",
+          type_filters: ["Card"],
+          controller: "You",
+          properties: [
+            { type: "HasColor", color: "White" },
+            { type: "InZone", zone: "Hand" },
+          ],
+        },
+      },
+    },
+  };
+
+  it("reads 'any number' in the offer prompt, never the raw sentinel", () => {
+    const { title, options } = additionalCostChoices(marchOffer, 0);
+    expect(title).toContain("any number");
+    expect(title).not.toContain("4294967294");
+    expect(title).not.toContain("undefined");
+    expect(options.find((o) => o.id === "0")?.label).toContain("any number");
+  });
+
+  it("renders the Harvest Pyre X-tag projection as 'X'", () => {
+    // Post-serde projection of Harvest Pyre's export record
+    // (`Required Exile{count: 4294967295, zone: Graveyard, filter: null}`).
+    expect(
+      formatAbilityCost({
+        type: "Exile",
+        count: "X",
+        zone: "Graveyard",
+        filter: null,
+      }),
+    ).toBe("Exile X cards from your graveyard");
+  });
+});
+
 describe("formatAbilityCost", () => {
   // CR 101.4: `QuantityRef::PlayerChosenNumber` renders the cross-player fold the
   // engine supplies — "the highest number" for `Max`, "the lowest number" for
@@ -567,6 +614,26 @@ describe("formatAbilityCost", () => {
     expect(formatAbilityCost({
       type: "Exile",
       count: { type: "Fixed", value: 2 },
+      zone: "Graveyard",
+      filter: { type: "Typed", type_filters: ["Creature"], controller: null, properties: [] },
+    })).toBe("Exile 2 Creature cards from your graveyard");
+  });
+
+  // F1-T2: the engine sends Exile counts as raw numbers, not QuantityExpr
+  // objects — these rows feed that exact emitted shape.
+  it("formats a raw-number singular exile count", () => {
+    expect(formatAbilityCost({
+      type: "Exile",
+      count: 1,
+      zone: "Graveyard",
+      filter: { type: "Typed", type_filters: ["Creature"], controller: null, properties: [] },
+    })).toBe("Exile 1 Creature card from your graveyard");
+  });
+
+  it("formats a raw-number plural exile count", () => {
+    expect(formatAbilityCost({
+      type: "Exile",
+      count: 2,
       zone: "Graveyard",
       filter: { type: "Typed", type_filters: ["Creature"], controller: null, properties: [] },
     })).toBe("Exile 2 Creature cards from your graveyard");

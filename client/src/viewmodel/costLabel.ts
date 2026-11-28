@@ -110,10 +110,17 @@ type QuantityExpr =
   | { type: "Offset"; inner: QuantityExpr; offset: number }
   | { type: "Multiply"; factor: number; inner: QuantityExpr };
 
+// A raw-count cost's `count`: a QuantityExpr, a legacy raw number, or an
+// engine-interpreted exile-cost tag (`"X"` / `"any-number"` from
+// `exile_cost_count` in phase-ast). The engine owns the cardinality
+// meaning; this only localizes. The narrowed literal union (not `string`)
+// keeps mistyped payloads failing loudly.
+type CostCount = QuantityExpr | number | "X" | "any-number";
+
 type SerializedCost = {
   type: string;
   amount?: QuantityExpr | number;
-  count?: QuantityExpr | number;
+  count?: CostCount;
   costs?: SerializedCost[];
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
@@ -204,10 +211,17 @@ function formatZone(zone: string | null | undefined): string {
   }
 }
 
-/** Render a QuantityExpr (or legacy raw number) for display in cost labels. */
-function formatQuantity(q: QuantityExpr | number | undefined, fallback = 1): string {
+/** Render a cost count (QuantityExpr, legacy raw number, or engine tag) for display in cost labels. */
+function formatQuantity(q: CostCount | undefined, fallback = 1): string {
   if (q == null) return String(fallback);
   if (typeof q === "number") return String(q);
+  // Engine-interpreted exile-cost tags: the engine owns the cardinality,
+  // so "any-number" localizes while "X" passes through verbatim.
+  if (typeof q === "string") {
+    return q === "any-number"
+      ? i18n.t("game:resolutionOptionalPayment.cost.countAnyNumber")
+      : q;
+  }
   switch (q.type) {
     case "Fixed":
       return String(q.value);
@@ -308,10 +322,12 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
   }
 }
 
-/** Numeric quantity check that works against either QuantityExpr or a raw number. */
-function quantityIsPlural(q: QuantityExpr | number | undefined): boolean {
+/** Plural check over a cost count (QuantityExpr, raw number, or engine tag). */
+function quantityIsPlural(q: CostCount | undefined): boolean {
   if (q == null) return false;
   if (typeof q === "number") return q > 1;
+  // Engine-interpreted tags ("X", "any-number") always take the plural noun.
+  if (typeof q === "string") return true;
   return q.type === "Fixed" ? q.value > 1 : true;
 }
 

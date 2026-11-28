@@ -523,6 +523,7 @@ mod p1_9354_oracle_owner_contract_30;
 mod p3_referent_predicates;
 mod pact_of_negation_upkeep_payment;
 mod padeem_consul_of_innovation;
+mod painbringer_exile_any_number;
 mod painters_servant_multi_zone_additive_color;
 mod palace_jailer;
 mod palantir_of_orthanc;

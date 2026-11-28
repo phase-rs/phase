@@ -24,7 +24,8 @@ use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityCost, CardSelectionMode, Comparator,
     CounterCostSelection, DiscardSelfScope, FilterProp, NinjutsuVariant, PlayerFilter,
     PlayerRecipientCost, QuantityExpr, QuantityRef, SacrificeCost, SharedQuality,
-    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
+    TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter,
+    EXILE_COST_ANY_NUMBER, EXILE_COST_X,
 };
 use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -810,7 +811,7 @@ fn object_leg_demand_and_candidates(
                     *count,
                 ),
             };
-            let demand = if *count == EXILE_COST_X {
+            let demand = if *count == EXILE_COST_X || *count == EXILE_COST_ANY_NUMBER {
                 ObjectLegDemand::Unmodeled
             } else {
                 ObjectLegDemand::Exactly(*count as usize)
@@ -1702,8 +1703,9 @@ impl AbilityCostLegPayability for AbilityCost {
                 // CR 107.3a + CR 601.2b: X in this cost is chosen during
                 // announcement. X=0 is legal, so the pre-announcement
                 // affordability gate must not treat its compact sentinel as a
-                // literal count that can never be met.
-                if *count == EXILE_COST_X {
+                // literal count that can never be met. "Any number" (March
+                // cycle, Gorex) likewise always admits zero.
+                if *count == EXILE_COST_X || *count == EXILE_COST_ANY_NUMBER {
                     return true;
                 }
                 if matches!(filter, Some(TargetFilter::SelfRef)) {

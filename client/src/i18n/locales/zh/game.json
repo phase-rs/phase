@@ -2516,6 +2516,7 @@
     "cost": {
       "card": "牌",
       "cards": "牌",
+      "countAnyNumber": "任意",
       "discard": "弃{{count}}张{{cards}}",
       "exile": "从{{zone}}放逐{{count}}张{{cards}}",
       "filteredCard": "{{types}}牌",

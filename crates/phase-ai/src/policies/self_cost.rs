@@ -50,6 +50,7 @@ use engine::game::players;
 use engine::game::quantity::resolve_quantity;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+    EXILE_COST_ANY_NUMBER,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::{CounterMatch, CounterType};
@@ -224,11 +225,23 @@ pub(crate) fn real_self_cost(
         // `Exile.count` is a plain `u32` here, so multiply directly —
         // `resolve_quantity` takes a `&QuantityExpr` and does not apply. Hand
         // exile is priced as a discard; graveyard exile is cheap.
-        AbilityCost::Exile { count, zone, .. } => match zone {
-            Some(Zone::Graveyard) => (*count as f64) * penalties.self_cost_exile_graveyard_per_card,
-            Some(Zone::Hand) => (*count as f64) * penalties.self_cost_discard_per_card,
-            _ => 0.0,
-        },
+        AbilityCost::Exile { count, zone, .. } => {
+            // CR 601.2b + CR 602.2b: the any-number sentinel (March cycle,
+            // Gorex) chooses its count at payment time, so the compact value
+            // is not a literal count — price the marginal unit (one card),
+            // mirroring `sacrifice_leaf_cost`'s cheapest-single pricing for
+            // count-open sacrifice costs.
+            let cards = if *count == EXILE_COST_ANY_NUMBER {
+                1.0
+            } else {
+                *count as f64
+            };
+            match zone {
+                Some(Zone::Graveyard) => cards * penalties.self_cost_exile_graveyard_per_card,
+                Some(Zone::Hand) => cards * penalties.self_cost_discard_per_card,
+                _ => 0.0,
+            }
+        }
         AbilityCost::Composite { costs } => costs
             .iter()
             .map(|c| real_self_cost(state, ai_player, source_id, c, penalties))

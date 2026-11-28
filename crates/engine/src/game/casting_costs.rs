@@ -12,7 +12,7 @@ use crate::types::ability::{
     ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
     SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
     StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
-    TypedFilter, EXILE_COST_X,
+    TypedFilter, EXILE_COST_ANY_NUMBER, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, ReductionProvenance};
@@ -549,7 +549,7 @@ fn declaration_offerable_reserving(
         .as_ref()
         .and_then(|latch| super::casting::latch_payment_terms_state(state, latch));
     let state = terms_state.as_ref().unwrap_or(state);
-    let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
+    let exile_this_way_cost = is_exile_any_number_cost(&cost);
     let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
     if let Some(residual) = split.residual.as_ref() {
         if !residual.is_payable_for_spell(state, player, pending.object_id) {
@@ -1364,11 +1364,7 @@ pub(crate) fn handle_decide_additional_cost(
     // CR 601.2f: An exile-this-way reduction cannot be calculated until the
     // caster has selected the cards; recomputing here could count an unrelated
     // older tracked set. The selection handler publishes the fresh set first.
-    if optional_cost_paid
-        && !cost_to_pay
-            .as_ref()
-            .is_some_and(is_exile_any_number_effect_cost)
-    {
+    if optional_cost_paid && !cost_to_pay.as_ref().is_some_and(is_exile_any_number_cost) {
         recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
@@ -7719,6 +7715,16 @@ pub(crate) fn handle_behold_for_cost(
 /// `zone = Hand`). CR 118.9a authorizes alternative costs; CR 601.2b covers
 /// cost announcement; CR 601.2h covers payment. The only zone-specific branch
 /// is the "still in zone" re-validation against the chosen cards.
+///
+/// CR 601.2b + CR 602.2b + CR 701.13: An "exile any number" cost — typed or
+/// legacy ChangeZone shape — announces its count at cast/activation and
+/// pays any subset of the eligible cards with `ThisWayCause::Exiled`,
+/// preserving the selected set for its cast-time "for each card exiled this
+/// way" reduction. The any-number branch is checked first with bounds
+/// `(0, expected)` and everything else pays the exact count, matching the
+/// pre-merge router order; both branches converge on the single finish
+/// call below (CLAUDE.md "Single authority for ability costs": callers
+/// dispatch here, they never inspect the cost shape themselves).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_exile_for_cost(
     state: &mut GameState,
@@ -7731,70 +7737,31 @@ pub(crate) fn handle_exile_for_cost(
     paid_cost: Option<&AbilityCost>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let (bounds, paid_filter, this_way_cause) =
+        match paid_cost.and_then(exile_any_number_cost_parts) {
+            Some((_, filter)) => ((0, expected), filter, Some(ThisWayCause::Exiled)),
+            None => (
+                (expected, expected),
+                paid_cost
+                    .and_then(super::casting::find_non_self_exile)
+                    .and_then(|(_, _, filter)| filter),
+                None,
+            ),
+        };
     finish_exile_selection_for_cost(
         state,
         player,
         pending,
-        (expected, expected),
+        bounds,
         legal_cards,
         chosen,
-        paid_cost
-            .and_then(super::casting::find_non_self_exile)
-            .and_then(|(_, _, filter)| filter),
-        None,
+        paid_filter,
+        this_way_cause,
         events,
         "card(s)",
         "Selected card not eligible for exile",
         |state, player, id, _pending| {
             // Re-validate: chosen cards must still be in the cost's source zone.
-            let still_in_zone = state
-                .players
-                .get(player.0 as usize)
-                .is_some_and(|p| match zone {
-                    ExileCostSourceZone::Hand => p.hand.contains(&id),
-                    ExileCostSourceZone::Graveyard => state.graveyard_of(p.id).contains(&id),
-                });
-            if !still_in_zone {
-                return Err(EngineError::InvalidAction(format!(
-                    "Selected card is no longer in {:?}",
-                    zone.as_zone()
-                )));
-            }
-            Ok(())
-        },
-    )
-}
-
-/// CR 601.2b + CR 601.2h + CR 701.13: Complete an optional "exile any
-/// number" additional cost, preserving the selected set for its cast-time
-/// "for each card exiled this way" reduction.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn handle_exile_any_number_for_cost(
-    state: &mut GameState,
-    player: PlayerId,
-    zone: ExileCostSourceZone,
-    pending: PendingCast,
-    maximum: usize,
-    legal_cards: &[ObjectId],
-    chosen: &[ObjectId],
-    paid_cost: Option<&AbilityCost>,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    finish_exile_selection_for_cost(
-        state,
-        player,
-        pending,
-        (0, maximum),
-        legal_cards,
-        chosen,
-        paid_cost
-            .and_then(exile_any_number_effect_cost_parts)
-            .map(|(_, filter)| filter),
-        Some(ThisWayCause::Exiled),
-        events,
-        "card(s)",
-        "Selected card not eligible for exile",
-        |state, player, id, _pending| {
             let still_in_zone = state
                 .players
                 .get(player.0 as usize)
@@ -7920,7 +7887,13 @@ fn finish_exile_selection_for_cost(
 
     // CR 601.2f: Cost reductions that count cards exiled this way read the
     // fresh payment set, never an unrelated resolution's tracked set.
-    if let Some(cause) = this_way_cause {
+    // Activation pendings skip the inline publish + recompute: their "exiled
+    // this way" readback (Painbringer's -X/-X) resolves later, off the stack,
+    // so the set is published at completion with a concrete-id binding
+    // instead — the aggregate-cost pattern.
+    let activation_tracked_set =
+        this_way_cause.is_some() && pending.activation_ability_index.is_some();
+    if let Some(cause) = this_way_cause.filter(|_| !activation_tracked_set) {
         state.chain_tracked_set_id = None;
         super::effects::publish_tracked_set_with_causes(
             state,
@@ -7984,6 +7957,11 @@ fn finish_exile_selection_for_cost(
             .and_then(super::casting::remove_selected_non_self_exile_cost);
     }
 
+    let completion = if activation_tracked_set {
+        PendingCostMoveCompletion::PublishExileTrackedSet
+    } else {
+        PendingCostMoveCompletion::FinishPending
+    };
     finish_cost_object_moves(
         state,
         player,
@@ -7991,7 +7969,7 @@ fn finish_exile_selection_for_cost(
         chosen.to_vec(),
         0,
         Zone::Exile,
-        PendingCostMoveCompletion::FinishPending,
+        completion,
         None,
         cost_event_start,
         false,
@@ -8647,20 +8625,45 @@ fn surface_next_interactive_activation_cost_leg(
             zone,
             filter,
         );
-        if eligible.len() < count as usize {
+        // CR 601.2b via CR 602.2b: the any-number sentinel chooses its count
+        // here — the whole eligible set is the maximum and zero is legal.
+        let maximum = if count == EXILE_COST_ANY_NUMBER {
+            eligible.len()
+        } else {
+            count as usize
+        };
+        if eligible.len() < maximum {
             return Err(EngineError::ActionNotAllowed(
                 "Not enough eligible cards to exile".into(),
             ));
         }
+        // An any-number leg attaches itself to the resume so the dispatch
+        // guard routes it to the (0, max) handler even inside a composite —
+        // a zone/count re-derivation at resume time cannot tell two
+        // same-zone legs apart. Fixed legs keep the bare resume; their
+        // exact-count handler reads nothing from an attached cost.
+        let resume = if count == EXILE_COST_ANY_NUMBER {
+            CostResume::SpellCost {
+                spell: Box::new(pending.clone()),
+                cost: Box::new(AbilityCost::Exile {
+                    count,
+                    zone: Some(zone.as_zone()),
+                    filter: filter.cloned(),
+                }),
+                source: SpellCostSource::Other,
+            }
+        } else {
+            CostResume::Spell {
+                spell: Box::new(pending.clone()),
+            }
+        };
         return Ok(Some(WaitingFor::PayCost {
             player,
             kind: PayCostKind::ExileFromZone { zone },
             choices: eligible,
-            count: count as usize,
+            count: maximum,
             min_count: 0,
-            resume: CostResume::Spell {
-                spell: Box::new(pending.clone()),
-            },
+            resume,
         }));
     }
 
@@ -12798,9 +12801,11 @@ fn pay_additional_cost_with_source(
         Ok(None) => {}
     }
 
-    // CR 601.2b + CR 601.2h: Legacy card data represents an optional
-    // "exile any number of [quality] cards" cost as ChangeZone. Surface every
-    // eligible card and allow the caster to select any subset.
+    // CR 601.2b + CR 601.2h: Fallback for an optional "exile any number
+    // of [quality] cards" cost the typed production could not read, still
+    // represented as ChangeZone. Surface every eligible card and allow the
+    // caster to select any subset. New parses take the typed
+    // `AbilityCost::Exile` arm below instead.
     if let Some((zone, filter)) = exile_any_number_effect_cost_parts(&cost) {
         let eligible = super::casting::find_eligible_exile_for_cost_targets(
             state,
@@ -13360,6 +13365,10 @@ fn pay_additional_cost_with_source(
             // always excluded. The narrow `ExileCostSourceZone` makes invalid
             // zones unrepresentable downstream — `try_from_zone` is the single
             // construction site.
+            // CR 601.2b + CR 602.2b: the any-number sentinel (March cycle,
+            // Gorex) chooses its count here — the whole eligible set is the
+            // maximum and zero is legal, exactly like the legacy
+            // EffectCost arm above.
             let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
                 .expect("match guard restricts zone to Hand or Graveyard");
             let eligible = super::casting::find_eligible_exile_for_cost_targets(
@@ -13370,7 +13379,12 @@ fn pay_additional_cost_with_source(
                 narrow_zone,
                 filter.as_ref(),
             );
-            if eligible.len() < count as usize {
+            let maximum = if count == EXILE_COST_ANY_NUMBER {
+                eligible.len()
+            } else {
+                count as usize
+            };
+            if eligible.len() < maximum {
                 return Err(EngineError::ActionNotAllowed(format!(
                     "Not enough eligible cards in {zone:?} to exile"
                 )));
@@ -13379,7 +13393,7 @@ fn pay_additional_cost_with_source(
                 player,
                 kind: PayCostKind::ExileFromZone { zone: narrow_zone },
                 choices: eligible,
-                count: count as usize,
+                count: maximum,
                 min_count: 0,
                 resume: CostResume::SpellCost {
                     spell: Box::new(pending),
@@ -13685,8 +13699,44 @@ pub(crate) fn handle_reveal_for_cost(
     finish_pending_cost_or_cast(state, player, pending, events)
 }
 
-pub(crate) fn is_exile_any_number_effect_cost(cost: &AbilityCost) -> bool {
-    exile_any_number_effect_cost_parts(cost).is_some()
+/// CR 601.2b + CR 602.2b: whether `cost` is an "exile any number" cost —
+/// either the typed [`AbilityCost::Exile`] production (which carries the
+/// [`EXILE_COST_ANY_NUMBER`] sentinel) or the legacy [`AbilityCost::EffectCost`]
+/// `ChangeZone` shape the parser used to emit for the same text. New parses
+/// always take the typed form; the legacy arm stays as the fallback for exile
+/// costs the typed production cannot read.
+pub(crate) fn is_exile_any_number_cost(cost: &AbilityCost) -> bool {
+    exile_any_number_cost_parts(cost).is_some()
+}
+
+/// Parts of an "exile any number" cost in either shape: the source zone and
+/// the cost filter (`None` when the typed cost carries no filter).
+fn exile_any_number_cost_parts(
+    cost: &AbilityCost,
+) -> Option<(ExileCostSourceZone, Option<&TargetFilter>)> {
+    if let Some((zone, filter)) = exile_any_number_typed_cost_parts(cost) {
+        return Some((zone, filter));
+    }
+    exile_any_number_effect_cost_parts(cost).map(|(zone, filter)| (zone, Some(filter)))
+}
+
+/// Parts of a typed "exile any number" cost: [`AbilityCost::Exile`] with the
+/// [`EXILE_COST_ANY_NUMBER`] sentinel and a hand/graveyard source zone.
+fn exile_any_number_typed_cost_parts(
+    cost: &AbilityCost,
+) -> Option<(ExileCostSourceZone, Option<&TargetFilter>)> {
+    let AbilityCost::Exile {
+        count,
+        zone: Some(zone),
+        filter,
+    } = cost
+    else {
+        return None;
+    };
+    if *count != EXILE_COST_ANY_NUMBER {
+        return None;
+    }
+    Some((ExileCostSourceZone::try_from_zone(*zone)?, filter.as_ref()))
 }
 
 fn exile_any_number_effect_cost_parts(
@@ -14845,7 +14895,7 @@ fn exile_any_number_cost_reduction_capacity(
     let Some(AdditionalCost::Optional { cost, .. }) = spell.additional_cost.as_ref() else {
         return 0;
     };
-    let Some((zone, cost_filter)) = exile_any_number_effect_cost_parts(cost) else {
+    let Some((zone, cost_filter)) = exile_any_number_cost_parts(cost) else {
         return 0;
     };
     let eligible = super::casting::find_eligible_exile_for_cost_targets(
@@ -14854,7 +14904,7 @@ fn exile_any_number_cost_reduction_capacity(
         spell_id,
         None,
         zone,
-        Some(cost_filter),
+        cost_filter,
     );
     let ctx = super::filter::FilterContext::from_source(state, spell_id);
 
@@ -36717,6 +36767,16 @@ its replicate cost was paid.)\nDraw a card.";
             .additional_cost
             .clone()
             .expect("March additional cost parses");
+        assert!(
+            matches!(
+                &additional_cost,
+                AdditionalCost::Optional {
+                    cost: AbilityCost::Exile { count, .. },
+                    ..
+                } if *count == crate::types::ability::EXILE_COST_ANY_NUMBER
+            ),
+            "March exile-any-number cost lowers to the typed sentinel, got {additional_cost:?}"
+        );
         let symbolic_cost = ManaCost::Cost {
             shards: vec![ManaCostShard::X, ManaCostShard::White],
             generic: 0,
@@ -36928,6 +36988,309 @@ its replicate cost was paid.)\nDraw a card.";
         assert_eq!(state.objects[&blue].zone, Zone::Hand);
         assert!(state.stack.iter().any(|entry| entry.source_id == march));
         assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    #[test]
+    fn legacy_effect_cost_exile_shape_still_offers_any_number_fallback() {
+        // The parser no longer emits a ChangeZone effect-cost for "exile any
+        // number" text, but the fallback arm stays for exile costs the typed
+        // production cannot read (and any not-yet-regenerated card data): it
+        // must still surface every eligible card with a zero minimum.
+        let caster = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        let legacy = AbilityCost::EffectCost {
+            effect: Box::new(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(crate::types::ability::ControllerRef::You)
+                        .properties(vec![FilterProp::HasColor {
+                            color: ManaColor::White,
+                        }]),
+                ),
+                owner_library: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }),
+        };
+        assert!(
+            is_exile_any_number_cost(&legacy),
+            "the legacy shape stays inside the unified any-number predicate"
+        );
+        let additional_cost = AdditionalCost::Optional {
+            cost: legacy,
+            repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+        };
+        let symbolic_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 1,
+        };
+        let spell = create_object(
+            &mut state,
+            CardId(9_100),
+            caster,
+            "Legacy Exiler".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&spell).unwrap().mana_cost = symbolic_cost.clone();
+        state.objects.get_mut(&spell).unwrap().additional_cost = Some(additional_cost.clone());
+        let white = create_object(
+            &mut state,
+            CardId(9_101),
+            caster,
+            "White Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&white)
+            .unwrap()
+            .color
+            .push(ManaColor::White);
+        let blue = create_object(
+            &mut state,
+            CardId(9_102),
+            caster,
+            "Blue Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&blue)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            spell,
+            caster,
+        );
+        let pending = PendingCast::new(spell, CardId(9_100), ability, symbolic_cost.clone());
+        let mut events = Vec::new();
+        crate::game::stack::push_to_stack(
+            &mut state,
+            StackEntry {
+                id: spell,
+                source_id: spell,
+                controller: caster,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(9_100),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut events,
+        );
+        let waiting = handle_decide_additional_cost(
+            &mut state,
+            caster,
+            pending,
+            &additional_cost,
+            0,
+            &mut events,
+        )
+        .expect("legacy cost declaration succeeds");
+        assert!(matches!(
+            &waiting,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Hand,
+                },
+                choices,
+                count: 1,
+                min_count: 0,
+                ..
+            } if choices == &vec![white]
+        ));
+    }
+
+    /// F2-T4: the unified `handle_exile_for_cost` routes the legacy
+    /// `EffectCost(ChangeZone)` shape down the any-number branch — zero
+    /// accepted, `ThisWayCause::Exiled` published — exactly like the typed
+    /// sentinel cost (the reach-guard arm below).
+    ///
+    /// Synthetic-cost label (check-7a): no current-production parse emits
+    /// the legacy shape (the parser emits typed `AbilityCost::Exile`);
+    /// nearest printed card is March of Otherworldly Light (same Oracle
+    /// text, previously legacy-emitted); behavior retained for backward
+    /// compatibility with predating game states.
+    #[test]
+    fn unified_exile_resolver_routes_legacy_shape_to_any_number_branch() {
+        fn setup() -> (GameState, PlayerId, ObjectId, PendingCast) {
+            let caster = PlayerId(0);
+            let mut state = GameState::new_two_player(42);
+            // Zero symbolic cost: the test pins dispatch bounds and the
+            // tracked-set publish, so completion must not trip the mana
+            // gate on the way out.
+            let symbolic_cost = ManaCost::zero();
+            let spell = create_object(
+                &mut state,
+                CardId(9_200),
+                caster,
+                "Legacy Exiler".to_string(),
+                Zone::Hand,
+            );
+            state.objects.get_mut(&spell).unwrap().mana_cost = symbolic_cost.clone();
+            let white = create_object(
+                &mut state,
+                CardId(9_201),
+                caster,
+                "White Card".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&white)
+                .unwrap()
+                .color
+                .push(ManaColor::White);
+            let ability = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                spell,
+                caster,
+            );
+            let pending = PendingCast::new(spell, CardId(9_200), ability, symbolic_cost);
+            let mut events = Vec::new();
+            crate::game::stack::push_to_stack(
+                &mut state,
+                StackEntry {
+                    id: spell,
+                    source_id: spell,
+                    controller: caster,
+                    kind: StackEntryKind::Spell {
+                        card_id: CardId(9_200),
+                        ability: None,
+                        casting_variant: CastingVariant::Normal,
+                        actual_mana_spent: 0,
+                    },
+                },
+                &mut events,
+            );
+            (state, caster, white, pending)
+        }
+
+        let white_filter = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(crate::types::ability::ControllerRef::You)
+                .properties(vec![FilterProp::HasColor {
+                    color: ManaColor::White,
+                }]),
+        );
+        let legacy = AbilityCost::EffectCost {
+            effect: Box::new(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                origin: Some(Zone::Hand),
+                destination: Zone::Exile,
+                target: white_filter.clone(),
+                owner_library: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_transformed: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            }),
+        };
+        let typed = AbilityCost::Exile {
+            count: EXILE_COST_ANY_NUMBER,
+            zone: Some(Zone::Hand),
+            filter: Some(white_filter),
+        };
+
+        for (label, cost) in [("legacy", legacy), ("typed", typed)] {
+            // Zero accepted, and a fresh EMPTY set published (not a prior
+            // producer's): an exact-first regression rejects here with
+            // "Must exile exactly 1".
+            {
+                let (mut state, caster, white, pending) = setup();
+                let ids_before: std::collections::HashSet<_> =
+                    state.tracked_object_sets.keys().copied().collect();
+                let mut events = Vec::new();
+                let result = handle_exile_for_cost(
+                    &mut state,
+                    caster,
+                    ExileCostSourceZone::Hand,
+                    pending,
+                    1,
+                    &[white],
+                    &[],
+                    Some(&cost),
+                    &mut events,
+                );
+                assert!(
+                    result.is_ok(),
+                    "{label}: zero must be accepted, got {result:?}"
+                );
+                assert_eq!(state.objects[&white].zone, Zone::Hand);
+                let fresh: Vec<_> = state
+                    .tracked_object_sets
+                    .iter()
+                    .filter(|(id, _)| !ids_before.contains(id))
+                    .collect();
+                assert_eq!(
+                    fresh.len(),
+                    1,
+                    "{label}: one fresh set must be published, got {fresh:?}"
+                );
+                assert!(
+                    fresh[0].1.is_empty(),
+                    "{label}: the fresh set must be empty, got {fresh:?}"
+                );
+            }
+            // One exiled, stamped `Exiled` so the "exiled this way"
+            // readback binds this payment's set.
+            {
+                let (mut state, caster, white, pending) = setup();
+                let mut events = Vec::new();
+                let result = handle_exile_for_cost(
+                    &mut state,
+                    caster,
+                    ExileCostSourceZone::Hand,
+                    pending,
+                    1,
+                    &[white],
+                    &[white],
+                    Some(&cost),
+                    &mut events,
+                );
+                assert!(
+                    result.is_ok(),
+                    "{label}: one must be accepted, got {result:?}"
+                );
+                assert_eq!(state.objects[&white].zone, Zone::Exile);
+                assert!(
+                    state
+                        .tracked_set_member_causes
+                        .values()
+                        .any(|causes| { causes.get(&white) == Some(&ThisWayCause::Exiled) }),
+                    "{label}: the exiled card must be stamped Exiled, got {:?}",
+                    state.tracked_set_member_causes
+                );
+            }
+        }
     }
 
     /// PROBE #7575: an exile-scoped grant (InZone{Exile} on the affected

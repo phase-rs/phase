@@ -2528,6 +2528,7 @@
     "cost": {
       "card": "kartę",
       "cards": "karty",
+      "countAnyNumber": "dowolne",
       "filteredCard": "kartę {{types}}",
       "filteredCards": "karty {{types}}",
       "nonType": "nie-{{type}}",
