@@ -182,7 +182,7 @@ Hard failures:
 
 ### CR-annotation diff gate
 
-`docs/MagicCompRules.txt` is gitignored and may be absent in a fresh worktree; if so, run `./scripts/fetch-comp-rules.sh` once. Before returning, grep every CR number you added or changed **in the diff or in a new untracked file** against it — not just the ones you remember writing:
+`docs/MagicCompRules.txt` is gitignored and may be absent or a different edition in a fresh worktree; run `./scripts/check-cr-edition.sh`, and if it does not report `OK`, run `./scripts/fetch-comp-rules.sh --force` to get the edition pinned in `docs/MagicCompRules.edition`. Before returning, grep every CR number you added or changed **in the diff or in a new untracked file** against it — not just the ones you remember writing:
 
 ```bash
 { git diff
