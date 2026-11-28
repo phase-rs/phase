@@ -60252,9 +60252,9 @@ mod x_sentinel_tap_creatures_activation_cost {
             costs.iter().any(|leg| matches!(
                 leg,
                 AbilityCost::TapCreatures {
-                    requirement: TapCreaturesRequirement::Count { count },
+                    requirement: TapCreaturesRequirement::AnnouncedX,
                     ..
-                } if *count == u32::MAX
+                }
             )),
             "Glacian's cost must include the u32::MAX X-sentinel TapCreatures leg, got {costs:?}"
         );
@@ -60340,12 +60340,18 @@ mod x_sentinel_tap_creatures_activation_cost {
         )
         .expect("CR 107.3a: activating an X-sentinel tap cost with 3 eligible artifacts is legal");
 
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseXValue { min: 0, max: 3, .. }
+        ));
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+
         match &state.waiting_for {
             WaitingFor::PayCost {
                 player,
                 kind:
                     PayCostKind::TapCreatures {
-                        mode: TapCreaturesSelectionMode::VariableX,
+                        mode: TapCreaturesSelectionMode::Fixed,
                     },
                 choices,
                 count,
@@ -60357,7 +60363,7 @@ mod x_sentinel_tap_creatures_activation_cost {
                     *count, 3,
                     "the X-sentinel upper bound is the eligible count, not u32::MAX"
                 );
-                assert_eq!(*min_count, 0, "CR 107.3a: X=0 is always a legal choice");
+                assert_eq!(*min_count, 3);
                 let mut sorted = choices.clone();
                 sorted.sort();
                 let mut expected = artifacts.clone();
@@ -60398,24 +60404,17 @@ mod x_sentinel_tap_creatures_activation_cost {
                 },
             )
             .expect("activation must surface the tap-cost prompt");
-            assert!(
-                matches!(
-                    state.waiting_for,
-                    WaitingFor::PayCost {
-                        kind: PayCostKind::TapCreatures {
-                            mode: TapCreaturesSelectionMode::VariableX,
-                        },
-                        ..
-                    }
-                ),
-                "positive reach guard: every case below must start from the real tap-cost prompt"
-            );
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ChooseXValue { min: 0, max: 3, .. }
+            ));
             (state, artifacts)
         }
 
         // X = 2 of 3 eligible: strictly between the bounds — the exact case the
         // old `chosen.len() != count` check rejected.
         let (mut state, artifacts) = activated_fixture();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
         apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -60434,31 +60433,13 @@ mod x_sentinel_tap_creatures_activation_cost {
 
         // X = 0: the lower bound.
         let (mut state, _artifacts) = activated_fixture();
-        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] })
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 })
             .expect("CR 107.3a: X=0 is a legal choice for an X-sentinel tap cost");
 
         // X above the eligible maximum must still be rejected — the fix widens
         // the accepted range to [0, eligible], it does not remove the ceiling.
         let (mut state, artifacts) = activated_fixture();
-        let over_max = vec![artifacts[0], artifacts[0], artifacts[1], artifacts[2]];
-        let err = apply_as_current(
-            &mut state,
-            GameAction::SelectCards {
-                cards: over_max.clone(),
-            },
-        )
-        .expect_err("selecting more entries than eligible artifacts must be rejected");
-        // Prove the CEILING is what fired, not some other rejection: the range
-        // check's own message names the advertised `[0, 3]` window. A bare
-        // `InvalidAction(_)` assertion would also pass if the duplicate entry
-        // tripped an unrelated guard first.
-        let EngineError::InvalidAction(message) = &err else {
-            panic!("over-max selection must be an InvalidAction, got {err:?}");
-        };
-        assert!(
-            message.contains("between 0 and 3 creature(s)"),
-            "the ceiling must reject with the advertised [0, eligible] window, got {message:?}"
-        );
+        assert!(apply_as_current(&mut state, GameAction::ChooseX { value: 4 }).is_err());
         assert!(
             !state.objects[&artifacts[2]].tapped,
             "a rejected selection must not tap anything"
@@ -60470,6 +60451,7 @@ mod x_sentinel_tap_creatures_activation_cost {
         // choices plus the latecomer — so this stays INSIDE the `[0, 3]` ceiling
         // and can only be rejected by the eligibility check.
         let (mut state, artifacts) = activated_fixture();
+        apply_as_current(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
         let ineligible =
             create_untapped_artifact(&mut state, PlayerId(0), CardId(7_399), "Latecomer");
         let with_ineligible = vec![artifacts[0], artifacts[1], ineligible];
@@ -60530,6 +60512,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             },
         )
         .expect("activation must surface the tap-cost prompt");
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
         apply_as_current(
             &mut state,
             GameAction::SelectCards {
@@ -60657,11 +60640,17 @@ mod x_sentinel_tap_creatures_activation_cost {
         )
         .expect("a self-matching source must still be able to activate the ability");
 
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseXValue { min: 0, max: 2, .. }
+        ));
+        apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+
         match &state.waiting_for {
             WaitingFor::PayCost {
                 kind:
                     PayCostKind::TapCreatures {
-                        mode: TapCreaturesSelectionMode::VariableX,
+                        mode: TapCreaturesSelectionMode::Fixed,
                     },
                 choices,
                 count,
@@ -60681,7 +60670,7 @@ mod x_sentinel_tap_creatures_activation_cost {
                     "only the two OTHER artifacts are eligible"
                 );
                 assert_eq!(*count, 2, "the upper bound excludes the source itself");
-                assert_eq!(*min_count, 0);
+                assert_eq!(*min_count, 2);
             }
             other => panic!("expected PayCost {{ TapCreatures }}, got {other:?}"),
         }
@@ -60834,7 +60823,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             },
         )
         .expect("activation must surface the tap-cost prompt");
-        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] })
+        apply_as_current(&mut state, GameAction::ChooseX { value: 0 })
             .expect("CR 107.3a: choosing X=0 must be accepted");
 
         for _ in 0..10 {
@@ -61060,7 +61049,9 @@ mod aggregate_tap_cost_does_not_clobber_chosen_x {
 mod hazel_x_sentinel_mana_ability {
     use super::*;
     use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::types::ability::TapCreaturesRequirement;
     use crate::types::ability::TapCreaturesSelectionMode;
+    use crate::types::game_state::PayableResource;
 
     /// Hazel of the Rootbloom's verbatim mana ability (checked against
     /// `data/card-data.json`). Only the activated mana ability is needed; the
@@ -61109,7 +61100,7 @@ mod hazel_x_sentinel_mana_ability {
                     .as_ref()
                     .and_then(crate::game::casting::find_tap_creatures_cost)
                     .is_some_and(|(requirement, _)| {
-                        requirement.selection_mode() == TapCreaturesSelectionMode::VariableX
+                        matches!(requirement, TapCreaturesRequirement::AnnouncedX)
                     })
             })
             .expect("Hazel's Oracle text must parse to an X-sentinel TapCreatures mana ability");
@@ -61175,6 +61166,18 @@ mod hazel_x_sentinel_mana_ability {
             })
             .expect("activation must surface the tap-cost prompt");
 
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::TapCountX,
+                max: 2,
+                ..
+            }
+        ));
+        runner
+            .act(GameAction::SubmitPayAmount { amount: 2 })
+            .unwrap();
+
         // Reach guard: the prompt really is the X-sentinel tap window with a
         // zero floor and the two eligible tokens on offer.
         let WaitingFor::PayCost {
@@ -61189,8 +61192,8 @@ mod hazel_x_sentinel_mana_ability {
                 runner.state().waiting_for
             );
         };
-        assert_eq!(*mode, TapCreaturesSelectionMode::VariableX);
-        assert_eq!((*count, *min_count), (2, 0));
+        assert_eq!(*mode, TapCreaturesSelectionMode::Fixed);
+        assert_eq!((*count, *min_count), (2, 2));
 
         // (a) CR 601.2h: the announced selection must be ACCEPTED.
         runner
@@ -61301,7 +61304,7 @@ mod hazel_x_sentinel_mana_ability {
                     .as_ref()
                     .and_then(crate::game::casting::find_tap_creatures_cost)
                     .is_some_and(|(requirement, _)| {
-                        requirement.selection_mode() == TapCreaturesSelectionMode::Fixed
+                        requirement.selection_mode() == Some(TapCreaturesSelectionMode::Fixed)
                             && requirement.fixed_count() == Some(2)
                     })
             })
@@ -61370,11 +61373,9 @@ mod hazel_x_sentinel_mana_ability {
         assert!(
             matches!(
                 &runner.state().waiting_for,
-                WaitingFor::PayCost {
-                    kind: PayCostKind::TapCreatures {
-                        mode: TapCreaturesSelectionMode::VariableX
-                    },
-                    min_count: 0,
+                WaitingFor::PayAmountChoice {
+                    resource: PayableResource::TapCountX,
+                    max: 1,
                     ..
                 }
             ),
@@ -61383,7 +61384,7 @@ mod hazel_x_sentinel_mana_ability {
         );
 
         runner
-            .act(GameAction::SelectCards { cards: vec![] })
+            .act(GameAction::SubmitPayAmount { amount: 0 })
             .expect("CR 107.3a: X=0 is a legal announcement, so an empty selection is legal");
 
         // The negative: the SAME prompt must not come back.
@@ -61435,20 +61436,17 @@ mod hazel_x_sentinel_mana_ability {
             })
             .expect("activation must surface the tap-cost prompt");
 
-        let err = runner
-            .act(GameAction::SelectCards {
-                cards: vec![tokens[0], tokens[1], tokens[0]],
-            })
-            .expect_err("selecting more entries than eligible tokens must be rejected");
-        // Prove the RANGE CHECK fired, not some unrelated guard: its message
-        // names the advertised `[0, 2]` window.
-        let EngineError::InvalidAction(message) = &err else {
-            panic!("an over-ceiling selection must be an InvalidAction, got {err:?}");
-        };
-        assert!(
-            message.contains("between 0 and 2 creature(s)"),
-            "the ceiling must reject with the advertised [0, eligible] window, got {message:?}"
-        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::TapCountX,
+                max: 2,
+                ..
+            }
+        ));
+        assert!(runner
+            .act(GameAction::SubmitPayAmount { amount: 3 })
+            .is_err());
         assert!(
             tokens.iter().all(|id| !runner.state().objects[id].tapped),
             "a rejected selection must not tap anything"
@@ -61740,7 +61738,7 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
                     .as_ref()
                     .and_then(crate::game::casting::find_tap_creatures_cost)
                     .is_some_and(|(requirement, _)| {
-                        requirement.selection_mode() == TapCreaturesSelectionMode::Fixed
+                        requirement.selection_mode() == Some(TapCreaturesSelectionMode::Fixed)
                     })
             })
             .expect("the fixture must parse to a fixed-count TapCreatures mana ability");

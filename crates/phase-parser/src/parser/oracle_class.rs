@@ -17,7 +17,7 @@ use super::oracle::has_unimplemented;
 use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::parse_activation_cost;
 use super::oracle_effect::{
     lower_ability_ir, parse_ability_ir_standalone, parse_effect_chain_with_provenance,
 };
@@ -150,7 +150,7 @@ pub(crate) fn parse_class_oracle_text(
                 body,
                 shell: AbilityShellIr {
                     // CR 602.1a: the activation cost, everything before the colon.
-                    cost: Some(parse_oracle_cost(cost_text)),
+                    cost: Some(parse_activation_cost(cost_text)),
                     description: Some(description.clone()),
                     // CR 602.1b + CR 716.2a: "[Cost]: Level N" means "Activate
                     // only if this Class is level N-1 and only as a sorcery"

@@ -2218,6 +2218,40 @@ fn shortcut_reply_projection(waiting_for: &WaitingFor) -> Option<ShortcutReplyPr
     })
 }
 
+fn payment_window_mana_actions(state: &GameState, player: PlayerId) -> Vec<GameAction> {
+    let mut actions = super::mana_sources::mana_actions_for_player(state, player, EXPLICIT_MANA);
+    let has_written_tap_announcement = |source: ObjectId, index: usize| {
+        state
+            .objects
+            .get(&source)
+            .and_then(|object| object.abilities.get(index))
+            .and_then(|ability| ability.cost.as_ref())
+            .is_some_and(super::casting_costs::activation_has_announced_tap_count)
+    };
+    if actions.iter().any(|action| {
+        matches!(action, GameAction::ActivateAbility { source_id, ability_index, .. }
+            if has_written_tap_announcement(*source_id, *ability_index))
+    }) {
+        actions.extend(
+            super::mana_sources::mana_source_selections(state, player, EXPLICIT_MANA)
+                .into_iter()
+                .filter(|selection| {
+                    selection.ability_index.is_some_and(|index| {
+                        has_written_tap_announcement(selection.source.object_id, index)
+                    })
+                })
+                .filter(|selection| {
+                    !matches!(
+                        super::mana_sources::priority_mana_route(state, selection),
+                        Some(super::mana_sources::PriorityManaRoute::LandTap)
+                    )
+                })
+                .map(|selection| GameAction::ActivateManaSource { selection }),
+        );
+    }
+    actions
+}
+
 fn mana_payment_direct_actions(
     state: &GameState,
     player: PlayerId,
@@ -2241,7 +2275,7 @@ fn mana_payment_direct_actions(
     if activation_upper_bound.is_none_or(|count| count > MAX_INTERACTION_LIST_LEN) {
         return Err(InteractionReasonCode::PayloadTooLarge);
     }
-    let mut actions = super::mana_sources::mana_actions_for_player(state, player, EXPLICIT_MANA);
+    let mut actions = payment_window_mana_actions(state, player);
     let tapped_for_mana = state
         .lands_tapped_for_mana
         .get(&player)
@@ -2487,8 +2521,7 @@ fn direct_choice_projection(
             if *player != semantic_owner {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
-            let mut actions =
-                super::mana_sources::mana_actions_for_player(state, *player, EXPLICIT_MANA);
+            let mut actions = payment_window_mana_actions(state, *player);
             // CR 601.2g-h + CR 118.3a: a manual window adds confirming and
             // directing pool units.
             if super::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode) {

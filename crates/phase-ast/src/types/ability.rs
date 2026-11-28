@@ -20047,9 +20047,17 @@ impl TapCreaturesAggregate {
 pub enum TapCreaturesRequirement {
     #[serde(rename = "count")]
     Count {
-        #[serde(default = "default_one")]
+        #[serde(
+            default = "default_one",
+            serialize_with = "serialize_fixed_tap_count",
+            deserialize_with = "deserialize_fixed_tap_count"
+        )]
         count: u32,
     },
+    /// CR 107.3a: bind to the X announced before choosing targets.
+    AnnouncedX,
+    /// CR 107.3f: bind to the number selected during resolution.
+    ResolutionX,
     Aggregate {
         stat: TapCreaturesAggregateStat,
         comparator: Comparator,
@@ -20086,10 +20094,10 @@ impl Default for TapCreaturesRequirement {
 /// exists to make unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TapCreaturesSelectionMode {
-    /// A fixed, non-X requirement (`count != u32::MAX`). The chosen count must
+    /// A concrete requirement. The chosen count must
     /// equal `count` exactly (`min_count == count`).
     Fixed,
-    /// CR 107.3a's `u32::MAX` X-sentinel ("Tap X untapped … you control"). The
+    /// CR 107.3f: "Tap X untapped … you control" during resolution. The
     /// chosen count ranges freely over `[0, eligible]` and — if and only if the
     /// mode is `VariableX` — the completion handler binds the resolving
     /// ability's X to the chosen count.
@@ -20121,7 +20129,15 @@ impl TapCreaturesRequirement {
     pub fn fixed_count(&self) -> Option<u32> {
         match self {
             Self::Count { count } => Some(*count),
-            Self::Aggregate { .. } => None,
+            Self::AnnouncedX | Self::ResolutionX | Self::Aggregate { .. } => None,
+        }
+    }
+
+    /// Substitute the X of this activation before surfacing payment.
+    pub fn bind_announced_x(&self, count: u32) -> Self {
+        match self {
+            Self::AnnouncedX => Self::count(count),
+            Self::Count { .. } | Self::ResolutionX | Self::Aggregate { .. } => *self,
         }
     }
 
@@ -20134,13 +20150,11 @@ impl TapCreaturesRequirement {
     /// carries the result through `PayCostKind::TapCreatures`, so downstream
     /// seams never re-derive "is this an X cost" from `min_count == 0` (which an
     /// aggregate selection also has).
-    pub fn selection_mode(&self) -> TapCreaturesSelectionMode {
+    pub fn selection_mode(&self) -> Option<TapCreaturesSelectionMode> {
         match self {
-            // CR 107.3a: `u32::MAX` is the X-sentinel for "Tap X untapped … you
-            // control", whose value the controller announces as the chosen
-            // count rather than reading it off the requirement.
-            Self::Count { count } if *count == u32::MAX => TapCreaturesSelectionMode::VariableX,
-            Self::Count { .. } => TapCreaturesSelectionMode::Fixed,
+            Self::AnnouncedX => None,
+            Self::ResolutionX => Some(TapCreaturesSelectionMode::VariableX),
+            Self::Count { .. } => Some(TapCreaturesSelectionMode::Fixed),
             Self::Aggregate {
                 stat,
                 comparator,
@@ -20151,11 +20165,13 @@ impl TapCreaturesRequirement {
                 // prompt, and a multi-seat team's per-hero prompts are built
                 // directly as VariableX by the payment authority.
                 ..
-            } => TapCreaturesSelectionMode::Aggregate(TapCreaturesAggregate {
-                stat: *stat,
-                comparator: *comparator,
-                value: *value,
-            }),
+            } => Some(TapCreaturesSelectionMode::Aggregate(
+                TapCreaturesAggregate {
+                    stat: *stat,
+                    comparator: *comparator,
+                    value: *value,
+                },
+            )),
         }
     }
 }
@@ -22058,7 +22074,14 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::Deserialize as _;
-    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    let mut raw = serde_json::Value::deserialize(d)?;
+    let cost = if raw["type"] == "AbilityCost" {
+        &mut raw["cost"]
+    } else {
+        &mut raw
+    };
+    normalize_legacy_tap_count(cost, Some(LegacyTapCountOwner::Resolution), "PayCost.cost")
+        .map_err(serde::de::Error::custom)?;
     // Try the modern AbilityCost shape first.
     if let Ok(cost) = serde_json::from_value::<AbilityCost>(raw.clone()) {
         return Ok(cost);
@@ -22067,6 +22090,71 @@ where
     let legacy: LegacyPaymentCost =
         serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
     Ok(legacy.into_ability_cost())
+}
+
+// LEGACY_TAP_COUNT_X_2026Q4: the count was shared by two distinct timings.
+const _LEGACY_TAP_COUNT_X_2026Q4: () = {
+    let major = parse_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
+    let minor = parse_version_component(env!("CARGO_PKG_VERSION_MINOR"));
+    assert!(
+        major == 0 && minor <= 149,
+        "LEGACY_TAP_COUNT_X_2026Q4: remove contextual tap-count decoding; see docs/LEGACY-COMPAT.md"
+    );
+};
+
+/// Recognize only the two historical encodings on a TapCreatures cost leaf.
+pub fn is_legacy_tap_count_x(value: &serde_json::Value) -> bool {
+    let max = Some(u64::from(u32::MAX));
+    value["type"] == "TapCreatures"
+        && (value["count"].as_u64() == max
+            || value["requirement"].as_u64() == max
+            || (value["requirement"]["requirement"] == "count"
+                && value["requirement"]["count"].as_u64() == max))
+}
+
+#[derive(Clone, Copy)]
+enum LegacyTapCountOwner {
+    Activation,
+    Resolution,
+}
+
+fn normalize_legacy_tap_count(
+    value: &mut serde_json::Value,
+    owner: Option<LegacyTapCountOwner>,
+    path: &str,
+) -> Result<(), String> {
+    if is_legacy_tap_count_x(value) {
+        let tag = match owner {
+            Some(LegacyTapCountOwner::Activation) => "announced_x",
+            Some(LegacyTapCountOwner::Resolution) => "resolution_x",
+            None => {
+                return Err(format!(
+                    "{path}: legacy tap X has no supported payment owner"
+                ))
+            }
+        };
+        let Some(fields) = value.as_object_mut() else {
+            return Err(format!("{path}: legacy tap X must be an object"));
+        };
+        if fields.contains_key("count") && fields.contains_key("requirement") {
+            return Err(format!("{path}: duplicate legacy tap X requirement"));
+        }
+        fields.remove("count");
+        fields.insert(
+            "requirement".into(),
+            serde_json::json!({ "requirement": tag }),
+        );
+    } else if matches!(value["type"].as_str(), Some("Composite" | "OneOf")) {
+        if let Some(legs) = value
+            .get_mut("costs")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for (index, leg) in legs.iter_mut().enumerate() {
+                normalize_legacy_tap_count(leg, owner, &format!("{path}.costs[{index}]"))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// CR 118.1: Legacy shadow type used ONLY by `deserialize_pay_cost_compat` to
@@ -30373,9 +30461,39 @@ where
         Tagged(TapCreaturesRequirement),
     }
     Ok(match Repr::deserialize(deserializer)? {
-        Repr::Legacy(count) => TapCreaturesRequirement::Count { count },
+        Repr::Legacy(count) => {
+            TapCreaturesRequirement::count(validate_fixed_tap_count::<D::Error>(count)?)
+        }
         Repr::Tagged(req) => req,
     })
+}
+
+fn deserialize_fixed_tap_count<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    validate_fixed_tap_count(u32::deserialize(deserializer)?)
+}
+
+fn serialize_fixed_tap_count<S>(count: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *count == u32::MAX {
+        return Err(serde::ser::Error::custom(
+            "legacy tap X cannot be serialized as a fixed count",
+        ));
+    }
+    serializer.serialize_u32(*count)
+}
+
+fn validate_fixed_tap_count<E: serde::de::Error>(count: u32) -> Result<u32, E> {
+    if count == u32::MAX {
+        return Err(E::custom(
+            "legacy tap-X count requires a verified cost owner",
+        ));
+    }
+    Ok(count)
 }
 
 fn default_player_filter_controller() -> PlayerFilter {
@@ -38808,7 +38926,7 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     reads_return_result: Option<(ReturnResultId, ReturnResultReadSpec)>,
     #[serde(default)]
-    cost: Option<AbilityCost>,
+    cost: Option<serde_json::Value>,
     #[serde(default)]
     sub_ability: Option<Box<AbilityDefinition>>,
     #[serde(default)]
@@ -38910,6 +39028,17 @@ struct AbilityDefinitionDe {
 impl<'de> Deserialize<'de> for AbilityDefinition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let de = AbilityDefinitionDe::deserialize(deserializer)?;
+        let cost = de
+            .cost
+            .map(|mut raw| {
+                let owner =
+                    (de.kind == AbilityKind::Activated).then_some(LegacyTapCountOwner::Activation);
+                normalize_legacy_tap_count(&mut raw, owner, "AbilityDefinition.cost")?;
+                serde_json::from_value(raw)
+                    .map_err(|error| format!("AbilityDefinition.cost: {error}"))
+            })
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
         let mut activation_restrictions = de.activation_restrictions;
         // CR 602.5d: migrate the legacy `sorcery_speed: bool` into the single
         // authority `activation_restrictions` (dedup if already present).
@@ -38924,7 +39053,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             reads_chosen_group: de.reads_chosen_group,
             declares_return_result: de.declares_return_result,
             reads_return_result: de.reads_return_result,
-            cost: de.cost,
+            cost,
             sub_ability: de.sub_ability,
             else_ability: de.else_ability,
             duration: de.duration,
@@ -51351,6 +51480,68 @@ mod tests {
         let json = serde_json::to_string(&costs).unwrap();
         let deserialized: Vec<AbilityCost> = serde_json::from_str(&json).unwrap();
         assert_eq!(costs, deserialized);
+    }
+
+    #[test]
+    fn tap_x_requirement_roundtrip_preserves_binding_time() {
+        for (requirement, tag, mode) in [
+            (TapCreaturesRequirement::AnnouncedX, "announced_x", None),
+            (
+                TapCreaturesRequirement::ResolutionX,
+                "resolution_x",
+                Some(TapCreaturesSelectionMode::VariableX),
+            ),
+        ] {
+            let cost = AbilityCost::TapCreatures {
+                requirement,
+                filter: TypedFilter::new(TypeFilter::Artifact)
+                    .controller(ControllerRef::You)
+                    .into(),
+            };
+            let encoded = serde_json::to_value(&cost).unwrap();
+            assert_eq!(
+                encoded["requirement"],
+                serde_json::json!({"requirement": tag})
+            );
+            assert_eq!(
+                serde_json::from_value::<AbilityCost>(encoded).unwrap(),
+                cost
+            );
+            assert_eq!(requirement.selection_mode(), mode);
+        }
+        assert_eq!(
+            TapCreaturesRequirement::AnnouncedX
+                .bind_announced_x(0)
+                .selection_mode(),
+            Some(TapCreaturesSelectionMode::Fixed)
+        );
+        assert_eq!(
+            TapCreaturesRequirement::ResolutionX.bind_announced_x(2),
+            TapCreaturesRequirement::ResolutionX
+        );
+    }
+
+    #[test]
+    fn standalone_tap_cost_rejects_legacy_symbolic_count() {
+        for legacy in [
+            r#"{"type":"TapCreatures","count":4294967295,"filter":{"type":"Any"}}"#,
+            r#"{"type":"TapCreatures","requirement":{"requirement":"count","count":4294967295},"filter":{"type":"Any"}}"#,
+        ] {
+            assert!(serde_json::from_str::<AbilityCost>(legacy).is_err());
+        }
+        let invalid = AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::count(u32::MAX),
+            filter: TargetFilter::Any,
+        };
+        assert!(serde_json::to_value(invalid).is_err());
+        let fixed = r#"{"type":"TapCreatures","count":2,"filter":{"type":"Any"}}"#;
+        assert_eq!(
+            serde_json::from_str::<AbilityCost>(fixed).unwrap(),
+            AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::count(2),
+                filter: TargetFilter::Any,
+            }
+        );
     }
 
     #[test]

@@ -26462,6 +26462,8 @@ pub enum PayableResource {
     },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
+    /// CR 107.3a: Announce X for the written tap cost of a mana ability.
+    TapCountX,
     /// CR 119.4: Pay any amount of life — N is deducted as life loss via
     /// life_costs::pay_life_as_cost (life-loss replacement pipeline + CantLoseLife).
     Life,
@@ -35534,6 +35536,96 @@ pub(crate) fn validate_restored_event_context_pins(state: &GameState) -> Result<
     })
 }
 
+/// A historical activated tap selection never announced an exact tap count.
+/// It cannot be resumed by trusting X from some other leg of its proposal.
+fn validate_serialized_tap_x_payments(value: &serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+
+    fn has_legacy_tap_count(cost: &Value) -> bool {
+        crate::types::ability::is_legacy_tap_count_x(cost)
+            || (matches!(cost["type"].as_str(), Some("Composite" | "OneOf"))
+                && cost["costs"]
+                    .as_array()
+                    .is_some_and(|legs| legs.iter().any(has_legacy_tap_count)))
+    }
+
+    fn visit(value: &Value, path: &str, owns_tap_rider: bool) -> Result<(), String> {
+        match value {
+            Value::Object(fields) => {
+                if value["type"] == "PayCost" && value["data"]["kind"]["type"] == "TapCreatures" {
+                    let data = &value["data"];
+                    let resume = data["resume"]["type"].as_str();
+                    match data["kind"]["mode"].as_str() {
+                        Some("VariableX") if resume == Some("TeamTapPayment") => {}
+                        Some("VariableX")
+                            if owns_tap_rider
+                                && resume == Some("Resolution")
+                                && data["min_count"].as_u64() == Some(0)
+                                && data["choices"].as_array().is_some_and(|choices| {
+                                    data["count"].as_u64() == Some(choices.len() as u64)
+                                }) => {}
+                        Some("VariableX") => {
+                            return Err(format!(
+                                "{path}: tap X prompt has no compatible payment authority"
+                            ));
+                        }
+                        None if !data["kind"]["mode"].is_object() => {
+                            return Err(format!(
+                                "{path}: tap prompt has no selection `mode` (pre-mode wire shape)"
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+
+                if has_legacy_tap_count(&value["activation_cost"])
+                    || (fields.contains_key("ability_snapshot")
+                        && fields.contains_key("source_id")
+                        && has_legacy_tap_count(&value["ability_snapshot"]["cost"]))
+                {
+                    return Err(format!(
+                        "{path}: legacy tap X activation did not lock an exact count"
+                    ));
+                }
+
+                let resolution = value
+                    .get("resolution_frames")
+                    .unwrap_or(&value["resolution_stack"]);
+                let has_local_tap_rider = resolution["frames"].as_array().is_some_and(|frames| {
+                    frames
+                        .iter()
+                        .filter(|frame| {
+                            frame["type"] == "AbilityContinuation"
+                                && frame["data"]["pending"]["x_announcement"] == "TappedCount"
+                        })
+                        .count()
+                        == 1
+                });
+                for (key, child) in fields {
+                    if child.is_array() || child.is_object() {
+                        visit(
+                            child,
+                            &format!("{path}.{key}"),
+                            key == "waiting_for" && has_local_tap_rider,
+                        )?;
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    if child.is_array() || child.is_object() {
+                        visit(child, &format!("{path}[{index}]"), false)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(value, "$", false)
+}
+
 impl GameStateDecode {
     pub(crate) fn decode_persisted_resolution_state(
         mut value: serde_json::Value,
@@ -35545,6 +35637,7 @@ impl GameStateDecode {
         // Collected before any part of the value is split off or consumed:
         // `ResolutionStateWire` removes `resolution_frames` before the state
         // materializes, and a frame can carry a state-arena handle.
+        validate_serialized_tap_x_payments(&value)?;
         let state_handles = collect_serialized_state_handles(&value);
         crate::types::resolution::reject_wire_projection_marker(&value)?;
         match mode {
@@ -35738,6 +35831,7 @@ impl<'de> Deserialize<'de> for GameState {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
+        validate_serialized_tap_x_payments(&value).map_err(serde::de::Error::custom)?;
         GameStateDecode::decode(value, GameStateDecodeMode::DirectCurrentRaw)
             .map_err(serde::de::Error::custom)
     }

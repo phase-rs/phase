@@ -2237,15 +2237,24 @@ fn pay_ability_cost_inner(
             //
             // CR 107.3a: compute the selection semantics once from the
             // requirement and carry them verbatim to the completion handler.
-            let mode = requirement.selection_mode();
+            let Some(mode) = requirement.selection_mode() else {
+                return Ok(payment_failed("activation tap count not announced"));
+            };
             let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    let (min_count, max_count) =
-                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
-                    if eligible.len() < min_count {
-                        return Ok(payment_failed("not enough creatures to tap"));
+                    let count = *count as usize;
+                    if eligible.len() < count {
+                        return Ok(payment_failed("not enough permanents to tap"));
                     }
-                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
+                    (PayCostKind::TapCreatures { mode }, count, count)
+                }
+                crate::types::ability::TapCreaturesRequirement::ResolutionX => (
+                    PayCostKind::TapCreatures { mode },
+                    eligible.len(),
+                    0,
+                ),
+                crate::types::ability::TapCreaturesRequirement::AnnouncedX => {
+                    return Ok(payment_failed("activation tap count not announced"));
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -4433,15 +4442,10 @@ fn can_pay_resolution(
             };
             match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    // CR 107.3a: route the floor through the single bounds
-                    // authority so the `u32::MAX` X-sentinel is not compared as a
-                    // literal minimum (which is unsatisfiable for any real board).
-                    // A fixed (non-X) count degrades to `(count, count)`, leaving
-                    // every existing card's payability verdict unchanged.
-                    let (min_count, _) =
-                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
-                    eligible.len() >= min_count
+                    eligible.len() >= *count as usize
                 }
+                crate::types::ability::TapCreaturesRequirement::ResolutionX => true,
+                crate::types::ability::TapCreaturesRequirement::AnnouncedX => false,
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
                     comparator,
@@ -7623,7 +7627,7 @@ mod tests {
         let src = scenario.add_artifact_from_oracle(P0, "Powerstone", "").id();
         let ability = tap_cost_stub_ability(src);
         let x_sentinel = AbilityCost::TapCreatures {
-            requirement: TapCreaturesRequirement::Count { count: u32::MAX },
+            requirement: TapCreaturesRequirement::ResolutionX,
             filter: TargetFilter::Typed(TypedFilter::creature()),
         };
 

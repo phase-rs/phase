@@ -56,13 +56,12 @@ fn run_trigger(pick: usize, cost_x_paid: Option<u32>) -> Outcome {
 
     // Parse pin: the trigger's execute is the optional tap-X PayCost with the Pump and
     // DealDamage riders, all reading the Variable "X" the payment must define. The
-    // "any number" tap count of a VariableX payment serializes as `u32::MAX`.
-    let any_number = u32::MAX.to_string();
+    // The payment requirement records its resolution-time binding explicitly.
     let parsed = serde_json::to_string(&r.state().objects[&sphere].trigger_definitions).unwrap();
     for needle in [
         "PayCost",
         "TapCreatures",
-        any_number.as_str(),
+        "resolution_x",
         "Myr",
         "Pump",
         "DealDamage",
@@ -327,12 +326,7 @@ fn run_chain_inside(
 // A VariableX payment with no trigger event: the chosen count alone defines X.
 #[test]
 fn chain_variable_x_defines_x() {
-    let o = run_chain(
-        &TapCreaturesRequirement::Count { count: u32::MAX },
-        true,
-        2,
-        2,
-    );
+    let o = run_chain(&TapCreaturesRequirement::ResolutionX, true, 2, 2);
     assert_eq!(o.mode, TapCreaturesSelectionMode::VariableX);
     assert_eq!(o.tapped, 2);
     assert!(
@@ -371,12 +365,7 @@ fn chain_aggregate_does_not_define_x() {
 // Sibling: no rider and nothing parked, so the stamp is a no-op.
 #[test]
 fn chain_without_rider_binds_nothing_and_does_not_panic() {
-    let o = run_chain(
-        &TapCreaturesRequirement::Count { count: u32::MAX },
-        false,
-        2,
-        2,
-    );
+    let o = run_chain(&TapCreaturesRequirement::ResolutionX, false, 2, 2);
     assert_eq!(o.mode, TapCreaturesSelectionMode::VariableX);
     assert_eq!(o.tapped, 2);
     assert!(o.drained);
@@ -388,13 +377,7 @@ fn chain_without_rider_binds_nothing_and_does_not_panic() {
 // source announced (CR 107.3f + CR 107.3i: X is per object).
 #[test]
 fn chain_without_rider_leaves_enclosing_frame_x_alone() {
-    let o = run_chain_inside(
-        &TapCreaturesRequirement::Count { count: u32::MAX },
-        false,
-        2,
-        2,
-        Some(5),
-    );
+    let o = run_chain_inside(&TapCreaturesRequirement::ResolutionX, false, 2, 2, Some(5));
     assert_eq!(o.mode, TapCreaturesSelectionMode::VariableX);
     assert_eq!(o.tapped, 2);
     assert!(o.drained, "the enclosing chain resumed and finished");
@@ -408,13 +391,7 @@ fn chain_without_rider_leaves_enclosing_frame_x_alone() {
 // enclosing chain keeps its own X.
 #[test]
 fn chain_with_rider_stamps_only_the_rider_above_an_enclosing_frame() {
-    let o = run_chain_inside(
-        &TapCreaturesRequirement::Count { count: u32::MAX },
-        true,
-        2,
-        2,
-        Some(5),
-    );
+    let o = run_chain_inside(&TapCreaturesRequirement::ResolutionX, true, 2, 2, Some(5));
     assert_eq!(o.mode, TapCreaturesSelectionMode::VariableX);
     assert_eq!(o.tapped, 2);
     assert!(o.drained, "rider and enclosing chain both resumed");

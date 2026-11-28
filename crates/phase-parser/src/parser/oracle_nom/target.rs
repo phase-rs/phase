@@ -625,13 +625,15 @@ pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> 
 }
 
 /// Which grammar position a cost phrase was written in. The same words name
-/// different objects on the two channels, so the cost grammar takes the
+/// different objects depending on the owner, so the cost grammar takes the
 /// channel as an explicit parameter instead of guessing from the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CostChannel {
-    /// A cost the source's own text imposes: the activation cost (everything
-    /// before the colon, CR 602.1a) and the source's additional, alternative
-    /// and keyword costs. A bare "it" leg appears in 21 printed source costs:
+    /// Everything before the colon of an activated ability (CR 602.1a).
+    ActivatedAbility,
+    /// The source's additional, alternative, and keyword costs.
+    /// This and `ActivatedAbility` share the source-relative reading of bare
+    /// "it". A bare "it" leg appears in 21 printed source costs:
     /// the 16 pre-colon lines (13 "… and sacrifice it", 2 "… and exile it",
     /// Magosi, the Waterveil's "… and return it to its owner's hand"), each of
     /// which names the source first, and CR 113.7 makes that object the
@@ -685,7 +687,7 @@ pub(crate) fn parse_cost_self_reference_for(
     channel: CostChannel,
 ) -> OracleResult<'_, TargetFilter> {
     match channel {
-        CostChannel::SourceCost => {
+        CostChannel::SourceCost | CostChannel::ActivatedAbility => {
             alt((parse_cost_self_reference, parse_it_self_reference)).parse(input)
         }
         CostChannel::ResolutionPayment => parse_cost_self_reference(input),

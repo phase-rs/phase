@@ -590,8 +590,12 @@ struct GlacianBoard {
 
 /// Glacian on a board where Bonesplitter is attached to a creature and
 /// `plain_artifacts` unattached Spellbooks sit beside it, activated through
-/// production dispatch so the tap-X cost prompt is the live decision.
-fn glacian_board(plain_artifacts: usize) -> (engine::game::scenario::GameRunner, GlacianBoard) {
+/// production dispatch with `x` announced (CR 107.3a + CR 601.2b), so the
+/// exact tap prompt is the live decision.
+fn glacian_board(
+    plain_artifacts: usize,
+    x: u32,
+) -> (engine::game::scenario::GameRunner, GlacianBoard) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let glacian = scenario
@@ -639,7 +643,19 @@ fn glacian_board(plain_artifacts: usize) -> (engine::game::scenario::GameRunner,
             ability_index,
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("activating Glacian surfaces its tap-X cost prompt");
+        .expect("activating Glacian asks for X");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseXValue { player: P0, min: 0, max, .. }
+                if max == plain_artifacts as u32 + 1
+        ),
+        "reach guard: X is announced before the tap payment, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::ChooseX { value: x })
+        .expect("announcing X surfaces Glacian's exact tap prompt");
     bind(runner.state_mut(), "glacian-tap-x");
 
     (
@@ -656,14 +672,14 @@ fn glacian_board(plain_artifacts: usize) -> (engine::game::scenario::GameRunner,
     )
 }
 
-/// Asserts the live decision is Glacian's tap-X prompt with the given bounds
-/// and that the host creature — not an artifact — is not offered.
+/// Asserts the live decision is Glacian's exact tap prompt for the announced
+/// X and that the host creature — not an artifact — is not offered.
 fn assert_glacian_tap_x_prompt(state: &GameState, board: &GlacianBoard, count: usize) {
     let WaitingFor::PayCost {
         player,
         kind:
             engine::types::game_state::PayCostKind::TapCreatures {
-                mode: engine::types::ability::TapCreaturesSelectionMode::VariableX,
+                mode: engine::types::ability::TapCreaturesSelectionMode::Fixed,
             },
         choices,
         count: published_count,
@@ -679,8 +695,8 @@ fn assert_glacian_tap_x_prompt(state: &GameState, board: &GlacianBoard, count: u
     assert_eq!(*player, P0);
     assert_eq!(
         (*published_count, *min_count),
-        (count, 0),
-        "CR 107.3a: X ranges from zero to the number of eligible artifacts"
+        (count, count),
+        "CR 601.2h: the announced X is the exact number of artifacts to tap"
     );
     assert!(
         choices.contains(&board.bonesplitter)
@@ -726,15 +742,15 @@ fn chosen_x_on_stack(state: &GameState, source: ObjectId) -> Option<u32> {
         .expect("Glacian's ability is on the stack")
 }
 
-/// "Tap X untapped artifacts" lets the controller choose X (CR 107.3a), so the
-/// cost prompt is a multi-pick decision. An attached Equipment is one of its
+/// "Tap X untapped artifacts" announces X (CR 107.3a), so at X = 2 the cost
+/// prompt is a two-object pick. An attached Equipment is one of its
 /// candidates; clicking it on the host's fan must not submit it as the whole
 /// answer. The engine therefore publishes no fan pick for it, and the
-/// Equipment is still payable alongside the other artifacts the player picks.
+/// Equipment is still payable alongside the other artifact the player picks.
 #[test]
 fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surface() {
-    let (mut runner, board) = glacian_board(2);
-    assert_glacian_tap_x_prompt(runner.state(), &board, 3);
+    let (mut runner, board) = glacian_board(2, 2);
+    assert_glacian_tap_x_prompt(runner.state(), &board, 2);
 
     let view = priority_view(runner.state());
     let opportunity = select_opportunity(&view);
@@ -744,8 +760,8 @@ fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surfac
             InteractionOpportunityResponse::Schema {
                 spec: InteractionResponseSpec::Select {
                     constraint: engine::types::interaction::SelectionConstraint::Count {
-                        min: 0,
-                        max: 3
+                        min: 2,
+                        max: 2
                     },
                     ..
                 },
@@ -774,7 +790,7 @@ fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surfac
     );
     assert!(
         bonesplitter_card.submission.is_none(),
-        "the attached Equipment carries no submission that would finalize X = 1: {:?}",
+        "the attached Equipment carries no submission that would answer a two-object pick: {:?}",
         bonesplitter_card.submission
     );
 
@@ -801,7 +817,7 @@ fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surfac
     assert_eq!(
         chosen_x_on_stack(state, board.glacian),
         Some(2),
-        "CR 107.3a: X is the number of artifacts tapped"
+        "CR 107.3a: the announced X rides the ability onto the stack"
     );
 
     runner.resolve_top();
@@ -822,11 +838,12 @@ fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surfac
     );
 }
 
-/// When the attached Equipment is the only eligible artifact, the decision
-/// admits a single pick, so the host's fan still answers it in one step.
+/// When the attached Equipment is the only eligible artifact and X = 1, the
+/// decision admits a single pick, so the host's fan still answers it in one
+/// step.
 #[test]
 fn glacian_with_only_the_attached_equipment_eligible_keeps_its_one_step_fan_pick() {
-    let (mut runner, board) = glacian_board(0);
+    let (mut runner, board) = glacian_board(0, 1);
     assert_glacian_tap_x_prompt(runner.state(), &board, 1);
 
     let view = priority_view(runner.state());
@@ -850,7 +867,7 @@ fn glacian_with_only_the_attached_equipment_eligible_keeps_its_one_step_fan_pick
     assert_eq!(
         chosen_x_on_stack(runner.state(), board.glacian),
         Some(1),
-        "CR 107.3a: X is the number of artifacts tapped"
+        "CR 107.3a: the announced X rides the ability onto the stack"
     );
 }
 

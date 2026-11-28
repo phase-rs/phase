@@ -1877,7 +1877,7 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
     if let Some(colon_pos) = find_cost_separator(text) {
         let cost_text = text[..colon_pos].trim();
         let effect_text = text[colon_pos + 1..].trim();
-        let cost = parse_oracle_cost(cost_text);
+        let cost = crate::parser::oracle_cost::parse_activation_cost(cost_text);
         // CR 602.5c: When an object acquires an activated ability with a
         // use restriction (e.g. "Activate only as a sorcery", "Activate only
         // once each turn") from another object, that restriction applies to

@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
-use nom::character::complete::{digit1, multispace0};
+use nom::character::complete::{digit1, multispace0, space1};
 use nom::combinator::{
     all_consuming, eof, map, map_opt, map_res, opt, peek, recognize, rest, value, verify,
 };
@@ -41,12 +41,10 @@ use crate::types::ability::{
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
 
-/// Parse the cost portion before `:` in an Oracle activated ability.
-/// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
+/// Parse a source-authored additional, alternative, or keyword cost.
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
 ///
-/// CR 602.1a: this is the source-cost channel ([`CostChannel::SourceCost`]) —
-/// a cost the source's own text imposes; in its sacrifice and exile legs a bare
+/// On [`CostChannel::SourceCost`], in sacrifice and exile legs a bare
 /// "it" names the source the same clause named first. The five `behold … and
 /// exile it` additional costs, whose "it" is the beheld card, never reach this
 /// function: `parse_additional_cost_line` hands them whole to
@@ -78,6 +76,11 @@ pub(crate) fn parse_oracle_cost_in(text: &str, channel: CostChannel) -> AbilityC
         return cost;
     }
     parse_cost_components(text, parts.components, channel)
+}
+
+/// Parse the entire cost before the colon of an activated ability (CR 602.1a).
+pub(crate) fn parse_activation_cost(text: &str) -> AbilityCost {
+    parse_oracle_cost_in(text, CostChannel::ActivatedAbility)
 }
 
 /// CR 118.12: parse exactly two top-level cost alternatives with full input
@@ -495,7 +498,10 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
             // A committed sacrifice list has its own verb. If it declined,
             // its complete component must survive as an unpayable cost.
             AbilityCost::Unimplemented { description }
-                if last_verb.is_some() && after_sacrifice_type_list(description).is_none() =>
+                if last_verb.is_some()
+                    && after_sacrifice_type_list(description).is_none()
+                    && nom_on_lower(description, &description.to_lowercase(), tap_x_head)
+                        .is_none() =>
             {
                 if description.trim().is_empty() {
                     continue;
@@ -913,6 +919,46 @@ pub(crate) fn parse_fixed_blight(input: &str) -> OracleResult<'_, u32> {
         BlightOperand::AnnouncedX => None,
     })
     .parse(input)
+}
+
+fn tap_x_head(input: &str) -> OracleResult<'_, bool> {
+    preceded(
+        alt((tag("tap "), tag("tapped "))),
+        map(
+            pair(
+                opt(terminated(tag("up to"), space1)),
+                terminated(alt((tag("x"), tag("{x}"))), alt((space1, eof))),
+            ),
+            |(range, _)| range.is_none(),
+        ),
+    )
+    .parse(input)
+}
+
+fn tap_cost_filter(text: &str, count_word: CountWord) -> Option<TargetFilter> {
+    let target_text = format!("target {text}");
+    let (filter, remainder) = parse_target(&target_text);
+    remainder.trim().is_empty().then(|| match count_word {
+        CountWord::SourceExclusion => distribute_shared_properties(filter, &[FilterProp::Another]),
+        CountWord::Plain => filter,
+    })
+}
+
+fn is_meaningful_tap_x_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(filter) => {
+            filter.controller == Some(ControllerRef::You)
+                && (!filter.type_filters.is_empty()
+                    || filter
+                        .properties
+                        .iter()
+                        .any(|prop| *prop != FilterProp::Another))
+        }
+        TargetFilter::Or { filters } => {
+            !filters.is_empty() && filters.iter().all(is_meaningful_tap_x_filter)
+        }
+        _ => false,
+    }
 }
 
 /// [`parse_single_cost`] for a cost leg written on an explicit [`CostChannel`].
@@ -1352,8 +1398,48 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
         }
     }
 
+    // CR 107.3a and CR 107.3f: the owner determines when the tap count is bound.
+    // Commit the X head before the generic cost and effect fallbacks.
+    if let Some((exact, tap_rest)) = nom_on_lower(text, &lower, tap_x_head) {
+        let tap_lower = tap_rest.to_lowercase();
+        let parsed = nom_on_lower(tap_rest, &tap_lower, |input| {
+            map(
+                terminated(
+                    opt(terminated(tag("other"), space1)),
+                    terminated(tag("untapped"), space1),
+                ),
+                |other| {
+                    if other.is_some() {
+                        CountWord::SourceExclusion
+                    } else {
+                        CountWord::Plain
+                    }
+                },
+            )
+            .parse(input)
+        });
+        let requirement = match channel {
+            CostChannel::ActivatedAbility => Some(TapCreaturesRequirement::AnnouncedX),
+            CostChannel::ResolutionPayment => Some(TapCreaturesRequirement::ResolutionX),
+            CostChannel::SourceCost => None,
+        };
+        if let (true, Some(requirement), Some((word, filter_text))) = (exact, requirement, parsed) {
+            if let Some(filter) = tap_cost_filter(&filter_text.to_lowercase(), word)
+                .filter(is_meaningful_tap_x_filter)
+            {
+                return AbilityCost::TapCreatures {
+                    requirement,
+                    filter,
+                };
+            }
+        }
+        return AbilityCost::Unimplemented {
+            description: text.to_string(),
+        };
+    }
+
     // "Tap an untapped creature you control" / "Tap two untapped creatures you control"
-    // / "Tap another untapped creature you control" / "Tap X untapped [type] you control"
+    // / "Tap another untapped creature you control"
     if let Some(((), tap_rest)) = nom_on_lower(text, &lower, |i| {
         value((), alt((tag("tap "), tag("tapped ")))).parse(i)
     }) {
@@ -1375,15 +1461,6 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
                 .parse(i)
             }) {
             (1u32, r.to_lowercase(), word)
-        } else if let Some((word, r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
-            // "X untapped [type]" — variable count, use u32::MAX as sentinel.
-            alt((
-                value(CountWord::Plain, tag("x untapped ")),
-                value(CountWord::SourceExclusion, tag("x other untapped ")),
-            ))
-            .parse(i)
-        }) {
-            (u32::MAX, r.to_lowercase(), word)
         } else if let Some((n, r)) = super::oracle_util::parse_number(&tap_lower) {
             let r = nom_on_lower(
                 &tap_rest[tap_lower.len() - r.len()..],
@@ -1402,21 +1479,14 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
             (0, String::new(), CountWord::Plain)
         };
 
-        if count > 0 {
-            let target_text = format!("target {filter_text}");
-            let (filter, remainder) = parse_target(&target_text);
-            if remainder.trim().is_empty() {
-                let filter = match count_word {
-                    CountWord::SourceExclusion => {
-                        distribute_shared_properties(filter, &[FilterProp::Another])
-                    }
-                    CountWord::Plain => filter,
-                };
-                return AbilityCost::TapCreatures {
-                    requirement: TapCreaturesRequirement::count(count),
-                    filter,
-                };
-            }
+        if let Some(filter) = (count > 0)
+            .then(|| tap_cost_filter(&filter_text, count_word))
+            .flatten()
+        {
+            return AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::count(count),
+                filter,
+            };
         }
     }
 

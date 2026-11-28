@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Announced and resolution tap X use distinct requirements, and mana abilities can prompt for an announced tap count."
+}

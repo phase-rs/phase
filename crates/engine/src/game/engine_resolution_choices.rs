@@ -4232,9 +4232,9 @@ pub(super) fn handle_resolution_choice(
                     // concretized; nothing is deducted here. A mana ability's
                     // `{X}` leg announcement is always `ConcretizeX` (its only
                     // minter, `mana_abilities`, writes that composition).
-                    PayableResource::Speed | PayableResource::Mana { .. } => {
-                        pending.chosen_x = Some(amount)
-                    }
+                    PayableResource::Speed
+                    | PayableResource::TapCountX
+                    | PayableResource::Mana { .. } => pending.chosen_x = Some(amount),
                     other @ (PayableResource::Energy
                     | PayableResource::Life
                     | PayableResource::LoopCollapse { .. }) => {
@@ -4642,7 +4642,7 @@ pub(super) fn handle_resolution_choice(
                         "Counter amount choices require a pending mana ability".to_string(),
                     ));
                 }
-                PayableResource::Speed => {
+                PayableResource::Speed | PayableResource::TapCountX => {
                     // CR 702.179e: `Pay X speed` only ever arises as a mana-ability
                     // activation cost, which carries a `pending_mana_ability` and
                     // is handled above. Reaching the standalone branch is a bug.
@@ -11540,6 +11540,7 @@ pub(crate) fn paused_payment_x_announcement(
             | PayableResource::Mana { .. } => Some(ContinuationXAnnouncement::PaidAmount),
             PayableResource::Counters
             | PayableResource::Speed
+            | PayableResource::TapCountX
             | PayableResource::LoopCollapse { .. } => None,
         },
         _ => None,

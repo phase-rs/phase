@@ -4556,6 +4556,16 @@ fn is_active_tap_mana_ability(
     {
         return false;
     }
+    // CR 107.3a + CR 605.3a: an announced tap count needs an amount and
+    // a disjoint object assignment. Leave it on the explicit activation route.
+    if payability_mode == ManaPayabilityMode::Planning
+        && ability
+            .cost
+            .as_ref()
+            .is_some_and(super::casting_costs::activation_has_announced_tap_count)
+    {
+        return false;
+    }
     let default_gates;
     let gates = match gates {
         Some(gates) => gates,

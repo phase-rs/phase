@@ -72,7 +72,7 @@ use super::oracle_classifier::{
     strip_entry_this_way_riders,
 };
 use super::oracle_condition::parse_restriction_condition;
-use super::oracle_cost::{parse_oracle_cost, parse_single_cost, try_parse_cost_reduction};
+use super::oracle_cost::{parse_activation_cost, parse_single_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, NomDispatchIr};
 use super::oracle_effect::gap_diagnosis;
 use super::oracle_effect::imperative::{
@@ -6753,7 +6753,7 @@ fn parse_normalized_oracle_ir(
             let effect_text = ability_text[colon_pos + 1..].trim();
             let (effect_text, constraints) = strip_activated_constraints(effect_text);
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
-            let cost = parse_oracle_cost(&normalized_cost_text);
+            let cost = parse_activation_cost(&normalized_cost_text);
 
             ctx.subject = None;
             ctx.actor = None;
@@ -7467,7 +7467,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest[..colon_pos].trim();
                 let effect_text = rest[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
 
                 // The `ParseContext` reset is a parser side effect, not part of
                 // the CR 602.1 envelope: it must keep firing here, before the
@@ -7507,7 +7507,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest_original[..colon_pos].trim();
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
                 let mut ir =
@@ -7555,7 +7555,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest_original[..colon_pos].trim();
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
                 let mut ir =
@@ -7602,7 +7602,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest_original[..colon_pos].trim();
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
                 let mut ir =
@@ -7640,7 +7640,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest_original[..colon_pos].trim();
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
                 let mut ir =
@@ -7696,7 +7696,7 @@ fn parse_normalized_oracle_ir(
                 let cost_text = rest_original[..colon_pos].trim();
                 let effect_text = rest_original[colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
-                let cost = parse_oracle_cost(cost_text);
+                let cost = parse_activation_cost(cost_text);
                 ctx.subject = None;
                 ctx.actor = None;
                 let mut ir =
@@ -9964,7 +9964,7 @@ fn parse_activated_ability_ir(
     // (Priority-6b path) or absent.
     let cost_text = strip_activated_cost_label(cost_text).unwrap_or(cost_text);
     let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
-    let cost = parse_oracle_cost(&normalized_cost_text);
+    let cost = parse_activation_cost(&normalized_cost_text);
 
     // CR 608.2k: expose this ability's exile-cost source zone so the effect
     // parser can disambiguate "the exiled card" as a cost-paid-object
@@ -13174,7 +13174,7 @@ fn equip_target_has_explicit_attachable_type(typed: &TypedFilter) -> bool {
 }
 
 fn parse_equip_cost(cost_text: &str) -> AbilityCost {
-    let cost = parse_oracle_cost(cost_text);
+    let cost = parse_activation_cost(cost_text);
     if !matches!(cost, AbilityCost::Unimplemented { .. }) {
         return cost;
     }
