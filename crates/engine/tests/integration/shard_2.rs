@@ -12,6 +12,7 @@ pub mod support;
 
 mod anzrag_must_be_blocked;
 
+mod a_girl_and_her_dogs;
 mod a_killer_among_us;
 mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;
@@ -156,6 +157,7 @@ mod birgi;
 mod black_bolt_lethal_voice_destroys_triggering_opponents_permanent;
 mod black_cat_exile_two_face_down;
 mod blessed_orator_other_anthem;
+mod blight_cost_payloads;
 mod block_capacities_blocker_prompt;
 mod block_pairing_relations;
 mod block_trigger_cardinality;
@@ -197,6 +199,7 @@ mod burning_eye_zubera_damage_threshold;
 mod burning_rune_demon_exact_count_search;
 mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
+mod calculating_lich_zhang_liao_that_player;
 mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;
 mod call_to_the_kindred;

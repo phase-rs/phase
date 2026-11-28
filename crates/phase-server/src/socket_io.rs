@@ -1119,12 +1119,11 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         | ServerMessage::TimerUpdate { .. }
         | ServerMessage::Pong { .. }
         | ServerMessage::PeerInfo { .. }
-        | ServerMessage::DraftCreated { .. }
-        | ServerMessage::DraftJoined { .. }
+        | ServerMessage::DraftCommandAccepted { .. }
+        | ServerMessage::DraftCommandRefused { .. }
         | ServerMessage::DraftStateUpdate { .. }
         | ServerMessage::DraftMatchStart { .. }
         | ServerMessage::DraftTimerSync { .. }
-        | ServerMessage::DraftActionRejected { .. }
         | ServerMessage::DraftOver { .. }
         | ServerMessage::DraftSpectatorView { .. }
         | ServerMessage::TakebackRequested { .. }

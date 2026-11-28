@@ -6,7 +6,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
-    CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
+    CommanderOwnership, Comparator, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DamageReceivedGrouping, DelayedAbilityOrigin, DelayedTriggerCondition,
     DurationEvent, Effect, EffectOutcomeSignal, FilterProp, IndicatedActionLimit, ModalChoice,
     NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr,
@@ -64,6 +64,7 @@ use super::filter::{
     matches_target_filter_on_lki_snapshot, spell_record_matches_filter, FilterContext,
 };
 use super::game_object::GameObject;
+use super::keywords::battlefield_keyword_instance_count;
 use super::speed::{
     effective_speed, has_max_speed, mark_speed_trigger_used, speed_key_source,
     speed_trigger_available,
@@ -406,6 +407,9 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
             legs => AbilityCost::Composite {
                 costs: legs.iter().map(ward_cost_to_ability_cost).collect(),
             },
+        },
+        WardCost::Blight(count) => AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(*count),
         },
         WardCost::GetPlayerCounters {
             counter_kind,
@@ -1769,21 +1773,12 @@ fn counter_event_object(event: &GameEvent) -> Option<ObjectId> {
     }
 }
 
-/// CR 508.3d + CR 508.5a + CR 603.2c: collect one firing per ATTACKED player
-/// from each admitted attack declaration. A batched attack trigger whose head
-/// names the attacked player ("Whenever one or more creatures attack one of
-/// your opponents, if any of those creatures … to defending player") takes its
-/// occurrence granularity from that player — the shared per-attacked-player
-/// expansion (`matching_attack_events_by_defending_player`) supplies each
-/// group's narrowed context, and the intervening-if is checked PER GROUP:
-/// "those creatures" quantifies over the creatures attacking that one player,
-/// never over the combined declaration set. Grouping runs before the
-/// aggregate batching arm, so one declaration against two opponents produces
-/// two firings, each carrying its own defending player ("that player",
-/// `TargetFilter::DefendingPlayer`) and its own event for the CR 603.4
-/// resolution recheck.
+/// CR 603.2c + CR 603.4: collect one firing per qualifying destination.
+/// Check the intervening-if against each group's narrowed attack declaration.
+/// The group supplies both "those creatures" and the defending player, and its
+/// event is retained for the resolution recheck.
 #[allow(clippy::too_many_arguments)] // The shared per-candidate filter chain needs each input.
-fn matching_batched_attack_events_by_defending_player(
+fn matching_batched_attack_events_by_destination(
     state: &GameState,
     event_batch: &[GameEvent],
     trig_def: &TriggerDefinition,
@@ -1809,7 +1804,7 @@ fn matching_batched_attack_events_by_defending_player(
         if !matcher(candidate, trig_def, source_context, state) {
             continue;
         }
-        for group_event in super::trigger_matchers::matching_attack_events_by_defending_player(
+        for group_event in super::trigger_matchers::matching_attack_events_by_destination(
             candidate,
             trig_def,
             source_context,
@@ -1824,14 +1819,10 @@ fn matching_batched_attack_events_by_defending_player(
     groups
 }
 
-/// CR 508.3d + CR 508.5a + CR 603.2c: whether a batched attack trigger's
-/// occurrence grammar is the attacked player, taken from the ACTIVE
-/// "one or more creatures attack <player>" head — whose scope lowers to a
-/// player-scope `valid_target` (`Typed { controller: … }` for "one of your
-/// opponents", `Controller` for "you"). That grammar fires once per defended
-/// player with that player's own attacker set (see
-/// `matching_attack_events_by_defending_player`).
-///
+/// CR 508.1b + CR 603.2c: whether a batched attack trigger fires per
+/// destination. The active "one or more creatures attack <destination>" head
+/// uses a player-scope `valid_target` for either the attacked player or the
+/// attacked planeswalker's controller.
 /// Two neighbouring shapes deliberately stay on the aggregate branch:
 /// the passive "one or more of your opponents are attacked" head lowers its
 /// scope to the bare `TargetFilter::Opponent`, which `is_player_scope()`
@@ -1841,7 +1832,7 @@ fn matching_batched_attack_events_by_defending_player(
 /// "attack one or more players", the Curse cycle's "enchanted player") is not
 /// this gate either: those scopes were never split and keep their existing
 /// firing shape.
-fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
+fn attack_fires_per_destination(trig_def: &TriggerDefinition) -> bool {
     trig_def.batched
         && matches!(trig_def.mode, TriggerMode::Attacks)
         && trig_def
@@ -2176,6 +2167,14 @@ pub(super) fn declaration_records_for_attackers(
         .collect()
 }
 
+fn is_player_led_attackers_declared(trigger: &TriggerDefinition) -> bool {
+    trigger.mode == TriggerMode::AttackersDeclared
+        && trigger
+            .valid_source
+            .as_ref()
+            .is_some_and(TargetFilter::is_player_scope)
+}
+
 /// CR 603.2c + CR 508.3a + CR 509.3a/c/d + CR 510.2: the per-occurrence event
 /// fan-out for trigger modes whose single event can contain several
 /// occurrences — one attack declaration naming several attackers, one block
@@ -2200,33 +2199,26 @@ fn occurrence_trigger_events(
     ability: &ResolvedAbility,
 ) -> Option<Vec<FiringOccurrence>> {
     use super::trigger_matchers as m;
+    let attack_occurrences = || {
+        Some(
+            m::attack_firings(event, trig_def, source_context, state)
+                .into_iter()
+                .map(|firing| FiringOccurrence {
+                    context: firing.context,
+                    causes: vec![firing.admitted],
+                })
+                .collect(),
+        )
+    };
     let contexts = match trig_def.mode {
-        // CR 603.2c + CR 508.3d: an `Attacks` firing's cause record is its
-        // admitted attacker set, which a per-defending-player firing's narrowed
-        // context does not carry (charter D4).
-        TriggerMode::Attacks => {
-            return Some(
-                m::attack_firings(event, trig_def, source_context, state)
-                    .into_iter()
-                    .map(|firing| FiringOccurrence {
-                        context: firing.context,
-                        causes: vec![firing.admitted],
-                    })
-                    .collect(),
-            );
+        // CR 603.2c + CR 508.3d: an attack firing's cause record carries its full
+        // admitted attacker set, which a narrowed context need not carry.
+        TriggerMode::Attacks => return attack_occurrences(),
+        TriggerMode::AttackersDeclared if is_player_led_attackers_declared(trig_def) => {
+            return attack_occurrences();
         }
         TriggerMode::AttacksOrBlocks => match event {
-            GameEvent::AttackersDeclared { .. } => {
-                return Some(
-                    m::attack_firings(event, trig_def, source_context, state)
-                        .into_iter()
-                        .map(|firing| FiringOccurrence {
-                            context: firing.context,
-                            causes: vec![firing.admitted],
-                        })
-                        .collect(),
-                );
-            }
+            GameEvent::AttackersDeclared { .. } => return attack_occurrences(),
             GameEvent::BlockersDeclared { .. } => Some(m::matching_block_events(
                 event,
                 trig_def,
@@ -2551,6 +2543,7 @@ fn trigger_firing_groups(
     // context the check needs.
     let grouped = groups_simultaneous_occurrences(trig_def);
     if !grouped
+        && !is_player_led_attackers_declared(trig_def)
         && !matches!(
             trig_def.mode,
             TriggerMode::Attacks | TriggerMode::YouAttackUnblocked
@@ -2631,11 +2624,8 @@ fn trigger_firing_groups(
             active_suppress_triggers,
             conditions,
         ))
-    } else if attack_fires_per_defending_player(trig_def) {
-        // CR 508.3d + CR 508.5a: the "one or more creatures attack <player>"
-        // class fires once per attacked player, with that player's own
-        // attacker set as the firing context.
-        indexed_groups(matching_batched_attack_events_by_defending_player(
+    } else if attack_fires_per_destination(trig_def) {
+        indexed_groups(matching_batched_attack_events_by_destination(
             state,
             event_batch,
             trig_def,
@@ -3585,6 +3575,7 @@ pub(crate) fn allocate_logical_zone_change_group(
 ) -> LogicalZoneChangeGroup {
     let immediately_before_state = immediately_before_projection(state);
     let mut group = state.allocate_logical_zone_change_group(announced);
+    crate::game::zones::capture_batch_departure_combat(state, &mut group);
     latch_logical_zone_change_group_immediately_before(&immediately_before_state, &mut group);
     group
 }
@@ -7941,7 +7932,7 @@ fn collect_pending_triggers_with_collection(
             let (
                 controller,
                 timestamp,
-                has_prowess,
+                prowess_instances,
                 has_exploit,
                 has_ravenous,
                 firebending_amount,
@@ -7979,8 +7970,11 @@ fn collect_pending_triggers_with_collection(
                 (
                     obj.controller,
                     obj.entered_battlefield_turn.unwrap_or(0),
-                    matches!(event, GameEvent::SpellCast { .. })
-                        && obj.has_keyword(&Keyword::Prowess),
+                    if matches!(event, GameEvent::SpellCast { .. }) {
+                        battlefield_keyword_instance_count(obj, KeywordKind::Prowess)
+                    } else {
+                        0
+                    },
                     matches!(event, GameEvent::ZoneChanged { .. })
                         && obj.has_keyword(&Keyword::Exploit),
                     obj.has_keyword(&Keyword::Ravenous),
@@ -8026,16 +8020,15 @@ fn collect_pending_triggers_with_collection(
                 pending.push(trigger_context);
             }
 
-            // CR 702.108a: Prowess triggers when controller casts a noncreature spell.
-            // Cards define Prowess as K:Prowess with no explicit trigger_definition,
-            // so we synthetically generate the trigger here.
+            // CR 702.108a + CR 702.108b: Each effective instance of Prowess
+            // supplies a separate trigger when its controller casts a noncreature spell.
             if let GameEvent::SpellCast {
                 controller: caster,
                 object_id: spell_obj_id,
                 ..
             } = event
             {
-                if has_prowess
+                if prowess_instances > 0
                     && synthetic_keyword_spell_cast_trigger_applies(
                         state,
                         obj_id,
@@ -8043,32 +8036,34 @@ fn collect_pending_triggers_with_collection(
                         *spell_obj_id,
                     )
                 {
-                    let prowess_effect = Effect::Pump {
-                        power: crate::types::ability::PtValue::Fixed(1),
-                        toughness: crate::types::ability::PtValue::Fixed(1),
-                        target: TargetFilter::SelfRef,
-                    };
-                    let prowess_ability =
-                        ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
-                    let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
-                        .description("Prowess".to_string());
-                    pending.push(PendingTriggerContext::single(PendingTrigger {
-                        source_id: obj_id,
-                        controller,
-                        condition: prowess_trig_def.condition,
-                        ability: Box::new(prowess_ability),
-                        timestamp,
-                        target_constraints: Vec::new(),
-                        distribute: None,
-                        trigger_event: Some(event.clone()),
-                        modal: None,
-                        mode_abilities: vec![],
-                        description: prowess_trig_def.description,
-                        may_trigger_origin: None,
-                        subject_match_count: None,
-                        die_result: None,
-                        provenance: None,
-                    }));
+                    for _ in 0..prowess_instances {
+                        let prowess_effect = Effect::Pump {
+                            power: crate::types::ability::PtValue::Fixed(1),
+                            toughness: crate::types::ability::PtValue::Fixed(1),
+                            target: TargetFilter::SelfRef,
+                        };
+                        let prowess_ability =
+                            ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
+                        let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
+                            .description("Prowess".to_string());
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
+                            source_id: obj_id,
+                            controller,
+                            condition: prowess_trig_def.condition,
+                            ability: Box::new(prowess_ability),
+                            timestamp,
+                            target_constraints: Vec::new(),
+                            distribute: None,
+                            trigger_event: Some(event.clone()),
+                            modal: None,
+                            mode_abilities: vec![],
+                            description: prowess_trig_def.description,
+                            may_trigger_origin: None,
+                            subject_match_count: None,
+                            die_result: None,
+                            provenance: None,
+                        }));
+                    }
                 }
             }
 
@@ -22585,8 +22580,8 @@ fn spells_cast_last_turn_total(state: &GameState) -> u32 {
     })
 }
 
-/// Check whether an intervening-if condition is satisfied.
-/// Used both at fire-time and resolution-time.
+/// Check whether an intervening-if condition is satisfied at trigger time.
+/// The resolution check uses the same evaluator with its own timing.
 ///
 /// CR 603.4: An intervening-if condition is checked when the ability would
 /// trigger and again as it resolves. Invalid zone-change provenance fails the
@@ -22609,6 +22604,51 @@ pub(crate) fn check_trigger_condition_with_source(
     source_context: Option<&TriggerSourceContext>,
     trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
+) -> bool {
+    check_trigger_condition_at(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_definition,
+        trigger_event,
+        TriggerConditionTiming::Event,
+    )
+}
+
+pub(crate) fn recheck_trigger_condition_with_source(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    check_trigger_condition_at(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_definition,
+        trigger_event,
+        TriggerConditionTiming::Resolution,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerConditionTiming {
+    Event,
+    Resolution,
+}
+
+fn check_trigger_condition_at(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_definition: Option<&TriggerDefinitionRef>,
+    trigger_event: Option<&GameEvent>,
+    timing: TriggerConditionTiming,
 ) -> bool {
     if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
         return false;
@@ -22639,6 +22679,28 @@ pub(crate) fn check_trigger_condition_with_source(
         return false;
     }
 
+    // CR 603.4 + CR 506.4 + CR 608.2h: resolve the exact declared creatures'
+    // destinations once, before boolean operators can reinterpret missing evidence.
+    let current_destinations = if timing == TriggerConditionTiming::Resolution
+        && condition_reads_current_attack_destinations(condition)
+    {
+        let Some(destinations) = trigger_event
+            .and_then(attack_count_declaration_incarnations)
+            .and_then(|identities| {
+                identities
+                    .map(|identity| {
+                        super::combat::attack_destination_of_incarnation(state, identity?)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+        else {
+            return false;
+        };
+        Some(destinations)
+    } else {
+        None
+    };
+
     evaluate_trigger_condition_with_source(
         state,
         condition,
@@ -22646,6 +22708,7 @@ pub(crate) fn check_trigger_condition_with_source(
         source_context,
         trigger_definition,
         trigger_event,
+        current_destinations.as_deref(),
     )
 }
 
@@ -22768,6 +22831,7 @@ fn evaluate_trigger_condition_with_source(
     source_context: Option<&TriggerSourceContext>,
     trigger_definition: Option<&TriggerDefinitionRef>,
     trigger_event: Option<&GameEvent>,
+    current_destinations: Option<&[Option<super::combat::AttackDestination>]>,
 ) -> bool {
     let source_id = source_context.map(|source| source.identity.reference.object_id);
     match condition {
@@ -22860,6 +22924,22 @@ fn evaluate_trigger_condition_with_source(
             })
         }
         // CR 508.1a + CR 508.1b + CR 603.4: Compare the scoped declaration count.
+        TriggerCondition::AttackersDeclaredCount {
+            subject,
+            comparator,
+            count,
+        } if let Some(destinations) = current_destinations
+            && let Some(attacked) = current_attack_count_scope(subject, *comparator) =>
+        {
+            let actual = destinations
+                .iter()
+                .flatten()
+                .filter(|&&(target, pin)| {
+                    attack_target_controller(state, target, pin, attacked) == Some(controller)
+                })
+                .count();
+            comparator.evaluate(actual as i32, *count as i32)
+        }
         TriggerCondition::AttackersDeclaredCount {
             subject,
             comparator,
@@ -23064,11 +23144,26 @@ fn evaluate_trigger_condition_with_source(
             }
         }
         // CR 508.1: "if it's attacking" — true when the trigger source is in combat.attackers.
-        TriggerCondition::SourceIsAttacking => source_context.is_some_and(|source| {
+        TriggerCondition::SourceIsAttacking { player } => source_context.is_some_and(|source| {
+            let id = source.identity.reference.object_id;
             let read = source.source_read(state);
-            read.is_exact_live()
-                && eval_source_is_attacking(state, source.identity.reference.object_id)
-                || !read.is_exact_live() && source.combat_status.attacking
+            if let Some(filter) = player {
+                // CR 506.3 + CR 506.4 + CR 603.4: this predicate reads a
+                // current attack against an actual player by the exact source.
+                return read.is_exact_live()
+                    && super::combat::live_attack_destination(state, id)
+                        .and_then(|(target, _)| super::combat::attacked_player_for_target(target))
+                        .is_some_and(|player| {
+                            super::effects::matches_player_scope(
+                                state, player, filter, controller, id,
+                            )
+                        });
+            }
+            if read.is_exact_live() {
+                eval_source_is_attacking(state, id)
+            } else {
+                source.combat_status.attacking
+            }
         }),
         // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid
         // this turn". Negation ("unless it escaped") wraps via `Not`.
@@ -23903,6 +23998,7 @@ fn evaluate_trigger_condition_with_source(
                 source_context,
                 trigger_definition,
                 trigger_event,
+                current_destinations,
             )
         }),
         TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
@@ -23913,6 +24009,7 @@ fn evaluate_trigger_condition_with_source(
                 source_context,
                 trigger_definition,
                 trigger_event,
+                current_destinations,
             )
         }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
@@ -23925,6 +24022,7 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_definition,
             trigger_event,
+            current_destinations,
         ),
         // CR 508.1m + CR 603.4 / CR 603.8: an event-time gate ("while" gates, and
         // a state trigger's own condition) evaluates its wrapped condition when
@@ -23937,6 +24035,7 @@ fn evaluate_trigger_condition_with_source(
             source_context,
             trigger_definition,
             trigger_event,
+            None,
         ),
         // CR 309.7: True when the controller has completed a dungeon. `specific: None`
         // matches "any dungeon"; `specific: Some(d)` matches dungeon `d`. Negation
@@ -24169,6 +24268,67 @@ pub(crate) fn exploit_record_matches_dying_object(
     current_incarnation.checked_sub(later_moves + 1) == Some(recorded_incarnation)
 }
 
+// The present-tense minimum and the historical exclusion share an AST subject.
+// The grammar emits GE for "N or more ... are attacking", and EQ for "none ... attacked".
+// A filtered count (Squall) rechecks the attackers' characteristics within its bound group.
+fn current_attack_count_scope(
+    subject: &crate::types::ability::AttackersDeclaredCountSubject,
+    comparator: Comparator,
+) -> Option<&AttackTargetFilter> {
+    match (subject, comparator) {
+        (
+            crate::types::ability::AttackersDeclaredCountSubject::AttackTarget {
+                controller: ControllerRef::You,
+                attacked:
+                    attacked @ (AttackTargetFilter::Player
+                    | AttackTargetFilter::Planeswalker { subtype: None }
+                    | AttackTargetFilter::PlayerOrPlaneswalker),
+                filter: None,
+            },
+            Comparator::GE,
+        ) => Some(attacked),
+        _ => None,
+    }
+}
+
+pub(crate) fn condition_reads_current_attack_destinations(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::AttackersDeclaredCount {
+            subject,
+            comparator,
+            ..
+        } => current_attack_count_scope(subject, *comparator).is_some(),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => conditions
+            .iter()
+            .any(condition_reads_current_attack_destinations),
+        TriggerCondition::Not { condition } => {
+            condition_reads_current_attack_destinations(condition)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn attack_count_declaration_incarnations(
+    event: &GameEvent,
+) -> Option<impl Iterator<Item = Option<ObjectIncarnationRef>> + '_> {
+    let GameEvent::AttackersDeclared {
+        attacker_ids,
+        declaration_records,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(attacker_ids.iter().map(|&id| {
+        let record = declaration_records
+            .iter()
+            .find(|record| record.object_id == id)?;
+        let incarnation = record.incarnation?;
+        (incarnation != crate::types::identifiers::LEGACY_INCARNATION)
+            .then(|| ObjectIncarnationRef::of(id, incarnation))
+    }))
+}
+
 fn attackers_declared_count(
     state: &GameState,
     trigger_event: Option<&GameEvent>,
@@ -24363,33 +24523,56 @@ fn attack_target_matches_controller_scope(
     controller_ref: &ControllerRef,
     attacked: &AttackTargetFilter,
 ) -> bool {
-    let player_matches = |player_id: PlayerId| {
-        controller_ref_matches_player(player_id, trigger_controller, controller_ref)
-    };
+    attack_target_controller(state, target, None, attacked).is_some_and(|player| {
+        controller_ref_matches_player(player, trigger_controller, controller_ref)
+    })
+}
 
-    match (attacked, target) {
-        (AttackTargetFilter::Player, crate::game::combat::AttackTarget::Player(player_id))
-        | (
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            crate::game::combat::AttackTarget::Player(player_id),
-        ) => player_matches(player_id),
+fn attack_target_controller(
+    state: &GameState,
+    target: crate::game::combat::AttackTarget,
+    pin: Option<ObjectIncarnationRef>,
+    attacked: &AttackTargetFilter,
+) -> Option<PlayerId> {
+    use super::combat::AttackTarget;
+
+    match (attacked, target, pin) {
         (
-            AttackTargetFilter::Planeswalker { subtype: None },
-            crate::game::combat::AttackTarget::Planeswalker(object_id),
-        )
-        | (
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            crate::game::combat::AttackTarget::Planeswalker(object_id),
-        ) => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|object| player_matches(object.controller)),
-        (AttackTargetFilter::Battle, crate::game::combat::AttackTarget::Battle(object_id)) => state
-            .objects
-            .get(&object_id)
-            .and_then(|object| object.protector())
-            .is_some_and(player_matches),
-        _ => false,
+            AttackTargetFilter::Player | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Player(player),
+            None,
+        ) => Some(player),
+        (
+            AttackTargetFilter::Planeswalker { subtype: None }
+            | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Planeswalker(id),
+            None,
+        ) => state.objects.get(&id).map(|object| object.controller),
+        (
+            AttackTargetFilter::Planeswalker { subtype: None }
+            | AttackTargetFilter::PlayerOrPlaneswalker,
+            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id),
+            Some(pin),
+        ) if pin.object_id == id => {
+            // CR 506.4e: a surviving attack relation can outlast a type change.
+            // The attacked object's current or last-known type answers the condition.
+            if let Some(object) = state.objects.get(&id).filter(|object| {
+                object.zone == Zone::Battlefield && ObjectIncarnationRef::from_object(object) == pin
+            }) {
+                return object
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Planeswalker)
+                    .then_some(object.controller);
+            }
+            crate::types::game_state::exact_battlefield_departure_row(state, pin)
+                .filter(|row| row.core_types.contains(&CoreType::Planeswalker))
+                .map(|row| row.controller)
+        }
+        (AttackTargetFilter::Battle, AttackTarget::Battle(id), None) => {
+            state.objects.get(&id).and_then(|object| object.protector())
+        }
+        _ => None,
     }
 }
 
@@ -24456,8 +24639,10 @@ fn condition_is_attack_event_only(
                 // fact about the creatures as they are, not about the
                 // declaration alone — it must survive onto the stack entry and
                 // be rechecked at resolution (Squall's chosen-number P/T
-                // existential). The filter-less intervening-if family keeps the
-                // pre-existing event-fact contract.
+                // existential). A filter-less count that duplicates a
+                // compatible trigger-head filter keeps the existing event-fact
+                // contract. Player-led triggers such as Mangara have no
+                // destination filter on the head, so their recheck is retained.
                 filter.is_none()
                     && trigger
                         .attack_target_filter
@@ -29036,7 +29221,7 @@ pub mod tests {
     fn stack_condition_strips_event_time_gates_but_keeps_intervening_if() {
         let intervening_if = TriggerCondition::SourceEnteredThisTurn;
         let event_time = TriggerCondition::EventTime {
-            condition: Box::new(TriggerCondition::SourceIsAttacking),
+            condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
         };
         for mode in [TriggerMode::Attacks, TriggerMode::SpellCast] {
             let trigger = make_trigger(mode.clone());
@@ -41428,6 +41613,7 @@ pub mod tests {
                                 supertypes: vec![],
                                 static_abilities: vec![],
                                 enter_with_counters: vec![],
+                                additional_members: Vec::new(),
                             },
                         )
                         .player_scope(
@@ -65266,7 +65452,7 @@ pub mod tests {
             assert_eq!(
                 trigger.condition,
                 Some(TriggerCondition::EventTime {
-                    condition: Box::new(TriggerCondition::SourceIsAttacking),
+                    condition: Box::new(TriggerCondition::SourceIsAttacking { player: None }),
                 }),
                 "precondition: the parsed trigger must carry the event-time SourceIsAttacking gate"
             );

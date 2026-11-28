@@ -3,10 +3,10 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CounterCostSelection, Effect,
-    QuantityExpr, ReplacementDefinition, SacrificeCost, TapCreaturesRequirement,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
-    REMOVE_COUNTER_COST_X,
+    AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, BlightCount,
+    CounterCostSelection, Effect, QuantityExpr, ReplacementDefinition, SacrificeCost,
+    TapCreaturesRequirement, TapCreaturesSelectionMode, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter, REMOVE_COUNTER_COST_X,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::{CounterMatch, CounterType};
@@ -414,7 +414,7 @@ fn targeted_activation_surfaces_blight_cost_after_target_selection() {
     let source = scenario
         .add_creature(P0, "Targeted Blight Cost", 1, 1)
         .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Blight {
-            count: 1,
+            count: BlightCount::Fixed(1),
         }))
         .id();
     // Keep the payment creature alive after the -1/-1 counter so this test

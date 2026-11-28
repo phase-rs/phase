@@ -6196,7 +6196,9 @@ impl ResolutionStack {
 /// Version 15 retains as-enters dice instructions and parked entry custody.
 /// Version 16 makes per-batch token-batch `applied` sets authoritative; v15
 /// payloads migrate the event shared set into key-less appended batches.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 16;
+/// Version 17 lets a draw frame hold `this_way_antecedent_ledger`, omitted when
+/// absent; earlier versions decode it as absent.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 17;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -7499,6 +7501,7 @@ impl ResolutionStateWire {
             | LEGACY_UNSTAGED_COPY_ENTRY_RESOLUTION_STATE_WIRE_VERSION
             | 14
             | LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION
+            | 16
             | RESOLUTION_STATE_WIRE_VERSION
                 if version <= latest_supported_version =>
             {
@@ -13764,7 +13767,10 @@ mod tests {
     fn current_logical_zone_owners_require_prospective_entrants() {
         for batch in [false, true] {
             let mut wire = logical_zone_owner_wire(batch);
-            assert_eq!(wire["resolution_state_version"], Value::from(16));
+            assert_eq!(
+                wire["resolution_state_version"],
+                Value::from(RESOLUTION_STATE_WIRE_VERSION)
+            );
             serde_json::from_value::<ResolutionStateWire>(wire.clone())
                 .expect("reach: the complete current owner restores");
             logical_zone_owner_group(&mut wire, batch).remove("prospective_entrants");
@@ -14045,21 +14051,20 @@ mod tests {
     }
 
     #[test]
-    fn the_current_wire_declares_16_and_v15_still_decodes() {
+    fn the_current_wire_declares_17_and_v16_still_decodes() {
         let wire = serde_json::to_value(ResolutionStateWire::from_game_state(
             GameState::new_two_player(42),
         ))
         .expect("wire serializes");
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 16);
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 17);
         assert_eq!(
             wire["resolution_state_version"],
             Value::from(RESOLUTION_STATE_WIRE_VERSION)
         );
         let mut legacy = wire.clone();
-        legacy["resolution_state_version"] =
-            Value::from(LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION);
+        legacy["resolution_state_version"] = Value::from(16);
         serde_json::from_value::<ResolutionStateWire>(legacy)
-            .expect("a declared-15 payload still decodes");
+            .expect("a declared-16 payload still decodes");
         let mut future = wire;
         future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
         let error = serde_json::from_value::<ResolutionStateWire>(future)
@@ -14072,19 +14077,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_mode_for_version_admits_15_as_v4_and_refuses_17() {
+    fn decode_mode_for_version_admits_16_as_v4_and_refuses_the_next_version() {
         assert!(matches!(
-            ResolutionStateWire::decode_mode_for_version(
-                LEGACY_SHARED_TOKEN_BATCH_APPLIED_RESOLUTION_STATE_WIRE_VERSION,
-                RESOLUTION_STATE_WIRE_VERSION
-            ),
+            ResolutionStateWire::decode_mode_for_version(16, RESOLUTION_STATE_WIRE_VERSION),
             Ok(GameStateDecodeMode::ResolutionWireV4)
         ));
         let error = ResolutionStateWire::decode_mode_for_version(
             RESOLUTION_STATE_WIRE_VERSION + 1,
             RESOLUTION_STATE_WIRE_VERSION,
         )
-        .expect_err("17 is refused");
+        .expect_err("the next version is refused");
         assert!(
             error.contains("unsupported resolution_state_version"),
             "{error}"
@@ -14093,7 +14095,7 @@ mod tests {
 
     #[test]
     fn current_compound_parks_with_empty_batch_sets_are_not_rewritten() {
-        // The discriminator protects current data: a v16 payload whose batches
+        // The discriminator protects current data: a current (v16 or later) payload whose batches
         // genuinely omit the key (empty sets) keeps them absent.
         let event_applied = Value::Array(vec![legacy_applied_key_json(9, 0)]);
         let wire = legacy_compound_wire(

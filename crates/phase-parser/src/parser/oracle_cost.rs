@@ -1,7 +1,9 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value, verify};
+use nom::character::complete::{digit1, multispace0};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, map_res, opt, peek, recognize, rest, value, verify,
+};
 use nom::error::ParseError;
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
@@ -30,11 +32,12 @@ use super::oracle_util::parse_number;
 use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
-    AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
-    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerFilter,
-    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement,
-    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_ANY_NUMBER, EXILE_COST_X,
-    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, BlightCount, ChoiceType,
+    Comparator, ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty,
+    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost,
+    SacrificeRequirement, TapCreaturesRequirement, TargetFilter, TypedFilter,
+    EXILE_COST_ANY_NUMBER, EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER,
+    REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -881,6 +884,38 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     parse_single_cost_in(text, CostChannel::SourceCost)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlightOperand {
+    Fixed(u32),
+    AnnouncedX,
+}
+
+pub(crate) fn parse_blight_head(input: &str) -> OracleResult<'_, &str> {
+    terminated(tag("blight"), peek(alt((tag(" "), eof)))).parse(input)
+}
+
+pub(crate) fn parse_blight_operand(input: &str) -> OracleResult<'_, BlightOperand> {
+    preceded(
+        tag("blight "),
+        alt((
+            map(map_res(digit1, str::parse::<u32>), BlightOperand::Fixed),
+            value(
+                BlightOperand::AnnouncedX,
+                terminated(tag("x"), peek(alt((tag("."), tag(" "), eof)))),
+            ),
+        )),
+    )
+    .parse(input)
+}
+
+pub(crate) fn parse_fixed_blight(input: &str) -> OracleResult<'_, u32> {
+    map_opt(parse_blight_operand, |operand| match operand {
+        BlightOperand::Fixed(count) => Some(count),
+        BlightOperand::AnnouncedX => None,
+    })
+    .parse(input)
+}
+
 /// [`parse_single_cost`] for a cost leg written on an explicit [`CostChannel`].
 fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
@@ -1318,10 +1353,15 @@ fn parse_single_cost_in(text: &str, channel: CostChannel) -> AbilityCost {
     }
 
     // "Blight N"
-    if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("blight ")).parse(i)) {
-        let rest_lower = rest.to_lowercase();
-        let count = parse_number(&rest_lower).map(|(n, _)| n).unwrap_or(1);
-        return AbilityCost::Blight { count };
+    if parse_blight_head(&lower).is_ok() {
+        return match all_consuming(parse_fixed_blight).parse(lower.as_str()) {
+            Ok((_, count)) => AbilityCost::Blight {
+                count: BlightCount::Fixed(count),
+            },
+            Err(_) => AbilityCost::Unimplemented {
+                description: text.to_string(),
+            },
+        };
     }
 
     // "Remove N {type} counter(s) from ~" or "Remove all {type} counters from ~"
@@ -5249,7 +5289,9 @@ mod tests {
     fn cost_blight() {
         assert_eq!(
             parse_oracle_cost("Blight 2"),
-            AbilityCost::Blight { count: 2 }
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(2)
+            }
         );
     }
 
@@ -5257,7 +5299,9 @@ mod tests {
     fn cost_blight_one() {
         assert_eq!(
             parse_oracle_cost("Blight 1"),
-            AbilityCost::Blight { count: 1 }
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(1)
+            }
         );
     }
 
@@ -6124,7 +6168,12 @@ mod tests {
                 assert_eq!(costs.len(), 3);
                 assert!(matches!(costs[0], AbilityCost::Mana { .. }));
                 assert_eq!(costs[1], AbilityCost::Tap);
-                assert_eq!(costs[2], AbilityCost::Blight { count: 1 });
+                assert_eq!(
+                    costs[2],
+                    AbilityCost::Blight {
+                        count: BlightCount::Fixed(1)
+                    }
+                );
             }
             other => panic!("Expected Composite, got {:?}", other),
         }

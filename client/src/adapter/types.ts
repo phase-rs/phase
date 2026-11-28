@@ -1205,7 +1205,7 @@ export type KeywordKind = string;
 
 export type Comparator = "GT" | "LT" | "GE" | "LE" | "EQ" | "NE";
 
-export type AbilityActivationScope = "OfSpellType" | "Any";
+export type AbilityActivationScope = "OfSpellType" | "Any" | "AnyNonSpellPayment";
 
 export type AbilityTag = {
   type:
@@ -1239,7 +1239,8 @@ export type SpecialAction =
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
   | "EndContinuousEffect"
   // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
-  | "Foretell";
+  | "Foretell"
+  | "Suspend";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -2601,6 +2602,9 @@ export interface PendingCast {
   ability: ResolvedAbility;
   cost: ManaCost;
   activation_cost?: SerializedAbilityCost;
+  // Engine marker that `cost` holds the mana leg and `activation_cost` holds
+  // the unpaid tail. The default `None` is omitted on the wire.
+  activation_residual?: "XMana" | "ManaLeg";
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
@@ -3145,7 +3149,7 @@ export type WaitingFor =
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
-  | { type: "ChooseTokenHost"; data: { player: PlayerId; source_id: ObjectId; legal_targets: TargetRef[]; pending_ability: unknown } }
+  | { type: "ChooseTokenHost"; data: { player: PlayerId; source_id: ObjectId; legal_targets: TargetRef[]; pending_ability: unknown; chosen_hosts?: (TargetRef | null)[] } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
@@ -3267,6 +3271,7 @@ export type WaitingFor =
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown; remaining: number; filter?: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number; min_total_power?: number | null; trigger_event?: unknown } }
   | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
+  | { type: "UnlessBlightChoice"; data: { player: PlayerId; counters: number; creatures: ObjectId[]; pending_effect: unknown; cost: SerializedAbilityCost; trigger_event?: unknown; effect_description?: string | null; remaining: PlayerId[]; affected_object?: ObjectId | null } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "RevealUntilKeptChoice"; data: { player: PlayerId; hit_card: ObjectId; source_id: ObjectId; accept_zone: string; decline_zone: string; enter_tapped: boolean; enters_attacking: boolean; revealed_misses: ObjectId[]; rest_destination: string } }
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }

@@ -675,6 +675,7 @@
     "connection": "Błąd połączenia",
     "incompatible": "Ten draft nie jest zgodny z twoją wersją protokołu.",
     "unreadable": "Nie można odczytać tego zapisanego draftu, więc nie można go wznowić.",
+    "recoverySave": "Nie udało się zapisać danych przywracania draftu",
     "retry": "Spróbuj połączyć ponownie"
   },
   "winston": {

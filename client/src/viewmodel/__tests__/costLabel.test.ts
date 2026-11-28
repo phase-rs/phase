@@ -8,12 +8,23 @@ import {
   abilityLabel,
   additionalCostChoices,
   formatAbilityCost,
+  formatBlightCost,
   formatCost,
   spellCostDisplay,
   stripLoyaltyCostPrefix,
   unlessDrawCostLabel,
   unlessPaymentCanBeDeclined,
 } from "../costLabel.ts";
+
+it("labels fixed zero and announced Blight X without a default amount", () => {
+  expect(formatAbilityCost({ type: "Blight", count: 0 })).toBe("Blight 0");
+  expect(formatAbilityCost({ type: "Blight", count: 2 })).toBe("Blight 2");
+  expect(formatAbilityCost({
+    type: "Blight",
+    count: { type: "AnnouncedX", maximum: { type: "Ref" } },
+  })).toBe("Blight X (up to the greatest toughness among creatures you control)");
+  expect(formatBlightCost(undefined)).toBeNull();
+});
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
   return buildGameObject({

@@ -87,6 +87,42 @@ describe("TargetingOverlay", () => {
     });
   });
 
+  it("keeps Ward's blight instruction and names the spell the payment protects", () => {
+    const creature = buildGameObjectWithCoreTypes(["Creature"], { id: 10, zone: "Battlefield" });
+    const bolt = buildGameObjectWithCoreTypes(["Instant"], { id: 20, zone: "Stack", name: "Lightning Bolt" });
+    const auntie = buildGameObjectWithCoreTypes(["Creature"], {
+      id: 30,
+      zone: "Battlefield",
+      name: "Auntie Ool, Cursewretch",
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(creature, bolt, auntie),
+      battlefield: [10, 30],
+      waiting_for: {
+        type: "UnlessBlightChoice",
+        data: {
+          player: 0,
+          counters: 2,
+          creatures: [10],
+          cost: { type: "Blight", count: 2 },
+          pending_effect: { source_id: 30, targets: [] },
+          trigger_event: { type: "BecomesTarget", data: { target: { Object: 30 }, source_id: 20 } },
+          remaining: [],
+          affected_object: 20,
+        },
+      },
+    });
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("Put 2 -1/-1 counters on a creature you control")).toBeInTheDocument();
+    expect(screen.getByText("Pay to protect Lightning Bolt")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Don’t Pay" })).toBeInTheDocument();
+  });
+
   it("uses the native keep-tapped skip action for an untap decision", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const permanent = buildGameObject({ id: 10, zone: "Battlefield", tapped: true });
@@ -1844,6 +1880,48 @@ describe("TargetingOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("shows the Ward Blight amount and lets only the payer decline", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const choice = {
+      counters: 2,
+      creatures: [7],
+      pending_effect: {},
+      cost: { type: "Blight", count: 2 },
+      remaining: [],
+    };
+    const gameState = createGameState({
+      waiting_for: {
+        type: "UnlessBlightChoice",
+        data: { ...choice, player: 1 },
+      },
+    });
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+    expect(screen.queryByRole("button", { name: "Don’t Pay" })).not.toBeInTheDocument();
+    act(() => {
+      const payerPrompt = {
+        type: "UnlessBlightChoice",
+        data: { ...choice, player: 0 },
+      } satisfies GameState["waiting_for"];
+      useGameStore.setState({
+        gameState: { ...gameState, waiting_for: payerPrompt },
+        waitingFor: payerPrompt,
+      });
+    });
+    expect(screen.getByText("Put 2 -1/-1 counters on a creature you control"))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Don’t Pay" }));
+    expect(dispatch).toHaveBeenCalledWith({ type: "PayUnlessCost", data: { pay: false } });
   });
 
   // CR 608.2d + CR 115.10a: a single-pick `ChooseObjectsSelection` (`max: 1`) is a

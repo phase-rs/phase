@@ -1549,6 +1549,72 @@ fn fifo_deadlines_are_prompt_scoped() {
 }
 
 #[test]
+fn fifo_next_running_deadline_is_the_deadline_expiry_acts_on() {
+    let mut session = fixture(DraftKind::Premier, 6, 0, 0, 0, None);
+    let due = crate::clock::next_running_deadline(&session).expect("a running clock");
+    choose(&mut session, 0, 1500);
+    assert_eq!(crate::clock::next_running_deadline(&session), Some(due));
+    let mut early = session.clone();
+    let events = apply_at(&mut early, DraftAction::AdvanceClock, None, due - 1).unwrap();
+    assert!(accepted(&events).is_empty());
+    let events = apply_at(&mut session, DraftAction::AdvanceClock, None, due).unwrap();
+    assert!(!accepted(&events).is_empty());
+    assert!(crate::clock::next_running_deadline(&session).is_some_and(|next| next > due));
+
+    let mut untimed_config = config(DraftKind::Premier, 6, 0, 0, 0);
+    untimed_config.clock_policy.pick = PickClockPolicy::Off;
+    let mut untimed = lobby(untimed_config);
+    apply_at(
+        &mut untimed,
+        DraftAction::StartDraft,
+        Some(&Source {
+            size: 6,
+            effect_seat: None,
+        }),
+        1000,
+    )
+    .unwrap();
+    assert_eq!(untimed.status, Drafting);
+    assert_eq!(crate::clock::next_running_deadline(&untimed), None);
+
+    let legacy = legacy_mixed_fixture(DraftKind::Premier);
+    assert_eq!(crate::clock::next_running_deadline(&legacy), None);
+}
+
+#[test]
+fn fifo_next_running_deadline_follows_pause_resume_and_review() {
+    let mut session = fixture(DraftKind::Premier, 2, 0, 0, 1000, None);
+    drain_round(&mut session, 1100);
+    assert_eq!(session.status, Review);
+    assert_eq!(crate::clock::next_running_deadline(&session), Some(2100));
+    apply_at(
+        &mut session,
+        DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        },
+        None,
+        1600,
+    )
+    .unwrap();
+    assert_eq!(crate::clock::next_running_deadline(&session), None);
+    apply_at(
+        &mut session,
+        DraftAction::Control {
+            control: DraftControl::Resume,
+        },
+        None,
+        9000,
+    )
+    .unwrap();
+    assert_eq!(crate::clock::next_running_deadline(&session), Some(9500));
+    apply_at(&mut session, DraftAction::AdvanceClock, None, 9500).unwrap();
+    assert_eq!(session.status, Drafting);
+    assert_eq!(crate::clock::next_running_deadline(&session), Some(10500));
+}
+
+#[test]
 fn fifo_clock_policy_boundaries() {
     for (seconds, expected_duration) in [
         (None, Some(75_000)),

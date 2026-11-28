@@ -3302,13 +3302,15 @@ fn pay_ability_cost_inner(
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
-        | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         // CR 701.3d + CR 601.2h: A non-self unattach cost is paid by the
         // interactive `WaitingFor::PayCost { kind: UnattachFrom }` detour before
         // this resume runs, so this arm is an idempotent no-op (mirrors the
         // non-self Exile/Sacrifice interactive-cost arms).
         | AbilityCost::UnattachFrom { .. } => {}
+        AbilityCost::Blight { .. } => {
+            return Ok(payment_failed("Blight requires a creature choice"));
+        }
         // CR 614.12a + CR 118.3 + CR 701.4a: resolution-time single-object
         // Behold costs either auto-pay their sole candidate or pause for a
         // selection; the replacement resume continues after that choice.
@@ -4175,6 +4177,13 @@ pub(crate) fn resolution_cost_includes_impossible_event(
             counter_kind,
             count,
         } => player_counter_gain_is_prohibited(state, payer, *counter_kind, *count),
+        // CR 701.68b: an unless payment cannot offer a Blight that has no recipient.
+        AbilityCost::Blight { count } => match count {
+            crate::types::ability::BlightCount::Fixed(count) => {
+                super::effects::blight::eligible_blight_creatures(state, payer, *count).is_empty()
+            }
+            crate::types::ability::BlightCount::AnnouncedX { .. } => true,
+        },
         AbilityCost::EffectCost { effect } => match effect.as_ref() {
             // CR 614.17b + CR 702.24a: cumulative upkeep's source-counter effect-cost shape.
             Effect::PutCounter {
@@ -4276,7 +4285,6 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
@@ -5165,7 +5173,9 @@ mod tests {
             },
             AbilityCost::Mill { .. } => AbilityCost::Mill { count: 1 },
             AbilityCost::Exert => AbilityCost::Exert,
-            AbilityCost::Blight { .. } => AbilityCost::Blight { count: 1 },
+            AbilityCost::Blight { .. } => AbilityCost::Blight {
+                count: crate::types::ability::BlightCount::Fixed(1),
+            },
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -5289,7 +5299,9 @@ mod tests {
             },
             AbilityCost::Mill { count: 0 },
             AbilityCost::Exert,
-            AbilityCost::Blight { count: 0 },
+            AbilityCost::Blight {
+                count: crate::types::ability::BlightCount::Fixed(0),
+            },
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 0 },
                 filter: None,

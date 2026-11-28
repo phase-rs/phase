@@ -24,6 +24,12 @@ Each entry MUST include:
 
 ## Active shims
 
+Fixed Blight counts retain their canonical numeric representation in card data
+and checkpoints. An announced Blight X uses a tagged count with an explicit
+maximum expression. A checkpoint containing a numeric Blight count resumes
+with that fixed amount. Fresh Oracle parsing supplies bounded X to newly
+created card definitions.
+
 ### `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`
 
 - **Grep token:** `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`

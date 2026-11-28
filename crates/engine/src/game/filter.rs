@@ -10789,14 +10789,66 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
-    let ability = ability?;
+    read_parent_target_name(
+        state,
+        ability?,
+        |object| object.name.clone(),
+        |snapshot| snapshot.name.clone(),
+    )
+}
+
+/// CR 201.2a + CR 608.2h + CR 709.4a: a captured multi-name object keeps each
+/// name from its last-known name identity. Room subtypes are mutable, so they
+/// cannot be used to decide whether a captured joined name has two names.
+pub(crate) fn parent_target_names(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<String>> {
+    fn names(room_names: Option<(&str, &str)>, name: &str) -> Vec<String> {
+        match room_names {
+            Some((left, right)) if !card_names_match(left, right) => [left, right]
+                .into_iter()
+                .filter_map(name_value)
+                .map(str::to_owned)
+                .collect(),
+            Some((left, _)) => vec![left.to_owned()],
+            None => name_value(name).map(str::to_owned).into_iter().collect(),
+        }
+    }
+    read_parent_target_name(
+        state,
+        ability,
+        |object| {
+            let door_names = super::room::effective_battlefield_door_names(object);
+            names(
+                door_names
+                    .as_ref()
+                    .map(|[left, right]| (left.as_str(), right.as_str())),
+                &object.name,
+            )
+        },
+        |snapshot| {
+            names(
+                snapshot.name.split_once(super::room::DOOR_NAME_SEPARATOR),
+                &snapshot.name,
+            )
+        },
+    )
+}
+
+fn read_parent_target_name<T>(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    live_name: impl FnOnce(&GameObject) -> T,
+    captured_name: impl FnOnce(&LKISnapshot) -> T,
+) -> Option<T> {
     let id = first_object_target(ability)?;
     if let Some(snapshot) = ability
         .effect_context_object
         .as_ref()
         .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
     {
-        return Some(snapshot.lki.name.clone());
+        return Some(captured_name(&snapshot.lki));
     }
     if let Some(lki) = ability
         .targets
@@ -10806,12 +10858,12 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
         .filter(|pin| !pin.is_current(state))
         .and_then(|pin| exit_lki_for_incarnation(state, id, pin.incarnation))
     {
-        return Some(lki.name.clone());
+        return Some(captured_name(lki));
     }
     if let Some(obj) = state.objects.get(&id) {
-        return Some(obj.name.clone());
+        return Some(live_name(obj));
     }
-    state.lki_cache.get(&id).map(|lki| lki.name.clone())
+    state.lki_cache.get(&id).map(captured_name)
 }
 
 fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
@@ -12654,6 +12706,9 @@ pub(crate) fn object_has_no_abilities(obj: &GameObject) -> bool {
 /// named" match. Single authority for every
 /// `FilterProp::Named` arm (live object, spell-cast record, zone-change record).
 pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
+    let (Some(a), Some(b)) = (name_value(a), name_value(b)) else {
+        return false;
+    };
     if a.is_ascii() && b.is_ascii() {
         a.eq_ignore_ascii_case(b)
     } else {
@@ -22595,6 +22650,9 @@ mod tests {
     /// pairwise path give the same answer.
     #[test]
     fn names_shared_and_shared_name_values_agree_on_the_nameless_test() {
+        assert!(!card_names_match("", ""));
+        assert!(!card_names_match("Grizzly Bears", ""));
+        assert!(card_names_match("Grizzly Bears", "grizzly bears"));
         assert!(
             !names_shared("", ""),
             "a nameless object shares no name, not even with another nameless one"
@@ -27980,6 +28038,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parent_target_names_splits_captured_multi_name_identity() {
+        let mut state = setup();
+        let target = add_creature(&mut state, PlayerId(1), "Current Name");
+        let object = &state.objects[&target];
+        let mut ability = ResolvedAbility::new(
+            Effect::unimplemented("test effect", ""),
+            vec![TargetRef::Object(target)],
+            target,
+            PlayerId(0),
+        );
+        let mut lki = object.snapshot_public_characteristics();
+        lki.name = "Moldering Gym // Weight Room".into();
+        ability.effect_context_object = Some(CostPaidObjectSnapshot::capture(object, lki));
+        assert_eq!(
+            parent_target_names(&state, &ability).unwrap(),
+            ["Moldering Gym", "Weight Room"],
+        );
+    }
+
     /// CR 608.2h + CR 201.2a + CR 707.2: `SameNameAsParentTarget` reads the
     /// parent target's name from the effect-context snapshot only when that
     /// snapshot names the SAME object and is still current (the object is as
@@ -32030,6 +32108,7 @@ mod attached_set_host_filter_tests {
             declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
                 object_id: host,
                 incarnation: Some(departed.incarnation),
+                ordinal_this_turn: None,
                 lki: empty_lki(),
                 is_token: false,
                 is_commander: false,
@@ -32099,6 +32178,7 @@ mod attached_set_host_filter_tests {
             declaration_records: vec![crate::types::game_state::AttackDeclarationRecord {
                 object_id: host,
                 incarnation: Some(current.incarnation),
+                ordinal_this_turn: None,
                 lki: empty_lki(),
                 is_token: false,
                 is_commander: false,

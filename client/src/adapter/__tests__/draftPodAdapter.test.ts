@@ -23,6 +23,7 @@ import {
   type DraftHostSessionLoadResult,
   type PersistedDraftHostSession,
 } from "../../services/draftPersistence";
+import type { ActiveDraftPointerTxn } from "../../services/draftPersistence";
 import type { DraftWorkspaceState } from "../../components/draft/workspace/types";
 import type { BrokerClient } from "../../services/brokerClient";
 
@@ -1588,6 +1589,18 @@ describe("DraftPodGuestAdapter", () => {
     await adapter.initialize({ kind: "new", roomCode: "ABCDE", displayName: "Alice" });
 
     const guestEventHandler = mockGuestOnEvent.mock.calls[0][0];
+
+    // A committed recovery pointer passes through verbatim, with the
+    // transaction's capability it was handed with and no status change.
+    const pointer = { roomCode: "ABCDE", displayName: "Alice", hostPeerId: "host-peer", capabilityId: "cap-1" };
+    const recovery = {} as ActiveDraftPointerTxn;
+    const statusBeforePointer = adapter.status;
+    const eventsBeforePointer = events.length;
+    guestEventHandler({ type: "recoveryCommitted", pointer, recovery });
+    expect(events.slice(eventsBeforePointer)).toEqual([{ type: "recoveryCommitted", pointer, recovery }]);
+    const reemitted = events[eventsBeforePointer] as Extract<DraftPodGuestEvent, { type: "recoveryCommitted" }>;
+    expect(reemitted.recovery).toBe(recovery);
+    expect(adapter.status).toBe(statusBeforePointer);
 
     // Simulate join
     guestEventHandler({ type: "joined", seatIndex: 3, draftCode: "draft-001" });

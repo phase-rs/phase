@@ -2892,6 +2892,7 @@ fn fast_loyalty_owner_resumes_after_replacement_child_trigger_retires() {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         },
     );
     install_replacement_on_steward(

@@ -4191,16 +4191,24 @@ fn parse_subject_application_for(
                 ctx.relative_player_scope,
                 Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
             ) {
-                // CR 608.2c + CR 106.12a: An explicit triggering/defending player
-                // scope established by `relative_player_scope_for_condition`
-                // (e.g. the instant/sorcery taps-for-mana delayed trigger split:
-                // "whenever a player taps <type> for mana, that player adds …" —
-                // High Tide, Bubbling Muck) makes "that player" the triggering
-                // player, NOT the parent target's controller. Without this arm the
-                // scope is resolved but silently discarded, defaulting to
-                // `ParentTargetController` below. `ctx_filter` is the matching
-                // event-context ref for the parsed subject phrase.
-                ctx_filter
+                // CR 608.2c: a plain demonstrative follows the player named by
+                // the head. Explicit attacking-player phrases keep their own ref.
+                match subject_anaphor {
+                    PlayerSubjectAnaphor::Player => {
+                        match (&ctx.relative_player_scope, &ctx_filter) {
+                            (
+                                Some(ControllerRef::TriggeringPlayer),
+                                TargetFilter::DefendingPlayer,
+                            ) => TargetFilter::TriggeringPlayer,
+                            (
+                                Some(ControllerRef::DefendingPlayer),
+                                TargetFilter::TriggeringPlayer,
+                            ) => TargetFilter::DefendingPlayer,
+                            _ => ctx_filter,
+                        }
+                    }
+                    PlayerSubjectAnaphor::AttackingPlayer => ctx_filter,
+                }
             } else if let Some(filter) =
                 enchanted_player_anaphor_filter(ctx.relative_player_scope.as_ref())
                     .filter(|_| matches!(subject_anaphor, PlayerSubjectAnaphor::Player))
@@ -13383,27 +13391,25 @@ mod tests {
             &mut ctx,
         );
 
-        let mut names = Vec::new();
-        let mut effect = &clause.effect;
-        let mut next = clause.sub_ability.as_deref();
-        loop {
-            let Effect::Token { name, owner, .. } = effect else {
-                panic!("expected shared token sequence, got {effect:?}");
-            };
-            names.push(name.as_str());
-            assert_eq!(
-                owner,
-                &TargetFilter::AttachedTo,
-                "{name} must be created by the enchanted opponent"
-            );
-
-            let Some(definition) = next else {
-                break;
-            };
-            effect = definition.effect.as_ref();
-            next = definition.sub_ability.as_deref();
-        }
-
+        assert!(clause.sub_ability.is_none());
+        let Effect::Token {
+            name,
+            owner,
+            additional_members,
+            ..
+        } = &clause.effect
+        else {
+            panic!("expected shared token creation, got {:?}", clause.effect);
+        };
+        assert_eq!(owner, &TargetFilter::AttachedTo);
+        let names: Vec<_> = std::iter::once(name.as_str())
+            .chain(additional_members.iter().map(|member| {
+                let Effect::Token { name, .. } = member.effect() else {
+                    unreachable!("a token member holds a token effect");
+                };
+                name.as_str()
+            }))
+            .collect();
         assert_eq!(names, ["Clue", "Food", "Junk"]);
     }
 

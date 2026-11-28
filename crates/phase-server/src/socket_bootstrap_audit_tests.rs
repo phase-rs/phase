@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use crate::draft_socket_authority_tests::{start_draft_match_with_deck, test_draft_config};
+use crate::draft_socket_authority_tests::{
+    accepted_result, draft_request_id, next_draft_result, start_draft_match_with_deck,
+    test_draft_config,
+};
 use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
 use crate::issue_4548_full_create_tests::{
     recv_server_message, send_test_message, spawn_full_mode_server, spawn_full_mode_server_with_db,
@@ -11,7 +14,9 @@ use crate::issue_4548_full_create_tests::{
 use crate::socket_test_hooks::run_async_test;
 use draft_core::types::{DraftAction, PodPolicy};
 use engine::types::actions::{GameAction, MulliganChoice};
-use server_core::protocol::{ClientMessage, DeckChoice, DeckData, ServerMessage};
+use server_core::protocol::{
+    ClientMessage, DeckChoice, DeckData, DraftCommandResult, ServerMessage,
+};
 
 type ClientSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -30,14 +35,15 @@ async fn draft_host(app: &crate::AppState, url: String) -> (String, ClientSocket
         &ClientMessage::ReconnectDraft {
             draft_code: code.clone(),
             player_token: token,
+            request_id: draft_request_id(401),
         },
         false,
     )
     .await;
-    while !matches!(
-        recv_server_message(&mut host).await,
-        ServerMessage::DraftStateUpdate { .. }
-    ) {}
+    assert!(matches!(
+        accepted_result(next_draft_result(&mut host).await, 401),
+        DraftCommandResult::Reconnected { .. }
+    ));
     (code, host)
 }
 
@@ -50,20 +56,18 @@ async fn replace_bot(host: &mut ClientSocket, code: &str) {
                 seat: 7,
                 name: Some("after-bootstrap".to_string()),
             },
+            request_id: draft_request_id(402),
         },
         false,
     )
     .await;
-    loop {
-        match recv_server_message(host).await {
-            ServerMessage::DraftStateUpdate { view } => {
-                assert_eq!(view.seats[7].display_name, "after-bootstrap");
-                assert!(view.seats[7].is_bot);
-                break;
-            }
-            ServerMessage::DraftActionRejected { reason } => panic!("host mutation: {reason}"),
-            _ => {}
+    // The host's own result settles the mutation; its fan-out stays queued.
+    match accepted_result(next_draft_result(host).await, 402) {
+        DraftCommandResult::Applied { view, .. } => {
+            assert_eq!(view.seats[7].display_name, "after-bootstrap");
+            assert!(view.seats[7].is_bot);
         }
+        other => panic!("host mutation: {other:?}"),
     }
 }
 
@@ -94,21 +98,24 @@ fn draft_creator_bootstrap_does_not_wait_for_unrelated_lobby_work() {
                     tournament_format: config.tournament_format,
                     pod_policy: PodPolicy::Casual,
                     pod_size: config.pod_size,
+                    fifo_policy: None,
+                    request_id: draft_request_id(403),
                 },
                 false,
             )
             .await;
-            let code = loop {
-                if let Some(code) = app.draft_sessions.lock().await.sessions.keys().next() {
-                    break code.clone();
-                }
-                tokio::task::yield_now().await;
+            let code = match accepted_result(next_draft_result(&mut host).await, 403) {
+                DraftCommandResult::Created {
+                    draft_code,
+                    seat_index: 0,
+                    ..
+                } => draft_code,
+                other => panic!("expected the creator's seat-0 result, got {other:?}"),
             };
-            assert!(matches!(
-                recv_server_message(&mut host).await,
-                ServerMessage::DraftCreated { draft_code, seat_index: 0, .. } if draft_code == code
-            ));
+            // The create holds the draft guard while it waits for the lobby,
+            // so the manager is read only once the lobby is free.
             drop(held);
+            assert!(app.draft_sessions.lock().await.sessions.contains_key(&code));
         })
         .await;
         server.abort();
@@ -130,24 +137,23 @@ fn draft_join_bootstrap_precedes_a_concurrent_host_mutation() {
                     draft_code: code.clone(),
                     display_name: "guest".to_string(),
                     password: None,
+                    request_id: draft_request_id(404),
                 },
                 false,
             )
             .await;
             gate.entered.notified().await;
             replace_bot(&mut host, &code).await;
-            loop {
-                match recv_server_message(&mut guest).await {
-                    ServerMessage::DraftJoined { view, .. } => {
-                        assert_ne!(view.seats[7].display_name, "after-bootstrap");
-                        break;
-                    }
-                    ServerMessage::DraftStateUpdate { .. } => {
-                        panic!("a draft update overtook the joining seat's binding")
-                    }
-                    ServerMessage::DraftActionRejected { reason } => panic!("join: {reason}"),
-                    _ => {}
+            match next_draft_result(&mut guest).await {
+                ServerMessage::DraftStateUpdate { .. } => {
+                    panic!("a draft update overtook the joining seat's binding")
                 }
+                joined => match accepted_result(joined, 404) {
+                    DraftCommandResult::Joined { view, .. } => {
+                        assert_ne!(view.seats[7].display_name, "after-bootstrap");
+                    }
+                    other => panic!("join: {other:?}"),
+                },
             }
             loop {
                 if let ServerMessage::DraftStateUpdate { view } =

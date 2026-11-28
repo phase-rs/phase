@@ -715,7 +715,7 @@ fn scan_game_restriction(r: &GameRestriction, mode: ScanMode) -> Axes<'_> {
                 | RestrictionPlayerScope::SpecificPlayer(_)
                 | RestrictionPlayerScope::TargetedPlayer
                 | RestrictionPlayerScope::ParentTargetedPlayer
-                | RestrictionPlayerScope::ParentObjectTargetController
+                | RestrictionPlayerScope::ParentObjectTarget { .. }
                 | RestrictionPlayerScope::OpponentsOfSourceController
                 | RestrictionPlayerScope::DefendingPlayer
                 | RestrictionPlayerScope::SourceController => Axes::NONE,
@@ -995,6 +995,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             enters_attacking: _,
             attack_destination,
             supertypes: _,
+            additional_members,
         } => match mode {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
@@ -1038,6 +1039,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
                 }
                 for (_counter_type, qty) in enter_with_counters {
                     acc = acc.or(scan_quantity_expr(qty, mode));
+                }
+                for member in additional_members {
+                    acc = acc.or(scan_effect(member.effect(), mode));
                 }
                 acc
             }
@@ -5324,6 +5328,9 @@ fn scan_trigger_definition(
         // CR 509.3e: the blocker-count threshold's blocker filter is an event
         // matcher like `valid_target` (scanned below); `minimum` is a literal.
         blocker_count,
+        // CR 508.3a: later declarations derive their ordinals from this turn's
+        // exact attack history, so the matcher can observe its growth.
+        attack_declaration_ordinal,
 
         // ---- read-free: the Room-half (door) STAMP — a matcher key like the
         //      filters above, at its most inert end. `RoomDoor` is a fieldless two-variant
@@ -5421,7 +5428,11 @@ fn scan_trigger_definition(
         ));
     }
     // CR 603.2 event matchers — context rationale in the destructure above.
-    let mut matcher = Axes::NONE;
+    let mut matcher = if attack_declaration_ordinal.is_some() {
+        Axes::history_of(HistoryMember::AttackerDeclarationsThisTurn)
+    } else {
+        Axes::NONE
+    };
     for f in [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
@@ -5649,7 +5660,9 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             kicker_cost: _,
             min_count: _,
         } => Axes::NONE,
-        TriggerCondition::SourceIsAttacking => Axes::NONE,
+        TriggerCondition::SourceIsAttacking { player } => player
+            .as_ref()
+            .map_or(Axes::NONE, |player| scan_player_filter(player, mode)),
         TriggerCondition::CastVariantPaid { variant: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
         }
@@ -7936,6 +7949,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         AbilityCost::PayLife { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PayEnergy { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PaySpeed { amount } => scan_quantity_expr(amount, mode),
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { maximum },
+        } => scan_quantity_expr(maximum, mode),
         AbilityCost::Discard {
             count,
             filter: _,
@@ -7977,7 +7993,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
+        | AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
@@ -8325,6 +8343,7 @@ fn scan_ward_cost(cost: &WardCost, mode: ScanMode) -> Axes<'_> {
         | WardCost::PayLifeEqualToPower
         | WardCost::Discard { filter: None, .. }
         | WardCost::Waterbend(_)
+        | WardCost::Blight(_)
         | WardCost::GetPlayerCounters { .. } => Axes::NONE,
     }
 }
@@ -9370,8 +9389,8 @@ fn replacement_definition_axes<'a>(
         counter_replacement_subject: _,
         granting_object: _,
         entry_payment_max,
+        additional_token_spec,
         // The objects these create are scanned once they are live.
-        additional_token_spec: _,
         ensure_token_specs: _,
     } = def;
     let mut acc = Axes::NONE;
@@ -9422,6 +9441,9 @@ fn replacement_definition_axes<'a>(
     // CR 614.12a: the entry-payment cap reads live game state (Nameless Race).
     if let Some(max) = entry_payment_max {
         acc = acc.or(scan_quantity_expr(max, mode));
+    }
+    if let Some(append) = additional_token_spec {
+        acc = acc.or(scan_quantity_expr(&append.count, mode));
     }
     if let Some(modification) = damage_modification {
         acc = acc.or(scan_damage_modification(modification, mode));
@@ -11499,6 +11521,7 @@ mod tests {
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         }
     }
 

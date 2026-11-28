@@ -30,6 +30,7 @@ use super::{
     attach_controller_if_absent, hand_reveal_target_to_controller_ref, is_bare_object_pronoun,
     is_bare_plural_object_pronoun, resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
+use crate::parser::oracle_cost::parse_fixed_blight;
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::bind_controller_phrase;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -5234,6 +5235,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
             enter_with_counters: vec![],
+            additional_members: Vec::new(),
         },
         SearchCreationImperativeAst::Seek {
             filter,
@@ -16958,14 +16960,9 @@ pub(super) fn parse_imperative_family_ast(
         }
         // Blight N as an effect (e.g. trigger effect "blight 1")
         "blight" => {
-            let rest = alt((tag::<_, _, OracleError<'_>>("blight "), tag("blight")))
+            let (_, count) = all_consuming(terminated(parse_fixed_blight, opt(tag("."))))
                 .parse(lower)
-                .map(|(r, _)| r)
-                .unwrap_or("");
-            let count = nom_primitives::parse_number
-                .parse(rest.trim())
-                .map(|(_, n)| n)
-                .unwrap_or(1);
+                .ok()?;
             Some(ImperativeFamilyAst::GainKeyword(Effect::BlightEffect {
                 count,
                 // CR 701.68a: bare "blight N" is the controller blighting.
@@ -18674,6 +18671,7 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
+                    additional_members: Vec::new(),
                 },
             )
             .condition(AbilityCondition::DiscardedCardMatchesFilter { filter: nonland });

@@ -156,11 +156,13 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
     }
 }
 
-/// CR 608.2c: a play permission over the moved cards ("You may play that card
-/// this turn") directly before the head is not the moving instruction; the
-/// runtime leaves the ledger in place across that one node
-/// (`permission_node_keeps_ledger_for_this_way_head`, the same single effect
-/// kind).
+/// CR 608.2c: a play permission over the moved cards directly before the head
+/// is not the moving instruction. The runtime ledger writer
+/// (`keeps_this_way_ledger_for_following_head`) also leaves the ledger in place
+/// across a draw, but this guard deliberately skips only a play permission: a
+/// "when … this way" reflexive directly after a draw keeps its
+/// `zone_change_reflexive_event_source` gap, so it fails closed rather than
+/// being accepted without a runtime test.
 fn grants_play_permission(effect: &Effect) -> bool {
     matches!(effect, Effect::GrantCastingPermission { .. })
 }

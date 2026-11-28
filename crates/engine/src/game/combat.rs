@@ -5799,11 +5799,7 @@ fn attack_passes_temporary_prohibition(
                 crate::types::ability::ProhibitedActivity::Attack {
                     defended,
                     protected_player,
-                    // MECHANICAL: the scope-selection field is parser→resolver
-                    // metadata consumed solely by `add_restriction` at creation;
-                    // enforcement reads only the snapshotted player. No behavior
-                    // change.
-                    protected_scope: _,
+                    protected_scope,
                 },
             ..
         } = restriction
@@ -5813,9 +5809,27 @@ fn attack_passes_temporary_prohibition(
         // New restrictions snapshot the protected player on resolution. Legacy
         // serialized restrictions have no snapshot and retain their historic
         // source-controller lookup.
-        let Some(protected) = (*protected_player)
-            .or_else(|| state.objects.get(source).map(|object| object.controller))
-        else {
+        let Some(protected) = (*protected_player).or_else(|| match protected_scope {
+            // CR 108.3 + CR 608.2h: an unresolved parent owner supplies no
+            // player; last-known information cannot be replaced by source control.
+            Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Owner,
+            }) => None,
+            None
+            | Some(crate::types::ability::RestrictionPlayerScope::AllPlayers)
+            | Some(crate::types::ability::RestrictionPlayerScope::SpecificPlayer(_))
+            | Some(crate::types::ability::RestrictionPlayerScope::TargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::OpponentsOfSourceController)
+            | Some(crate::types::ability::RestrictionPlayerScope::DefendingPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            })
+            | Some(crate::types::ability::RestrictionPlayerScope::ScopedPlayer)
+            | Some(crate::types::ability::RestrictionPlayerScope::SourceController) => {
+                state.objects.get(source).map(|object| object.controller)
+            }
+        }) else {
             continue;
         };
         let attacker_is_affected = match affected_players {
@@ -5837,7 +5851,7 @@ fn attack_passes_temporary_prohibition(
             crate::types::ability::RestrictionPlayerScope::TargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::ParentTargetedPlayer
             | crate::types::ability::RestrictionPlayerScope::DefendingPlayer
-            | crate::types::ability::RestrictionPlayerScope::ParentObjectTargetController
+            | crate::types::ability::RestrictionPlayerScope::ParentObjectTarget { .. }
             | crate::types::ability::RestrictionPlayerScope::ScopedPlayer
             | crate::types::ability::RestrictionPlayerScope::SourceController => false,
         };
@@ -7210,6 +7224,19 @@ fn validate_declaration_core(
     Ok(())
 }
 
+pub(super) fn next_attack_declaration_ordinal(state: &GameState, attacker: &GameObject) -> u32 {
+    let previous_declarations = state
+        .attacker_declarations_this_turn
+        .iter()
+        .filter(|record| {
+            record.object_id == attacker.id && record.incarnation == Some(attacker.incarnation)
+        })
+        .count();
+    u32::try_from(previous_declarations)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1)
+}
+
 pub fn declare_attackers_with_bands(
     state: &mut GameState,
     attacks: &[(ObjectId, AttackTarget)],
@@ -7384,10 +7411,11 @@ pub(super) fn commit_attack_declaration(
     let attacker_declarations: Vec<_> = attacker_ids
         .iter()
         .filter_map(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| obj.snapshot_for_attack_declaration(*id))
+            state.objects.get(id).map(|obj| {
+                let mut declaration = obj.snapshot_for_attack_declaration(*id);
+                declaration.ordinal_this_turn = Some(next_attack_declaration_ordinal(state, obj));
+                declaration
+            })
         })
         .collect();
 
@@ -8945,6 +8973,18 @@ fn single_event_defender(
     defenders.all(|defender| defender == first).then_some(first)
 }
 
+/// CR 508.5 + CR 508.5a: Resolve the defender identified by an already-bound
+/// attack event, including an observer firing whose source attacked elsewhere.
+pub(crate) fn defending_player_in_attack_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+) -> Option<PlayerId> {
+    let (entries, global) = attack_entries(event)?;
+    entry_defender(state, entries, global, source_id)
+        .or_else(|| single_event_defender(state, entries, global))
+}
+
 /// CR 508.5 (+ CR 508.5a / CR 802.2a in multiplayer): THE authority that decides
 /// which attack answers a "defending player" reference.
 ///
@@ -9048,14 +9088,11 @@ pub(crate) fn defending_player_cr508_5(
     let entry_id = trigger_source.map_or(asker_id, |source| source.identity.reference.object_id);
 
     // The ONE binding rule, evaluated in the ONE place it may be evaluated.
-    with_bound_attack_event(state, trigger_source, |event| {
-        match event.and_then(attack_entries) {
-            Some((entries, global)) => entry_defender(state, entries, global, entry_id)
-                .or_else(|| single_event_defender(state, entries, global))
-                .or(latch)
-                .or(Some(global)),
-            None => latch,
-        }
+    with_bound_attack_event(state, trigger_source, |event| match event {
+        Some(event) => defending_player_in_attack_event(state, event, entry_id)
+            .or(latch)
+            .or_else(|| attack_entries(event).map(|(_, global)| global)),
+        None => latch,
     })
     .or_else(|| resolve_defending_player(state, asker_id))
 }
@@ -9171,6 +9208,8 @@ pub(crate) fn attacked_referent_departure_row<'a>(
     }
 }
 
+pub(crate) type AttackDestination = (AttackTarget, Option<ObjectIncarnationRef>);
+
 /// CR 506.3: the attack target of the attacking creature `referent`, or none.
 ///
 /// * (a) Still the live creature (`live`) and attacking (an `AttackerInfo` that
@@ -9189,21 +9228,56 @@ fn attack_target_referent(
     is_asker: bool,
     live: bool,
     event: Option<&GameEvent>,
-) -> Option<(AttackTarget, Option<ObjectIncarnationRef>)> {
+) -> Option<AttackDestination> {
     if live {
-        return state.combat.as_ref().and_then(|combat| {
-            combat
-                .attackers
-                .iter()
-                .find(|info| info.object_id == referent)
-                .filter(|info| is_attacker_in_play(state, info.object_id))
-                .and_then(|info| active_attack_target(state, info))
-        });
+        return live_attack_destination(state, referent);
     }
-    let status = departed_attack_row(state, referent, asker, is_asker, event)?.combat_status;
+    departure_attack_destination(departed_attack_row(
+        state, referent, asker, is_asker, event,
+    )?)
+}
+
+pub(super) fn live_attack_destination(
+    state: &GameState,
+    attacker: ObjectId,
+) -> Option<AttackDestination> {
+    state
+        .combat
+        .as_ref()?
+        .attackers
+        .iter()
+        .find(|info| info.object_id == attacker)
+        .filter(|info| is_attacker_in_play(state, info.object_id))
+        .and_then(|info| active_attack_target(state, info))
+}
+
+fn departure_attack_destination(
+    row: &crate::types::game_state::ZoneChangeRecord,
+) -> Option<AttackDestination> {
+    let status = row.combat_status;
     status
         .attack_target
         .map(|target| (target, status.attack_target_identity))
+}
+
+/// CR 400.7 + CR 506.4 + CR 608.2h: distinguish an absent combat destination
+/// from missing evidence for the original creature.
+pub(crate) fn attack_destination_of_incarnation(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<Option<AttackDestination>> {
+    if state
+        .objects
+        .get(&identity.object_id)
+        .is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && ObjectIncarnationRef::from_object(object) == identity
+        })
+    {
+        return Some(live_attack_destination(state, identity.object_id));
+    }
+    let row = crate::types::game_state::exact_battlefield_departure_row(state, identity)?;
+    Some(departure_attack_destination(row))
 }
 
 /// CR 506.3 + CR 115.10a: THE authority for "the player or planeswalker it's
@@ -11647,6 +11721,46 @@ mod tests {
         state.turn_number = 2;
         state.active_player = PlayerId(0);
         state
+    }
+
+    #[test]
+    fn unresolved_parent_owner_does_not_fallback_to_source_controller() {
+        // CR 508.1c: an unresolved protected-player owner must not make an
+        // otherwise legal attack fail against the restriction source's player.
+        let mut state = setup();
+        state.active_player = PlayerId(1);
+        state.phase = Phase::DeclareAttackers;
+        let attacker = create_creature(&mut state, PlayerId(1), "Attacker", 2, 2);
+        let source = create_creature(&mut state, PlayerId(0), "Restriction Source", 1, 1);
+        state
+            .restrictions
+            .push(crate::types::ability::GameRestriction::ProhibitActivity {
+                source,
+                affected_players: crate::types::ability::RestrictionPlayerScope::AllPlayers,
+                expiry: crate::types::ability::RestrictionExpiry::EndOfTurn,
+                activity: crate::types::ability::ProhibitedActivity::Attack {
+                    defended: crate::types::triggers::AttackTargetFilter::Player,
+                    protected_player: None,
+                    protected_scope: Some(
+                        crate::types::ability::RestrictionPlayerScope::ParentObjectTarget {
+                            possession: crate::types::ability::PossessionAxis::Owner,
+                        },
+                    ),
+                },
+            });
+        let gates = CombatStaticGates::compute(&state);
+        assert!(attack_passes_temporary_prohibition(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+        ));
+        assert!(attacker_can_attack_target(
+            &state,
+            attacker,
+            AttackTarget::Player(PlayerId(0)),
+            &gates,
+            &[PlayerId(1)],
+        ));
     }
 
     /// Test adapter: derive both defender-scoped cap sets from `state` exactly

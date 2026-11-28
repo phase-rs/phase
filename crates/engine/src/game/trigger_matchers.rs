@@ -965,7 +965,13 @@ fn player_matches_filter_as(
             .chosen_attributes
             .iter()
             .any(|choice| matches!(choice, crate::types::ability::ChosenAttribute::Player(chosen) if *chosen == player_id)),
-        TargetFilter::AttachedTo => {
+        // CR 303.4b + CR 303.4m: "enchanted player" is the player the source
+        // permanent is attached to.
+        TargetFilter::AttachedTo
+        | TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::EnchantedPlayer),
+            ..
+        }) => {
             source_context
                 .source_read(state)
                 .attached_to()
@@ -2635,10 +2641,83 @@ pub(super) fn attack_firings(
             .find_map(|(attacker_id, target)| (*attacker_id == id).then_some(*target))
             .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player))
     };
+    let matches_declaration_ordinal = |id| {
+        trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+            let source = source_context.identity.reference;
+            let incarnation = if source.object_id == id {
+                Some(source.incarnation)
+            } else {
+                state.objects.get(&id).map(|object| object.incarnation)
+            };
+            declaration_records.iter().any(|record| {
+                record.object_id == id
+                    && record.incarnation == incarnation
+                    && record.ordinal_this_turn == Some(ordinal)
+            })
+        })
+    };
     let player_scope = trigger
         .valid_source
         .as_ref()
         .filter(|filter| filter.is_player_scope());
+    if let Some(filter) = player_scope.filter(|_| !trigger.batched) {
+        use crate::types::triggers::AttackTargetFilter;
+
+        // CR 508.3d + CR 508.3e + CR 805.10b: a combined declaration can contain
+        // multiple actors. A named defending player adds a second grouping
+        // axis. Keep the full admitted set for each actor's event conditions.
+        let binds_defender = combat_filter(trigger).is_some()
+            || matches!(
+                trigger.attack_target_filter,
+                Some(
+                    AttackTargetFilter::Player
+                        | AttackTargetFilter::Monarch
+                        | AttackTargetFilter::PlayerOrPlaneswalker
+                )
+            );
+        let mut groups = indexmap::IndexMap::new();
+        for &id in attacker_ids {
+            let Some(actor) =
+                super::targeting::attack_declaration_controller(state, declaration_records, id)
+            else {
+                continue;
+            };
+            let target = attack_target_of(id);
+            if !matches_declaration_ordinal(id)
+                || !player_matches_filter(filter, state, actor, source_context)
+                || !attack_target_matches(trigger, state, target, *defending_player, source_context)
+            {
+                continue;
+            }
+            let defender =
+                super::combat::defending_player_for_target_or(state, target, *defending_player);
+            let key = (actor, binds_defender.then_some(defender));
+            groups
+                .entry(key)
+                .or_insert_with(|| (defender, Vec::new()))
+                .1
+                .push((id, target));
+        }
+        return groups
+            .into_values()
+            .map(|(defending_player, attacks)| {
+                let attacker_ids: Vec<_> = attacks.iter().map(|&(id, _)| id).collect();
+                let context = GameEvent::AttackersDeclared {
+                    declaration_records: super::triggers::declaration_records_for_attackers(
+                        event,
+                        &attacker_ids,
+                    ),
+                    attacker_ids,
+                    defending_player,
+                    attacks,
+                };
+                AttackFiring {
+                    admitted: context.clone(),
+                    context,
+                }
+            })
+            .collect();
+    }
     if let Some(filter) = player_scope {
         // CR 508.3d + CR 508.5a: "[player] attacks [opponent]" triggers
         // once per attacked defending player, not once per attacking
@@ -2667,8 +2746,9 @@ pub(super) fn attack_firings(
     let accepted: Vec<(ObjectId, crate::game::combat::AttackTarget, PlayerId)> = attacker_ids
         .iter()
         .filter_map(|id| {
-            if player_scope.is_none()
-                && !attack_declaration_attacker_matches(trigger, state, *id, source_context)
+            if !matches_declaration_ordinal(*id)
+                || (player_scope.is_none()
+                    && !attack_declaration_attacker_matches(trigger, state, *id, source_context))
             {
                 return None;
             }
@@ -2770,6 +2850,7 @@ fn attack_declaration_attacker_matches(
 /// per attacker, so such a trigger answers false. A `valid_target` beside an
 /// attacker-side filter ("whenever this creature attacks the player with the
 /// most life") is checked per attacker like any other.
+/// A declaration ordinal is checked against this attacker's next declaration.
 pub fn attack_trigger_matches_attack(
     state: &GameState,
     source: &crate::game::game_object::GameObject,
@@ -2792,26 +2873,24 @@ pub fn attack_trigger_matches_attack(
         return false;
     };
     let source_context = super::triggers::trigger_source_context_for_latch(state, source);
-    attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
+    trigger.attack_declaration_ordinal.is_none_or(|ordinal| {
+        state.objects.get(&attacker).is_some_and(|object| {
+            super::combat::next_attack_declaration_ordinal(state, object) == ordinal
+        })
+    }) && attack_declaration_attacker_matches(trigger, state, attacker, &source_context)
         && attack_target_matches(trigger, state, target, defending_player, &source_context)
 }
 
-/// CR 508.3d + CR 508.5a: expand one `AttackersDeclared` event into one
-/// narrowed context per ATTACKED player, each carrying that player's complete
-/// matching attacker set — the antecedent of the followed clause's "those
-/// creatures" and the referent of "defending player" / "that player"
-/// ("Whenever one or more creatures attack one of your opponents, if any of
-/// those creatures have power or toughness equal to the chosen number, Squall
-/// deals damage equal to its power to defending player."). Wizards' Neyali,
-/// the Plumecrest release note states the same occurrence grammar for
-/// "attack <player>" ("triggers for each player you are attacking with one or
-/// more tokens"): the attacked player is the grouping axis, so one declaration
-/// against two opponents is TWO occurrences, each with its own attacker set —
-/// never one combined set answered by the first defender. An attacked player
-/// with no matching attacker produces no group. The player-subject branch of
-/// [`matching_attack_events`] already narrows one context per attacked player
-/// (the subject there is the attacking player), so it is reused as-is.
-pub(super) fn matching_attack_events_by_defending_player(
+/// CR 508.1b + CR 603.2c: expand a declaration into one occurrence per
+/// qualifying destination named by the trigger. For "attack one of your
+/// opponents or a planeswalker they control", a planeswalker is its own
+/// destination. Its controller determines whether the attack qualifies.
+/// Player-only heads group by attacked player, which also supplies the
+/// "defending player" referent (CR 508.5a). Each occurrence carries the
+/// corresponding attacker set for "those creatures".
+/// The player-subject branch of [`matching_attack_events`] already narrows
+/// one context per attacked player, so reuse it here.
+pub(super) fn matching_attack_events_by_destination(
     event: &GameEvent,
     trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
@@ -2833,8 +2912,12 @@ pub(super) fn matching_attack_events_by_defending_player(
     {
         return matching_attack_events(event, trigger, source_context, state);
     }
-    let mut groups: Vec<(PlayerId, Vec<(ObjectId, crate::game::combat::AttackTarget)>)> =
-        Vec::new();
+    use crate::game::combat::AttackTarget;
+    use crate::types::triggers::AttackTargetFilter;
+
+    let groups_by_destination =
+        trigger.attack_target_filter == Some(AttackTargetFilter::PlayerOrPlaneswalker);
+    let mut groups: Vec<(AttackTarget, Vec<(ObjectId, AttackTarget)>)> = Vec::new();
     for id in attacker_ids {
         if !attack_declaration_attacker_matches(trigger, state, *id, source_context) {
             continue;
@@ -2842,23 +2925,27 @@ pub(super) fn matching_attack_events_by_defending_player(
         let target = attacks
             .iter()
             .find_map(|(attacker_id, target)| (*attacker_id == *id).then_some(*target))
-            .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            .unwrap_or(AttackTarget::Player(*defending_player));
         if !attack_target_matches(trigger, state, target, *defending_player, source_context) {
             continue;
         }
-        let event_defending_player =
-            crate::game::combat::defending_player_for_target_or(state, target, *defending_player);
-        match groups
-            .iter_mut()
-            .find(|(player, _)| *player == event_defending_player)
-        {
+        let destination = if groups_by_destination {
+            target
+        } else {
+            AttackTarget::Player(crate::game::combat::defending_player_for_target_or(
+                state,
+                target,
+                *defending_player,
+            ))
+        };
+        match groups.iter_mut().find(|(key, _)| *key == destination) {
             Some((_, members)) => members.push((*id, target)),
-            None => groups.push((event_defending_player, vec![(*id, target)])),
+            None => groups.push((destination, vec![(*id, target)])),
         }
     }
     groups
         .into_iter()
-        .map(|(event_defending_player, members)| {
+        .map(|(destination, members)| {
             let attacker_ids: Vec<ObjectId> = members.iter().map(|(id, _)| *id).collect();
             GameEvent::AttackersDeclared {
                 declaration_records: super::triggers::declaration_records_for_attackers(
@@ -2866,7 +2953,11 @@ pub(super) fn matching_attack_events_by_defending_player(
                     &attacker_ids,
                 ),
                 attacker_ids,
-                defending_player: event_defending_player,
+                defending_player: crate::game::combat::defending_player_for_target_or(
+                    state,
+                    destination,
+                    *defending_player,
+                ),
                 attacks: members,
             }
         })

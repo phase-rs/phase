@@ -1964,8 +1964,7 @@ pub(crate) fn move_to_zone_with_entry_flags(
         // CR 509.1g + CR 506.4 + CR 608.2h: snapshot the object's current block
         // pairings before exit cleanup removes it from combat. A liminal entry
         // projection is not in combat, so it records none.
-        zone_change_record.block_pairs = super::combat::live_block_pairs_of(state, object_id);
-        capture_combat_status(state, object_id)
+        capture_zone_change_combat(state, obj, &mut zone_change_record)
     };
     zone_change_record.sync_trigger_source_context();
 
@@ -3039,6 +3038,72 @@ fn sever_battlefield_attachment_graph_on_exit(
     severed_and_announced
 }
 
+/// CR 603.10a + CR 608.2h: every member of a simultaneous departure
+/// sees the combat relations that existed before the first delivery.
+pub(crate) fn capture_batch_departure_combat(
+    state: &GameState,
+    group: &mut crate::types::game_state::LogicalZoneChangeGroup,
+) {
+    group.departure_combat.clear();
+    if state.combat.is_none() || group.prospective_battlefield_members.len() < 2 {
+        return;
+    }
+    group
+        .departure_combat
+        .extend(
+            group
+                .prospective_battlefield_members
+                .iter()
+                .filter_map(|member| {
+                    let object = state.objects.get(&member.identity.object_id)?;
+                    if object.zone != Zone::Battlefield
+                        || ObjectIncarnationRef::from_object(object) != member.identity
+                    {
+                        return None;
+                    }
+                    Some(crate::types::game_state::DepartureCombatSnapshot {
+                        identity: member.identity,
+                        status: capture_combat_status(state, object.id),
+                        block_pairs: super::combat::live_block_pairs_of(state, object.id),
+                    })
+                }),
+        );
+}
+
+pub(crate) fn simultaneous_departure_combat(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+) -> Option<&crate::types::game_state::DepartureCombatSnapshot> {
+    match &state.active_departure_combat {
+        Some(snapshot) => (snapshot.identity == identity).then_some(snapshot),
+        None => state
+            .resolution_stack
+            .paused_owner_group_of(identity.object_id)
+            .and_then(|group| {
+                group
+                    .departure_combat
+                    .iter()
+                    .find(|item| item.identity == identity)
+            }),
+    }
+}
+
+fn capture_zone_change_combat(
+    state: &GameState,
+    object: &GameObject,
+    record: &mut ZoneChangeRecord,
+) -> ZoneChangeCombatStatus {
+    let snapshot = (object.zone == Zone::Battlefield)
+        .then(|| ObjectIncarnationRef::from_object(object))
+        .and_then(|identity| simultaneous_departure_combat(state, identity));
+    if let Some(snapshot) = snapshot {
+        record.block_pairs.clone_from(&snapshot.block_pairs);
+        return snapshot.status;
+    }
+    record.block_pairs = super::combat::live_block_pairs_of(state, object.id);
+    capture_combat_status(state, object.id)
+}
+
 pub(crate) fn capture_combat_status(
     state: &GameState,
     object_id: ObjectId,
@@ -3388,6 +3453,8 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before the departure
     // sever (CR 701.3d) clears it.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
+    zone_change_record.combat_status =
+        capture_zone_change_combat(state, obj, &mut zone_change_record);
     // CR 113.6b + CR 400.7 + CR 611.3a: this path bypasses `move_to_zone`'s
     // dirty-mark block (see `move_to_zone`), so both the moved object's own
     // zone-of-function crossing and the board-wide zone-read scan must run here
@@ -3422,10 +3489,6 @@ pub fn move_to_library_at_index(
     ) {
         crate::game::layers::mark_layers_full(state);
     }
-    zone_change_record.combat_status = capture_combat_status(state, object_id);
-    // CR 509.1g + CR 506.4 + CR 608.2h: as in `move_to_zone_with_entry_flags`,
-    // snapshot the current block pairings before exit cleanup prunes them.
-    zone_change_record.block_pairs = super::combat::live_block_pairs_of(state, object_id);
     // CR 603.10a + CR 607.2a: as in `move_to_zone_with_entry_flags`, snapshot
     // the linked "exiled with" cards before CR 400.7 cleanup prunes them.
     zone_change_record.linked_exile_snapshot =

@@ -474,6 +474,7 @@ fn ability_activation_scope_rank(value: AbilityActivationScope) -> u8 {
     match value {
         AbilityActivationScope::OfSpellType => 0,
         AbilityActivationScope::Any => 1,
+        AbilityActivationScope::AnyNonSpellPayment => 2,
     }
 }
 
@@ -507,6 +508,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::RollPlanarDie => 4,
         SpecialAction::EndContinuousEffect => 5,
         SpecialAction::Foretell => 6,
+        SpecialAction::Suspend => 7,
     }
 }
 

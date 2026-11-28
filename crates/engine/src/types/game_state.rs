@@ -2993,6 +2993,13 @@ impl BattlefieldEntryObservations {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DepartureCombatSnapshot {
+    pub identity: ObjectIncarnationRef,
+    pub status: ZoneChangeCombatStatus,
+    pub block_pairs: Vec<BlockHistoryPair>,
+}
+
 /// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
 /// object leaving its current zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3047,6 +3054,9 @@ pub struct AttackDeclarationRecord {
     /// legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incarnation: Option<u64>,
+    /// CR 508.3a: This incarnation's declaration ordinal within the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordinal_this_turn: Option<u32>,
     pub lki: LKISnapshot,
     /// CR 111.1: Token identity at declaration time.
     #[serde(default)]
@@ -4818,10 +4828,9 @@ impl LatchedSuppressTrigger {
 /// Both pause carriers persist this same shape. Its terminal and occurrence
 /// authority deliberately has no serde defaults: an active legacy carrier cannot
 /// reconstruct the original member set, terminal outcomes, or already-delivered
-/// event authority safely. `announced_members` alone defaults to empty, because a
-/// legacy carrier without it only loses the CR 614.4 co-entrant exclusion for its
-/// later members (they are checked against every permanent on the battlefield, as
-/// before).
+/// event authority safely. Legacy carriers without `announced_members` keep
+/// their previous CR 614.4 co-entrant behavior. Those without `departure_combat`
+/// continue to capture combat at delivery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogicalZoneChangeGroup {
     pub logical_group_id: LogicalZoneChangeGroupId,
@@ -4867,6 +4876,9 @@ pub struct LogicalZoneChangeGroup {
     /// permanent on the battlefield, as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub announced_members: Vec<ObjectIncarnationRef>,
+    /// CR 603.10a + CR 608.2h: combat facts from before simultaneous delivery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) departure_combat: Vec<DepartureCombatSnapshot>,
     /// CR 603.10 + CR 800.4a: the post-event authority of a player who left
     /// while this owner was paused (`retire_contexts_owned_by`), kept for the
     /// occurrences completed by then and merged into the final
@@ -4935,6 +4947,8 @@ struct LogicalZoneChangeGroupWire {
     #[serde(default)]
     announced_members: Vec<ObjectIncarnationRef>,
     #[serde(default)]
+    departure_combat: Vec<DepartureCombatSnapshot>,
+    #[serde(default)]
     departed_owner_after_batched_triggers: Vec<LatchedBatchedTrigger>,
     #[serde(default)]
     departed_owner_after_suppress_triggers: Vec<LatchedSuppressTrigger>,
@@ -4957,6 +4971,7 @@ impl From<LogicalZoneChangeGroupWire> for LogicalZoneChangeGroup {
             immediately_after_batched_triggers: wire.immediately_after_batched_triggers,
             immediately_after_suppress_triggers: wire.immediately_after_suppress_triggers,
             announced_members: wire.announced_members,
+            departure_combat: wire.departure_combat,
             departed_owner_after_batched_triggers: wire.departed_owner_after_batched_triggers,
             departed_owner_after_suppress_triggers: wire.departed_owner_after_suppress_triggers,
         }
@@ -5000,6 +5015,12 @@ impl LogicalZoneChangeGroup {
                 ));
             }
             member_ids.insert(member.identity.object_id);
+        }
+        let mut combat_members = HashSet::with_capacity(self.departure_combat.len());
+        for snapshot in &self.departure_combat {
+            if !members.contains(&snapshot.identity) || !combat_members.insert(snapshot.identity) {
+                return Err("logical zone-change combat snapshot has an invalid member".to_string());
+            }
         }
         let mut entrants = HashSet::with_capacity(self.prospective_entrants.len());
         for entrant in &self.prospective_entrants {
@@ -5236,6 +5257,7 @@ impl LogicalZoneChangeGroup {
             immediately_after_batched_triggers: Vec::new(),
             immediately_after_suppress_triggers: Vec::new(),
             announced_members: Vec::new(),
+            departure_combat: Vec::new(),
             departed_owner_after_batched_triggers: Vec::new(),
             departed_owner_after_suppress_triggers: Vec::new(),
         }
@@ -12944,6 +12966,9 @@ pub struct PendingCast {
     /// rollback-able announcement choice.
     #[serde(default)]
     pub activation_cost_committed: bool,
+    /// The exact recipient of a Blight payment staged for replacement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blight_in_flight: Option<ObjectIncarnationRef>,
     /// CR 118.9 + CR 601.2b: When this cast is offered a once-per-turn
     /// `CastWithAlternativeCost` grant (As Foretold), the granting permanent's id.
     /// Carried across the `OptionalCostChoice` round-trip so the accept handler can
@@ -13551,6 +13576,8 @@ pub enum PendingCostMoveResume {
         /// the active draw frame (CR 614.11a), never by this suffix.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unpaid_suffix: Option<Box<UnpaidCostSuffix>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blight: Option<UnlessBlightPlacement>,
     },
     /// CR 701.9b + CR 118.12 + CR 616.1: a RANDOM unless-discard that paused on
     /// a replacement choice (Library of Leng, Madness) partway through its batch.
@@ -13796,6 +13823,13 @@ pub struct UnpaidCostSuffix {
     pub remainder: UnpaidCostRemainder,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessBlightPlacement {
+    pub payer: PlayerId,
+    pub recipient: ObjectIncarnationRef,
+    pub affected_object: Option<ObjectId>,
+}
+
 /// CR 118.12 + CR 702.24a: the shape of an unless-payment's unpaid remainder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UnpaidCostRemainder {
@@ -13995,6 +14029,7 @@ impl PendingCast {
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -15094,6 +15129,10 @@ impl WaitingFor {
                 ..
             }
             | WaitingFor::UnlessPaymentChooseCost {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::UnlessBlightChoice {
                 trigger_event: Some(event),
                 ..
             }
@@ -21818,10 +21857,78 @@ impl GameState {
     ///   cursor; any other prompt there would be answered as a fresh choice
     ///   over a payment already begun.
     fn validate_parked_unless_payment(&self) -> Result<(), String> {
+        let in_flight_placement_matches =
+            |payer, recipient: ObjectIncarnationRef, expected_count: Option<u32>| {
+                self.objects
+                .get(&recipient.object_id)
+                .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
+                && self.pending_replacement.as_ref().is_some_and(|pending| {
+                    matches!(
+                        pending.proposed,
+                        ProposedEvent::AddCounter {
+                            placement: super::proposed_event::CounterPlacement::Object {
+                                actor,
+                                object_id,
+                                counter_type: CounterType::Minus1Minus1,
+                                ..
+                            },
+                            count,
+                            ref applied,
+                        } if actor == payer
+                            && object_id == recipient.object_id
+                            && (!applied.is_empty() || expected_count.is_none_or(|expected| expected == count))
+                    )
+                })
+            };
+        let cast_in_flight = self.pending_cast.as_deref().and_then(|cast| {
+            cast.blight_in_flight
+                .map(|recipient| (cast.ability.controller, recipient))
+        });
+        if cast_in_flight
+            .is_some_and(|(payer, recipient)| !in_flight_placement_matches(payer, recipient, None))
+        {
+            return Err("parked cast Blight does not own its counter placement".to_string());
+        }
+        if let WaitingFor::UnlessBlightChoice {
+            player,
+            counters,
+            creatures,
+            cost,
+            pending_effect,
+            trigger_event,
+            ..
+        } = &self.waiting_for
+        {
+            if !self
+                .players
+                .iter()
+                .any(|seat| seat.id == *player && !seat.is_eliminated)
+                || creatures.is_empty()
+                || *creatures
+                    != crate::game::effects::blight::eligible_blight_creatures(
+                        self, *player, *counters,
+                    )
+                || crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
+                    != Some(*counters)
+                || self.pending_cost_move_resume.is_some()
+                || cast_in_flight.is_some()
+                || !valid_unless_blight_referent(
+                    self,
+                    *player,
+                    pending_effect,
+                    trigger_event.as_ref(),
+                )
+            {
+                return Err("invalid parked Blight selection".to_string());
+            }
+        }
         let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
             cost,
+            pending_effect,
+            trigger_event,
             remaining,
             unpaid_suffix,
+            blight,
             ..
         }) = &self.pending_cost_move_resume
         else {
@@ -21833,6 +21940,25 @@ impl GameState {
                 .iter()
                 .any(|seat| seat.id == player && !seat.is_eliminated)
         };
+        if let Some(blight) = blight {
+            let Some(count) = crate::game::engine_payment_choices::fixed_unless_blight_count(cost)
+            else {
+                return Err("invalid parked unless Blight counter placement".to_string());
+            };
+            if !in_game(blight.payer)
+                || cast_in_flight.is_some()
+                || unpaid_suffix.is_some()
+                || !valid_unless_blight_referent(
+                    self,
+                    blight.payer,
+                    pending_effect,
+                    trigger_event.as_ref(),
+                )
+                || !in_flight_placement_matches(blight.payer, blight.recipient, Some(count))
+            {
+                return Err("invalid parked unless Blight counter placement".to_string());
+            }
+        }
         if let Some(player) = remaining.iter().find(|player| !seated(**player)) {
             return Err(format!(
                 "parked unless payment polls {player:?}, who is not a seat"
@@ -23366,27 +23492,17 @@ pub enum WaitingFor {
         /// and generic Aura entry can preserve source metadata for completion.
         pending_effect: Box<ResolvedAbility>,
     },
-    /// Digital-only Alchemy (no CR entry): a batch-semantics boon's "one of
-    /// them" token host ("one or more creatures enter … attached to one of
-    /// them", Dunbarrow Revivalist). The fire path stamped every matching
-    /// entrant on the ability; 2+ are still legal, so the controller picks
-    /// the host. This is a CHOICE, not a target (no "target" word), so
-    /// hexproof / shroud / protection do NOT filter `legal_targets`. The
-    /// resume path re-enters token creation with the choice bound.
-    ///
-    /// Shaped like the `ReturnAsAuraTarget` cluster
-    /// (`player`/`source_id`/`legal_targets`/pending payload) for a future
-    /// `ObjectPick` unification (see that variant's note); a dedicated
-    /// variant today because the resume re-enters token creation rather
-    /// than attaching an existing entrant, which no cluster member does.
+    /// CR 115.10a + CR 608.2d: Choose the current token member's attachment host
+    /// during resolution. This also carries stamped Alchemy boon host choices.
     ChooseTokenHost {
         player: PlayerId,
         source_id: ObjectId,
-        /// The still-legal stamped entrants (incarnation-current battlefield
-        /// objects, in batch order) the controller chooses among.
         legal_targets: Vec<TargetRef>,
-        /// The token-creation ability to resume once the host is chosen.
         pending_ability: Box<ResolvedAbility>,
+        /// The processed prefix in creation order. Its length identifies the
+        /// member currently prompting. Old boon prompts omitted the prefix.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chosen_hosts: Vec<Option<TargetRef>>,
     },
     EquipTarget {
         player: PlayerId,
@@ -24895,6 +25011,18 @@ pub enum WaitingFor {
         /// EXISTS in state.objects, so a contains_key filter would be wrong).
         #[serde(default)]
         filter: Option<TargetFilter>,
+    },
+    /// CR 701.68a: a player chooses the creature receiving an unless payment.
+    UnlessBlightChoice {
+        player: PlayerId,
+        counters: u32,
+        creatures: Vec<ObjectId>,
+        cost: AbilityCost,
+        pending_effect: Box<ResolvedAbility>,
+        trigger_event: Option<GameEvent>,
+        effect_description: Option<String>,
+        remaining: Vec<PlayerId>,
+        affected_object: Option<ObjectId>,
     },
     /// CR 702.21a: Player must choose a permanent to sacrifice as ward cost payment.
     WardSacrificeChoice {
@@ -26744,6 +26872,7 @@ impl WaitingFor {
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::UnlessBlightChoice { .. } => "UnlessBlightChoice",
             WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
@@ -26953,6 +27082,7 @@ impl WaitingFor {
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
             | WaitingFor::WardSacrificeChoice { player, .. }
+            | WaitingFor::UnlessBlightChoice { player, .. }
             | WaitingFor::UnlessBounceChoice { player, .. }
             | WaitingFor::ConniveDiscard { player, .. }
             | WaitingFor::CombatTaxPayment { player, .. }
@@ -27290,6 +27420,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseRoomDoor { .. }
@@ -27510,6 +27641,7 @@ impl WaitingFor {
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseRoomDoor { .. }
@@ -29986,6 +30118,9 @@ declare_game_state! {
     /// instead. Never serialized and never compared.
     #[serde(skip)]
     pub(crate) active_simultaneous_entrants: Vec<ObjectId>,
+    /// Combat facts for the member currently delivered inline.
+    #[serde(skip)]
+    pub(crate) active_departure_combat: Option<DepartureCombatSnapshot>,
     /// CR 614.12: reusable scratch allocation for one synchronous copy-owner
     /// delivery segment. Not persisted, cloned, or compared; live state keeps
     /// every continuation and trigger journal authoritative.
@@ -34642,6 +34777,11 @@ fn visit_waiting_for_chains<'a>(
             pending_effect,
             trigger_event,
             ..
+        }
+        | WaitingFor::UnlessBlightChoice {
+            pending_effect,
+            trigger_event,
+            ..
         } => f(
             pending_effect,
             SuspendedChainEvent::Bound(trigger_event.as_ref()),
@@ -34854,6 +34994,33 @@ fn visit_waiting_for_chains<'a>(
     Ok(())
 }
 
+fn valid_unless_blight_referent(
+    state: &GameState,
+    payer: PlayerId,
+    pending_effect: &ResolvedAbility,
+    event: Option<&GameEvent>,
+) -> bool {
+    if !matches!(
+        pending_effect.effect,
+        super::ability::Effect::Counter {
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ) {
+        return true;
+    }
+    event.is_some_and(|event| {
+        matches!(
+            event,
+            GameEvent::BecomesTarget {
+            target: super::ability::TargetRef::Object(id),
+            targeter: Some(_),
+            ..
+            } if *id == pending_effect.source_id
+        ) && crate::game::targeting::event_referent_controller(state, event) == Some(payer)
+    })
+}
+
 /// Checked persistence compatibility for unresolved attacked-recipient reads.
 /// Raw and Trusted enter here together; transport/display decoding stays separate.
 fn validate_restored_attack_authority(
@@ -34885,6 +35052,68 @@ fn validate_restored_attack_authority(
     {
         return Err(ERROR.to_string());
     }
+    fn validate_departure(
+        state: &GameState,
+        row: &ZoneChangeRecord,
+        presence: &[bool],
+    ) -> Result<(), String> {
+        let status = row.combat_status;
+        let index = state
+            .zone_changes_this_turn
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, row))
+            .expect("selected row belongs to departure history");
+        if (!presence.get(index).copied().unwrap_or(false)
+            && (status.attacking || status.defending_player.is_some()))
+            || match (status.attack_target, status.attack_target_identity) {
+                (Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)), Some(pin)) => {
+                    pin.object_id != id
+                        || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+                }
+                (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => true,
+                (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
+                (Some(AttackTarget::Player(_)) | None, None) => false,
+            }
+        {
+            return Err(ERROR.to_string());
+        }
+        Ok(())
+    }
+
+    let check_condition = |condition: Option<&crate::types::ability::TriggerCondition>,
+                           event: Option<&GameEvent>| {
+        use crate::game::{combat, triggers};
+
+        if !condition.is_some_and(triggers::condition_reads_current_attack_destinations) {
+            return Ok(());
+        }
+        let identities = event
+            .and_then(triggers::attack_count_declaration_incarnations)
+            .ok_or_else(|| ERROR.to_string())?;
+        let mut seen_attackers = HashSet::new();
+        for identity in identities {
+            let identity = identity.ok_or_else(|| ERROR.to_string())?;
+            if !seen_attackers.insert(identity.object_id)
+                || combat::attack_destination_of_incarnation(state, identity).is_none()
+            {
+                return Err(ERROR.to_string());
+            }
+            if let Some(row) = exact_battlefield_departure_row(state, identity) {
+                validate_departure(state, row, departure_targets_present)?;
+                if let Some(pin) = row.combat_status.attack_target_identity {
+                    let live = state.objects.get(&pin.object_id).is_some_and(|object| {
+                        object.zone == Zone::Battlefield
+                            && ObjectIncarnationRef::from_object(object) == pin
+                    });
+                    if !live && exact_battlefield_departure_row(state, pin).is_none() {
+                        return Err(ERROR.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+
     fn ability(
         state: &GameState,
         node: &ResolvedAbility,
@@ -34928,31 +35157,7 @@ fn validate_restored_attack_authority(
                 return Err(ERROR.to_string());
             }
             if let Some(row) = row {
-                let status = row.combat_status;
-                let index = state
-                    .zone_changes_this_turn
-                    .iter()
-                    .position(|candidate| std::ptr::eq(candidate, row))
-                    .expect("selected row belongs to departure history");
-                if (!presence.get(index).copied().unwrap_or(false)
-                    && (status.attacking || status.defending_player.is_some()))
-                    || match (status.attack_target, status.attack_target_identity) {
-                        (
-                            Some(AttackTarget::Planeswalker(id) | AttackTarget::Battle(id)),
-                            Some(pin),
-                        ) => {
-                            pin.object_id != id
-                                || pin.incarnation == crate::types::identifiers::LEGACY_INCARNATION
-                        }
-                        (Some(AttackTarget::Planeswalker(_) | AttackTarget::Battle(_)), None) => {
-                            true
-                        }
-                        (Some(AttackTarget::Player(_)) | None, Some(_)) => true,
-                        (Some(AttackTarget::Player(_)) | None, None) => false,
-                    }
-                {
-                    return Err(ERROR.to_string());
-                }
+                validate_departure(state, row, presence)?;
             }
         }
         if let Some(sub) = node.sub_ability.as_deref() {
@@ -34967,6 +35172,7 @@ fn validate_restored_attack_authority(
         ability(state, node, event, events, departure_targets_present)
     };
     if let Some(pending) = state.pending_trigger.as_deref() {
+        check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
         check(
             &pending.ability,
             pending.trigger_event.as_ref(),
@@ -34974,6 +35180,10 @@ fn validate_restored_attack_authority(
         )?;
     }
     for pending in &state.deferred_triggers {
+        check_condition(
+            pending.pending.condition.as_ref(),
+            pending.pending.trigger_event.as_ref(),
+        )?;
         check(
             &pending.pending.ability,
             pending.pending.trigger_event.as_ref(),
@@ -34983,12 +35193,36 @@ fn validate_restored_attack_authority(
     if let Some(order) = &state.pending_trigger_order {
         for group in &order.groups {
             for pending in &group.triggers {
+                check_condition(
+                    pending.pending.condition.as_ref(),
+                    pending.pending.trigger_event.as_ref(),
+                )?;
                 check(
                     &pending.pending.ability,
                     pending.pending.trigger_event.as_ref(),
                     &pending.trigger_events,
                 )?;
             }
+        }
+    }
+    if let Some(resume) = state.pending_triggered_mana_resume.as_deref() {
+        for context in resume
+            .collected_batches
+            .iter()
+            .flat_map(|batch| &batch.contexts)
+        {
+            let pending = &context.pending;
+            check_condition(pending.condition.as_ref(), pending.trigger_event.as_ref())?;
+        }
+    }
+    for entry in &state.stack {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
         }
     }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
@@ -35018,6 +35252,14 @@ fn validate_restored_attack_authority(
         .chain(state.departed_activated_abilities.values())
         .chain(state.departed_triggered_abilities.values())
     {
+        if let StackEntryKind::TriggeredAbility {
+            condition,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            check_condition(condition.as_ref(), trigger_event.as_ref())?;
+        }
         if let Some(node) = entry.ability() {
             let event = match &entry.kind {
                 StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
@@ -36430,6 +36672,16 @@ pub struct DrawSequenceFrame {
     /// the working copy of the seat `player`; the dealer holds the others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dealer: Option<DrawDealer>,
+    /// CR 608.2c + CR 121.6b + CR 614.6: the "… this way" zone-change ledger in force
+    /// when this draw instruction began, held only when the instruction is directly
+    /// followed by a "… this way" head naming an earlier instruction
+    /// (`effects::keeps_this_way_ledger_for_following_head`). An action replacing one
+    /// of its draws (Dredge's mill-and-return, Notion Thief's draw) runs as its own
+    /// chain and publishes its own ledger; completion restores this one, so the head
+    /// reads its antecedent whether each draw was performed, replaced at once, or
+    /// replaced after a choice. Omitted when absent; older payloads decode as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub this_way_antecedent_ledger: Option<Vec<ObjectId>>,
 }
 
 /// CR 121.2 + the format's `DealOrder`: the seats of one simultaneous draw
@@ -36637,6 +36889,7 @@ impl DrawSequenceStack {
             capture_next_child_delivery: false,
             accumulated: 0,
             dealer: None,
+            this_way_antecedent_ledger: None,
         });
         debug_assert!(
             self.validate().is_ok(),
@@ -41812,6 +42065,7 @@ impl GameState {
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_simultaneous_entrants: Vec::new(),
+            active_departure_combat: None,
             pre_entry_board_cache: Default::default(),
             active_copy_token_resolution_tokens: None,
             active_casting_permission_index: None,
@@ -43456,6 +43710,34 @@ impl GameState {
         // to exist.
         let live: HashSet<ObjectId> = clone.objects.keys().copied().collect();
         clone.last_created_token_ids.retain(|id| live.contains(id));
+        // CR 508.3a + CR 732.2a: a declaration ordinal gates trigger matching.
+        // Once a firing is on the stack, its retained events are resolution
+        // context and never run the attack matcher again.
+        let clear_matched_attack_ordinal = |event: &mut GameEvent| {
+            if let GameEvent::AttackersDeclared {
+                declaration_records,
+                ..
+            } = event
+            {
+                for record in declaration_records {
+                    record.ordinal_this_turn = None;
+                }
+            }
+        };
+        for entry in clone.stack.iter_mut() {
+            if let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } = &mut entry.kind
+            {
+                clear_matched_attack_ordinal(event);
+            }
+        }
+        clone
+            .stack_trigger_event_batches
+            .values_mut()
+            .flatten()
+            .for_each(clear_matched_attack_ordinal);
         clone.for_each_trigger_event_carrier_mut(&mut |event| {
             if let GameEvent::ZoneChanged { record, .. } = event {
                 if let Some(cards) = record
@@ -45952,6 +46234,7 @@ impl GameState {
             active_rules_execution_node: _,
             // Synchronous-window `ObjectId` lists, never serialized and never compared.
             active_simultaneous_entrants: _,
+            active_departure_combat: _,
             pre_entry_board_cache: _,
             active_copy_token_resolution_tokens: _,
             active_casting_permission_index: _,
@@ -47553,6 +47836,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_simultaneous_entrants: _,
+        active_departure_combat: _,
         pre_entry_board_cache: _,
         active_copy_token_resolution_tokens: _,
         active_casting_permission_index: _,
@@ -62609,6 +62893,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: Some(named),
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62622,6 +62907,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     .push(AttackDeclarationRecord {
                         object_id: x,
                         incarnation: None,
+                        ordinal_this_turn: None,
                         lki,
                         is_token: false,
                         is_commander: false,
@@ -62721,6 +63007,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                         declaration_records: vec![AttackDeclarationRecord {
                             object_id: x,
                             incarnation: Some(named),
+                            ordinal_this_turn: None,
                             lki,
                             is_token: false,
                             is_commander: false,
@@ -65016,7 +65303,9 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 color_override: None,
                 resume: ManaAbilityResume::UnlessPayment {
                     outer_player: None,
-                    cost: Box::new(crate::types::ability::AbilityCost::Blight { count: 1 }),
+                    cost: Box::new(crate::types::ability::AbilityCost::Blight {
+                        count: crate::types::ability::BlightCount::Fixed(1),
+                    }),
                     pending_effect: Box::new(ResolvedAbility::new(
                         Effect::NoOp,
                         vec![],
@@ -69023,6 +69312,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 activation_residual: ActivationResidual::None,
                 activation_target_selection: ActivationTargetSelection::Pending,
                 activation_cost_committed: false,
+                blight_in_flight: None,
                 alt_cost_grant_source: None,
                 activation_trigger_collection: None,
                 activation_phyrexian_intent: None,
@@ -69277,7 +69567,9 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         variants.push(Box::new(WaitingFor::OptionalCostChoice {
             player: PlayerId(0),
             cost: AdditionalCost::Optional {
-                cost: crate::types::ability::AbilityCost::Blight { count: 1 },
+                cost: crate::types::ability::AbilityCost::Blight {
+                    count: crate::types::ability::BlightCount::Fixed(1),
+                },
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
             times_kicked: 0,
@@ -69726,6 +70018,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             activation_residual: ActivationResidual::None,
             activation_target_selection: ActivationTargetSelection::Pending,
             activation_cost_committed: false,
+            blight_in_flight: None,
             alt_cost_grant_source: None,
             activation_trigger_collection: None,
             activation_phyrexian_intent: None,
@@ -75595,6 +75888,7 @@ mod restored_exact_attack_authority_tests {
                     source_id: attacker,
                     legal_targets: vec![],
                     pending_ability: node.clone(),
+                    chosen_hosts: Vec::new(),
                 },
                 1 => WaitingFor::CollectEvidenceChoice {
                     player: P0,
@@ -75717,6 +76011,7 @@ mod restored_exact_attack_authority_tests {
             source_id: attacker,
             legal_targets: vec![],
             pending_ability: node.clone(),
+            chosen_hosts: Vec::new(),
         };
         let pre_payment_checks = || FinalizePrePaymentChecks {
             early_waiting_for: Some(token_host()),
@@ -76034,6 +76329,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_event: trigger_event.clone(),
                             effect_description: None,
                             remaining: vec![],
+                            blight: None,
                             unpaid_suffix: None,
                         });
                     state.waiting_for.clone()
@@ -76056,6 +76352,7 @@ mod restored_exact_attack_authority_tests {
                                     source_id: attacker,
                                     legal_targets: vec![],
                                     pending_ability: node.clone(),
+                                    chosen_hosts: Vec::new(),
                                 },
                             )),
                             prepaid_actual_mana_spent: None,
@@ -76547,6 +76844,7 @@ mod restored_exact_attack_authority_tests {
                             source_id,
                             legal_targets: vec![],
                             pending_ability: node.clone(),
+                            chosen_hosts: Vec::new(),
                         },
                         Some(ResolvingTriggerContext {
                             event: trigger_event.clone(),

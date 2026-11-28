@@ -244,12 +244,11 @@ impl Envelope {
             | ServerMessage::TimerUpdate { .. }
             | ServerMessage::Pong { .. }
             | ServerMessage::PeerInfo { .. }
-            | ServerMessage::DraftCreated { .. }
-            | ServerMessage::DraftJoined { .. }
+            | ServerMessage::DraftCommandAccepted { .. }
+            | ServerMessage::DraftCommandRefused { .. }
             | ServerMessage::DraftStateUpdate { .. }
             | ServerMessage::DraftMatchStart { .. }
             | ServerMessage::DraftTimerSync { .. }
-            | ServerMessage::DraftActionRejected { .. }
             | ServerMessage::DraftOver { .. }
             | ServerMessage::DraftSpectatorView { .. }
             | ServerMessage::TakebackRequested { .. }
@@ -438,6 +437,7 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use server_core::protocol::{DraftCommandResult, DraftRequestId};
 
     #[tokio::test]
     async fn unflushed_refusal_admission_survives_dequeue_and_is_reusable_after_flush() {
@@ -804,6 +804,15 @@ mod tests {
                 withheld: WithheldFrame::StateUpdate,
                 reason: STATE_UPDATE_WITHHELD.to_string(),
             },
+            ServerMessage::draft_accepted(
+                DraftRequestId::try_from(1).unwrap(),
+                DraftCommandResult::Created {
+                    draft_code: "ABCD12".to_string(),
+                    player_token: "tok".to_string(),
+                    seat_index: 0,
+                },
+            ),
+            ServerMessage::draft_rejected(DraftRequestId::try_from(2).unwrap(), "refused"),
         ] {
             assert!(matches!(
                 envelope(message, Some(CommandId(1))).over_bound("r".to_string()),

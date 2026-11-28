@@ -44,7 +44,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{AttackDeclarationRecord, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1047,14 +1047,7 @@ fn attack_declaration_record_reads_declaration_time_keyword_kind() {
         .unwrap()
         .keywords
         .push(Keyword::Flying);
-    let obj = runner.state().objects[&bird].clone();
-    let record = AttackDeclarationRecord {
-        object_id: bird,
-        incarnation: Some(obj.incarnation),
-        lki: obj.snapshot_public_characteristics(),
-        is_token: false,
-        is_commander: false,
-    };
+    let record = runner.state().objects[&bird].snapshot_for_attack_declaration(bird);
     runner
         .state_mut()
         .objects

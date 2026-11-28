@@ -2884,7 +2884,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
     event_members: &[ObjectIncarnationRef],
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
-    entrants.deliver_member(state, |state| {
+    entrants.deliver_member(state, member.object_id, |state| {
         process_one_zone_move_with_attack_seat(
             state,
             ctx,
@@ -4477,7 +4477,7 @@ pub fn resolve_all(
             logical_zone_change_group.logical_group_id,
             anticipated_pause.as_ref(),
         );
-        match entrants.deliver_member(state, |state| {
+        match entrants.deliver_member(state, obj_id, |state| {
             crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
                 state,
                 obj_id,
@@ -9391,6 +9391,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),
@@ -16563,6 +16564,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             ObjectId(100),

@@ -14,6 +14,8 @@ use crate::types::zones::Zone;
 use super::casting::{self, SpecialActionManaPayment};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 
+pub(super) const DOOR_NAME_SEPARATOR: &str = " // ";
+
 /// An engine-authored Room-door unlock announcement for Priority preflight.
 /// The Room identity and locked door stay private to the Room authority until
 /// the facade reconstructs the ordinary special-action primer.
@@ -91,7 +93,11 @@ pub(in crate::game) fn priority_unlock_room_door_announcements(
 /// printed-form reader `transform::stored_double_face`, cannot drift apart — they
 /// differ only in WHICH type line they hand it.
 pub(crate) fn has_shared_type_line(types: &crate::types::card_type::CardType) -> bool {
-    types.subtypes.iter().any(|s| s == "Room")
+    has_room_subtype(&types.subtypes)
+}
+
+pub(super) fn has_room_subtype(subtypes: &[String]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Room")
 }
 
 /// The object IS a Room right now — its current, post-copy card types. Every
@@ -327,6 +333,17 @@ pub(crate) fn effective_room_halves(
 pub(crate) fn door_gated_battlefield_name(
     obj: &crate::game::game_object::GameObject,
 ) -> Option<String> {
+    let [left, right] = door_gated_battlefield_names(obj)?;
+    Some(match (left, right) {
+        (Some(left), Some(right)) => format!("{left}{DOOR_NAME_SEPARATOR}{right}"),
+        (Some(half), None) | (None, Some(half)) => half,
+        (None, None) => String::new(),
+    })
+}
+
+fn door_gated_battlefield_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[Option<String>; 2]> {
     if obj.zone != Zone::Battlefield || !is_room(obj) {
         return None;
     }
@@ -334,17 +351,27 @@ pub(crate) fn door_gated_battlefield_name(
     let unlocks = obj.room_unlocks.unwrap_or_default();
     let left = unlocks
         .is_unlocked(RoomDoor::Left)
-        .then_some(halves.left.name.as_str());
+        .then_some(halves.left.name);
     let right = halves
         .right
-        .as_ref()
         .filter(|_| unlocks.is_unlocked(RoomDoor::Right))
-        .map(|half| half.name.as_str());
-    Some(match (left, right) {
-        (Some(left), Some(right)) => format!("{left} // {right}"),
-        (Some(half), None) | (None, Some(half)) => half.to_string(),
-        (None, None) => String::new(),
-    })
+        .map(|half| half.name);
+    Some([left, right])
+}
+
+/// CR 201.2a + CR 709.5: Read two effective names from a fully unlocked
+/// Room. A name-changing effect may have replaced both with one name.
+pub(crate) fn effective_battlefield_door_names(
+    obj: &crate::game::game_object::GameObject,
+) -> Option<[String; 2]> {
+    if obj.face_down {
+        return None;
+    }
+    let [Some(left), Some(right)] = door_gated_battlefield_names(obj)? else {
+        return None;
+    };
+    let [left, right] = super::stickers::apply_name_stickers_to_room_doors(obj, [left, right]);
+    (obj.name == format!("{left}{DOOR_NAME_SEPARATOR}{right}")).then_some([left, right])
 }
 
 /// CR 709.5j: A "door" is a half of a Room permanent. A Room has a left door
