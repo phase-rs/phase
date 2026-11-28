@@ -1206,6 +1206,53 @@ fn yuna_tap_for_mana_gives_the_next_creature_two_counters() {
     assert_idle(&r);
 }
 
+/// Chocobo Camp: "{T}: Add {G}. When you next cast a Bird creature spell this turn, it enters with
+/// an additional +1/+1 counter on it." The delayed trigger installs the same pinned one-shot entry
+/// rider as Kumano/Yuna (CR 603.7c + CR 614.1c), and the Bird filter keeps a non-Bird cast from
+/// spending it.
+#[test]
+fn chocobo_camp_tap_gives_the_next_bird_one_counter_only() {
+    let mut s = main_phase();
+    // The land's printed entry condition ("enters tapped unless you control a legendary
+    // creature") is already satisfied, so `add_real_card`'s entry pipeline leaves it untapped and
+    // its {T} ability is available (CR 614.1d).
+    card(&mut s, "Isamaru, Hound of Konda", Zone::Battlefield);
+    let camp = card(&mut s, "Chocobo Camp", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let first = card(&mut s, "Fledgling Osprey", Zone::Hand);
+    let second = card(&mut s, "Fledgling Osprey", Zone::Hand);
+    s.with_mana_pool(P0, mana(ManaType::Green, 1));
+    s.with_mana_pool(P0, mana(ManaType::Blue, 2));
+    let mut r = s.build();
+    assert!(
+        !r.state().objects[&camp].tapped,
+        "reach-guard: the legendary creature kept Chocobo Camp untapped"
+    );
+
+    activate(&mut r, camp, 0, vec![]);
+    assert_eq!(delayed(&r), 1, "the Bird rider waits");
+
+    // A non-Bird creature is outside the trigger's filter: no rider, and the trigger stays armed.
+    cast(&mut r, bears, vec![]);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 0);
+    assert_eq!(
+        delayed(&r),
+        1,
+        "a non-Bird spell does not spend the Bird rider"
+    );
+
+    // The next Bird installs the rider for that spell and enters with its counter.
+    cast(&mut r, first, vec![]);
+    assert_eq!(counters(&r, first, CounterType::Plus1Plus1), 1);
+    assert_entry_rider_consumed(&r, first);
+    assert_eq!(delayed(&r), 0, "the next-cast trigger is spent");
+
+    // One-shot: the next Bird gets nothing.
+    cast(&mut r, second, vec![]);
+    assert_eq!(counters(&r, second, CounterType::Plus1Plus1), 0);
+    assert_idle(&r);
+}
+
 /// P0's next creature spell `bears` carries the installed entry rider (the delayed trigger has
 /// resolved), and P1 Remands it. The rider must not follow the card to hand: P0 recasts `bears`
 /// and it enters with no counters (CR 400.7: the recast card is a new object, CR 614.1c).
