@@ -57086,9 +57086,163 @@ fn when_next_cast_pronoun_pin_keeps_other_bindings() {
         panic!("expected CreateDelayedTrigger, got {:?}", rider.effect);
     };
     assert!(
-        matches!(&*effect.effect, Effect::AddPendingETBCounters { .. }),
-        "the counter rider is unchanged, got {:?}",
+        matches!(
+            &*effect.effect,
+            Effect::AddTargetReplacement {
+                target: TargetFilter::None,
+                ..
+            }
+        ),
+        "the counter rider installs the pinned entry replacement, got {:?}",
         effect.effect
+    );
+}
+
+/// CR 400.7 + CR 614.1c + CR 603.7c: The one-shot next-cast counter riders
+/// (Kumano Faces Kakkazan II, Summon: Fenrir II, Yuna, Grand Summoner) install
+/// the same pinned entry replacement a printed "whenever you cast …" rider
+/// installs — not an `AddPendingETBCounters` row keyed by a raw object id. The
+/// placeholder selector plus `consume_on_apply` keep the rider bound to that
+/// one spell occurrence, so a recast cannot inherit it. The cast-this-way
+/// rider (Osteomancer Adept) keeps its pending row for the `CastFromZone`
+/// consumer.
+#[test]
+fn next_cast_counter_riders_install_the_pinned_entry_replacement() {
+    for (card, text, count) in [
+        (
+            "Kumano Faces Kakkazan",
+            "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.",
+            1,
+        ),
+        (
+            "Summon: Fenrir",
+            "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.",
+            1,
+        ),
+        (
+            "Yuna, Grand Summoner",
+            "When you next cast a creature spell this turn, that creature enters with two additional +1/+1 counters on it.",
+            2,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*def.effect
+        else {
+            panic!("{card}: expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        // CR 603.7c: the body belongs to a one-shot SpellCast delayed trigger.
+        assert!(
+            matches!(
+                condition,
+                DelayedTriggerCondition::WhenNextEvent { trigger, .. }
+                    if trigger.mode == TriggerMode::SpellCast
+            ),
+            "{card}: expected a SpellCast WhenNextEvent, got {condition:?}"
+        );
+        let Effect::AddTargetReplacement { replacement, target } = &*effect.effect else {
+            panic!(
+                "{card}: expected the pinned entry install, got {:?}",
+                effect.effect
+            );
+        };
+        assert_eq!(
+            target,
+            &TargetFilter::None,
+            "{card}: the install must be floating"
+        );
+        assert_eq!(
+            replacement.event,
+            ReplacementEvent::ChangeZone,
+            "{card}: the rider replaces the spell's entry"
+        );
+        assert_eq!(
+            replacement.destination_zone,
+            Some(Zone::Battlefield),
+            "{card}"
+        );
+        assert_eq!(
+            replacement.valid_card.as_ref(),
+            Some(&TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+            }),
+            "{card}: the rider must name the pinned cast occurrence"
+        );
+        assert!(
+            replacement.consume_on_apply,
+            "CR 614.1c: one qualifying entry consumes the rider ({card})"
+        );
+        let execute = replacement
+            .execute
+            .as_deref()
+            .expect("the install carries its entering counters");
+        let Effect::PutCounter {
+            counter_type,
+            count: counter_count,
+            target,
+        } = &*execute.effect
+        else {
+            panic!(
+                "{card}: expected PutCounter on the entering permanent, got {:?}",
+                execute.effect
+            );
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1, "{card}");
+        assert_eq!(
+            counter_count,
+            &QuantityExpr::Fixed { value: count },
+            "{card}"
+        );
+        assert_eq!(target, &TargetFilter::SelfRef, "{card}");
+        assert!(
+            !format!("{effect:?}").contains("AddPendingETBCounters"),
+            "{card}: the next-cast rider must not fall back to the raw-id row"
+        );
+    }
+
+    // The -1/-1 alternative shares the recognizer and the same install shape;
+    // no corpus card prints it in this delayed form, so pin it here.
+    let minus = try_parse_enters_with_additional_counters(
+        "that creature enters with two additional -1/-1 counters on it",
+    )
+    .expect("the -1/-1 alternative must keep parsing");
+    let Effect::AddTargetReplacement { replacement, .. } = &*minus.effect else {
+        panic!("expected the pinned entry install, got {:?}", minus.effect);
+    };
+    let execute = replacement
+        .execute
+        .as_deref()
+        .expect("the install carries its entering counters");
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Minus1Minus1,
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::SelfRef,
+            }
+        ),
+        "expected PutCounter(-1/-1, 2) on the entrant, got {:?}",
+        execute.effect
+    );
+
+    // Positive control: the cast-this-way rider still lowers to the pending row
+    // its `CastFromZone` consumer reads (Osteomancer Adept, verbatim rider).
+    let osteomancer = try_parse_cast_this_way_enters_rider(
+        "if you cast a spell this way, that creature enters with a finality counter on it",
+    )
+    .expect("Osteomancer Adept's cast-this-way rider must keep parsing");
+    assert!(
+        matches!(
+            &osteomancer.effect,
+            Effect::AddPendingETBCounters {
+                counter_type: CounterType::Finality,
+                ..
+            }
+        ),
+        "the cast-this-way rider stays an AddPendingETBCounters row, got {:?}",
+        osteomancer.effect
     );
 }
 
@@ -102746,7 +102900,8 @@ fn cast_permission_rider_requires_the_lingering_shape() {
             .any(|def| matches!(&*def.effect, Effect::AddPendingETBCounters { .. }))
     };
     // Reach guards: Osteomancer Adept (verbatim activated line) keeps its rider,
-    // and the separate when-next delayed rider is untouched.
+    // and the separate when-next delayed rider installs the pinned entry
+    // replacement rather than a pending-counter row.
     let osteomancer = parse_oracle_text(
         "{T}: Until end of turn, you may cast creature spells from your graveyard by foraging in addition to paying their other costs. If you cast a spell this way, that creature enters with a finality counter on it.",
         "Osteomancer Adept",
@@ -102789,9 +102944,14 @@ fn cast_permission_rider_requires_the_lingering_shape() {
     let when_next = spell_chain_definitions(
         "When you next cast a creature spell this turn, that creature enters with an additional +1/+1 counter on it.",
     );
+    let when_next_debug = format!("{when_next:?}");
     assert!(
-        format!("{when_next:?}").contains("AddPendingETBCounters"),
-        "reach guard: the when-next rider is untouched, got {when_next:?}"
+        when_next_debug.contains("AddTargetReplacement"),
+        "reach guard: the when-next rider installs the pinned entry replacement, got {when_next:?}"
+    );
+    assert!(
+        !when_next_debug.contains("AddPendingETBCounters"),
+        "reach guard: the when-next rider no longer takes the cast-this-way row path, got {when_next:?}"
     );
 
     let graveyard_cast = |effect: &Effect| {

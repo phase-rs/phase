@@ -409,16 +409,17 @@ fn detect_replacement(
     //     ContinuousModification::AddCounterOnEnter  Effect::AddPendingEntersModifications
     //
     // That grep is exactly why `Effect::AddPendingETBCounters` was missing below: it keys
-    // on variants NAMED Enter*, and this one is named Add*. It is the DELAYED CR 614.1c
-    // carrier — the enters-with rider that binds to a LATER cast instead of to the source
-    // permanent. Yuna, Grand Summoner ("When you next cast a creature spell this turn,
-    // that creature enters with two additional +1/+1 counters on it") lowers to
-    // `CreateDelayedTrigger{ WhenNextEvent{SpellCast} -> AddPendingETBCounters }`;
-    // Osteomancer Adept's graveyard-cast rider lowers to a sequential
-    // `AddPendingETBCounters` consumed as `CastFromZone` permission metadata. Both ARE the
-    // replacement, and neither produces a `ReplacementDefinition`. Omitting it reported 5
-    // FALSE POSITIVES pool-wide: chocobo camp, kumano faces kakkazan, osteomancer adept,
-    // summon: fenrir, yuna.
+    // on variants NAMED Enter*, and this one is named Add*. It is the cast-this-way
+    // CR 614.1c carrier — the enters-with rider that binds to a LATER cast instead of to
+    // the source permanent. Osteomancer Adept's graveyard-cast rider lowers to a
+    // sequential `AddPendingETBCounters` consumed as `CastFromZone` permission metadata.
+    // The next-cast delayed riders (Yuna, Grand Summoner; Kumano Faces Kakkazan; Summon:
+    // Fenrir) instead lower to
+    // `CreateDelayedTrigger{ WhenNextEvent{SpellCast} -> AddTargetReplacement }` carrying
+    // the pinned entry `ReplacementDefinition`, and are accepted by the
+    // `AddTargetReplacement` carrier (`any_ability_has_target_replacement`). Both ARE the
+    // replacement. Omitting `AddPendingETBCounters` reported 5 FALSE POSITIVES pool-wide:
+    // chocobo camp, kumano faces kakkazan, osteomancer adept, summon: fenrir, yuna.
     //
     // It must be probed via tree-global typed evidence, not the structural
     // `effect_is_replacement_carrier` matcher: that deliberately finite matcher does
@@ -15701,13 +15702,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
     }
 
-    /// CR 614.1c: `Effect::AddPendingETBCounters` IS the "enters with ..." replacement in
-    /// its DELAYED form — the rider binds to a later cast, not to the source permanent.
+    /// CR 614.1c: an "enters with ..." rider that binds to a LATER cast is the
+    /// replacement even in its DELAYED form, not the source permanent's modifier.
     /// The `Replacement` detector reported 5 pool-wide FALSE POSITIVES until the shared
-    /// carrier helper accepted it (chocobo camp, kumano faces kakkazan, osteomancer adept,
-    /// summon: fenrir, yuna). Both producing grammars are pinned: the delayed
-    /// when-you-next-cast trigger (Yuna) and the cast-this-way graveyard rider
-    /// (Osteomancer Adept).
+    /// carrier helpers accepted both producing grammars (chocobo camp, kumano faces
+    /// kakkazan, osteomancer adept, summon: fenrir, yuna): the next-cast delayed trigger
+    /// (Yuna, Kumano, Fenrir) installs the pinned `AddTargetReplacement` entry rider, and
+    /// the cast-this-way graveyard rider (Osteomancer Adept) stays
+    /// `AddPendingETBCounters`.
     ///
     /// CR 614.1c: a THIRD grammar — a printed static
     /// `StaticMode::GraveyardCastPermission`/`ExileCastPermission` that carries
@@ -15734,8 +15736,8 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
         assert!(
             !has_swallowed_detector(&yuna, "Replacement"),
-            "CR 614.1c: the delayed enters-with rider lowers to AddPendingETBCounters, which \
-             IS the replacement — it must not be reported as swallowed"
+            "CR 614.1c: the next-cast rider installs the pinned AddTargetReplacement entry \
+             rider, which IS the replacement — it must not be reported as swallowed"
         );
 
         let osteomancer = parse_named(

@@ -36778,23 +36778,16 @@ fn resolve_add_pending_etb_counters(
         ability.source_id,
     ) as u32;
 
-    // CR 603.7c + CR 400.7: the delayed trigger names "that creature spell";
-    // register the rider only while that spell is the same object still on the
-    // stack. A spell that already left the stack (Remanded or countered with
-    // this trigger still waiting) is a new object, so the recast card is not
-    // the spell the rider was made for.
-    let spell_still_on_stack = matches!(
-        crate::game::targeting::triggering_spell(state),
-        Some(crate::game::targeting::TriggeringSpell::OnStack(_))
-    );
-    // Extract the object_id from the triggering SpellCast event.
-    if let Some(GameEvent::SpellCast { object_id, .. }) = state.current_trigger_event.as_ref() {
-        let object_id = *object_id;
-        if spell_still_on_stack {
-            state
-                .pending_etb_counters
-                .push((object_id, counter_type, resolved_count));
-        }
+    // Extract the object_id from the triggering SpellCast event
+    let object_id = state.current_trigger_event.as_ref().and_then(|e| match e {
+        GameEvent::SpellCast { object_id, .. } => Some(*object_id),
+        _ => None,
+    });
+
+    if let Some(oid) = object_id {
+        state
+            .pending_etb_counters
+            .push((oid, counter_type, resolved_count));
     } else {
         tracing::warn!(
             "AddPendingETBCounters: no SpellCast trigger event found — counters not registered"

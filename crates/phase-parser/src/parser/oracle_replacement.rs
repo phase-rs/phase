@@ -7728,6 +7728,46 @@ pub(crate) fn parse_whenever_you_cast_enters_with_outcome(
     }
 }
 
+/// CR 400.7 + CR 614.1c + CR 603.7c: Build the floating entry rider that
+/// applies `execute` to the one cast spell occurrence the resolving carrier
+/// names.
+///
+/// Single author of the placeholder/`consume_on_apply` pairing: both the
+/// printed "whenever you cast …, that creature enters with …" trigger
+/// (`parse_whenever_you_cast_enters_with_trigger`) and the one-shot "when you
+/// next cast … this turn, that creature enters with …" delayed body
+/// (`try_parse_enters_with_additional_counters`) install through it, so the
+/// two grammars cannot drift apart.
+///
+/// CR 400.7: a spell that changes zones becomes a new object, so the rider
+/// names its recipient only through
+/// `SpecificObject(TRIGGERING_SPELL_PLACEHOLDER)`. Installation concretizes
+/// that selector and latches the resolving carrier's spell-incarnation pin
+/// (`add_target_replacement.rs`); a recast — a new incarnation — can never
+/// inherit the rider, and a missing or departed spell installs nothing.
+/// CR 614.1c: `consume_on_apply` keeps the install one-shot — one qualifying
+/// entry, then the rider is gone rather than waiting for a later cast.
+pub(crate) fn triggering_spell_entry_rider(
+    execute: AbilityDefinition,
+    description: String,
+) -> AbilityDefinition {
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+        .destination_zone(Zone::Battlefield)
+        .valid_card(TargetFilter::SpecificObject {
+            id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+        })
+        .execute(execute)
+        .description(description);
+    replacement.consume_on_apply = true;
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
+        },
+    )
+}
+
 pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     text: &str,
     card_name: &str,
@@ -7738,26 +7778,13 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
 
     let (mut replacement, constraint, prelude) =
         parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
-    let spell_filter = replacement.valid_card.take()?;
-    // CR 614.1c: one qualifying entry, then gone — this floating install must
-    // never persist to affect a second, later cast of the same shape.
-    replacement.consume_on_apply = true;
     // CR 603.2 + CR 109.5: "you cast" and the type/mana-value qualification
     // belong to trigger observation, not a continued-control entry predicate.
-    // CR 400.7 + CR 614.1c: the entry rider names only that spell occurrence.
-    // AddTargetReplacement binds this selector and its pin from the resolving
-    // carrier at installation; departed or missing authority installs nothing.
-    replacement.valid_card = Some(TargetFilter::SpecificObject {
-        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
-    });
-
-    let mut install = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::AddTargetReplacement {
-            replacement: Box::new(replacement),
-            target: TargetFilter::None,
-        },
-    );
+    // Keep the cast filter on the trigger; the rider itself names only the one
+    // spell occurrence (see `triggering_spell_entry_rider`).
+    let spell_filter = replacement.valid_card.take()?;
+    let execute = *replacement.execute.take()?;
+    let mut install = triggering_spell_entry_rider(execute, text.to_string());
     // CR 608.2c + CR 609.3: exile first, then install even if exile is impossible.
     // A period starts a sibling instruction; the exile result is not the spell
     // referent, so neither instruction forwards its result to the other.
