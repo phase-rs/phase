@@ -70,7 +70,7 @@ Devour counters belong only to that entrant's event, never the next copy's batch
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
 | 13 | State/game-state condition → StaticCondition::Unrecognized | 124 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
 | 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
-| 15 | Multi-target / 'up to N' optionality or count dropped | 78 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 77 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
 | 16 | Keyword payload / multiplicity / mis-tokenization | 80 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 79 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
@@ -4179,7 +4179,6 @@ are outside the detector's class.
 - Soul Parry
 - Stream of Consciousness
 - Stunning Shot
-- Teferi, Who Slows the Sunset
 - Temporal Firestorm
 - The Fallen
 - The Great Aerie
