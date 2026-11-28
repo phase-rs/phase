@@ -5846,8 +5846,15 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
     })
 }
 
-/// Parse "that creature enters with an additional [N] +1/+1 counter(s) on it" into
-/// an `AddPendingETBCounters` effect. Returns `None` if the text doesn't match.
+/// CR 400.7 + CR 614.1c + CR 603.7c: Parse "that creature enters with an
+/// additional [N] +1/+1 counter(s) on it" (or "-1/-1") into the pinned entry
+/// rider the next-cast delayed trigger installs. Returns `None` if the text
+/// doesn't match.
+///
+/// The body is the same rider a printed "whenever you cast …, that creature
+/// enters with …" trigger installs (`triggering_spell_entry_rider`): floating,
+/// one-shot, and bound to the spell occurrence named by the resolving
+/// carrier's incarnation pin rather than to the storage id a recast reuses.
 fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
     // "that creature enters with an additional +1/+1 counter on it"
     // "that creature enters with N additional +1/+1 counters on it"
@@ -5888,15 +5895,21 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
     .parse(rest)
     .ok()?;
 
-    Some(AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::AddPendingETBCounters {
-            counter_type,
-            count: QuantityExpr::Fixed {
-                value: count as i32,
-            },
-        },
-    ))
+    Some(
+        crate::parser::oracle_replacement::triggering_spell_entry_rider(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type,
+                    count: QuantityExpr::Fixed {
+                        value: count as i32,
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ),
+            lower.to_string(),
+        ),
+    )
 }
 
 /// CR 614.1c + CR 122.1 + CR 607.1: Shared recognizer for the linked "if you
