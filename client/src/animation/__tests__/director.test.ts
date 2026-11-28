@@ -257,4 +257,24 @@ describe("director", () => {
     expect(useAnimationStore.getState().activeStep).toBeNull();
     expect(sfx).not.toHaveBeenCalled();
   });
+
+  it("records the newest presentation snapshot a kept abandon strands", async () => {
+    const run = director.play({ steps: [step(200)], snapshotSeq: 7, state: stateWithStack() });
+    // The step drains first; its flights may still be drawing when the game
+    // ends, so the abandoned snapshot must be remembered past the queue.
+    await vi.advanceTimersByTimeAsync(200 + PRESENT_GRACE_MS);
+    await run;
+    expect(useAnimationStore.getState().activeStep).toBeNull();
+
+    abandonPendingDispatches({ keepPresentation: true });
+
+    expect(useAnimationStore.getState().abandonedSnapshotSeq).toBeGreaterThanOrEqual(7);
+  });
+
+  it("does not mark a snapshot abandoned when the presentation is dropped too", () => {
+    useAnimationStore.getState().enqueueSteps([step(200)], 8);
+    const before = useAnimationStore.getState().abandonedSnapshotSeq;
+    abandonPendingDispatches();
+    expect(useAnimationStore.getState().abandonedSnapshotSeq).toBe(before);
+  });
 });

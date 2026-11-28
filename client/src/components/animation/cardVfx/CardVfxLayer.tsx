@@ -858,19 +858,37 @@ class CardVfxController {
   }
 
   /** Releases `holder`'s hold once the snapshot its step animates has committed,
-   *  so an effect that ends first does not show the card's old surface again. */
+   *  so an effect that ends first does not show the card's old surface again.
+   *  A snapshot abandoned while the presentation runs will never commit, so its
+   *  hold settles here instead of waiting forever. */
   private releaseAfterCommit(objectId: ObjectId, slot: VeilSlot, holder: number, snapshotSeq: number) {
     if (this.veilHolds.get(objectId)?.[slot] !== holder) return;
-    if (committed(snapshotSeq)) {
+    // No later commit can carry a stamp at or below an abandoned one. Stamp 0
+    // means no engine snapshot was ever presented, so there is nothing to mark.
+    const abandonedSeq = useAnimationStore.getState().abandonedSnapshotSeq;
+    if (committed(snapshotSeq) || (abandonedSeq > 0 && snapshotSeq <= abandonedSeq)) {
       this.release(objectId, slot, holder);
       return;
     }
-    const stop = useGameStore.subscribe((state) => {
+    // Watched on both stores: the commit may land, or the dispatch may be
+    // abandoned (game over) while the flight is still in the air.
+    const stopGame = useGameStore.subscribe((state) => {
       if (state.lastCommittedSeq < snapshotSeq) return;
-      this.cancelCommitWait(holder);
-      this.release(objectId, slot, holder);
+      this.settleCommitWait(objectId, slot, holder);
     });
-    this.commitWaits.set(holder, stop);
+    const stopAnimation = useAnimationStore.subscribe((state) => {
+      if (state.abandonedSnapshotSeq === 0 || state.abandonedSnapshotSeq < snapshotSeq) return;
+      this.settleCommitWait(objectId, slot, holder);
+    });
+    this.commitWaits.set(holder, () => {
+      stopGame();
+      stopAnimation();
+    });
+  }
+
+  private settleCommitWait(objectId: ObjectId, slot: VeilSlot, holder: number) {
+    this.cancelCommitWait(holder);
+    this.release(objectId, slot, holder);
   }
 
   private cancelCommitWait(holder: number) {

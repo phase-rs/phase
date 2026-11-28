@@ -224,8 +224,11 @@ export function abandonPendingDispatches({ keepPresentation = false } = {}): voi
   dispatchGeneration += 1;
   // After the bump: settling the presentation resumes any in-flight `play()`,
   // whose continuation must see the new generation and decline to commit. A game
-  // that just ended keeps its presentation, so the lethal hit still plays.
-  if (!keepPresentation) director.abandon();
+  // that just ended keeps its presentation, so the lethal hit still plays; its
+  // snapshot will never commit, so record that a veil waiting on it must settle
+  // when its effect lands rather than wait forever.
+  if (keepPresentation) useAnimationStore.getState().abandonPendingSnapshotCommits();
+  else director.abandon();
   inFlightLocalAction = null;
   isAnimating = false;
   while (pendingQueue.length > 0) {

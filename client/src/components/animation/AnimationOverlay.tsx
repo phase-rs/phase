@@ -75,6 +75,8 @@ interface ActiveShatter {
   id: number;
   position: { x: number; y: number; width: number; height: number };
   image: HTMLImageElement;
+  /** Fixed when the death was presented, so a later pace change cannot retime it. */
+  timeScale: number;
 }
 
 interface ActiveCastArc {
@@ -110,6 +112,8 @@ interface ActiveRippleReveal {
   id: number;
   cards: MillCard[];
   from: { x: number; y: number };
+  /** Fixed when the reveal spawns, so a later pace change cannot retime it. */
+  timeScale: number;
 }
 
 interface PendingDeath {
@@ -118,6 +122,9 @@ interface PendingDeath {
   snapshot: AnimationImageSnapshot;
   position: { x: number; y: number; width: number; height: number };
   readinessDeadlineMs: number;
+  /** Captured when the death is presented, not when its image resolves: a
+   *  later pace change must not retime the shatter this death becomes. */
+  timeScale: number;
 }
 
 type DeathReadinessOutcome =
@@ -316,6 +323,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           id: ++deathCloneIdCounter,
           position: pending.position,
           image: outcome.image,
+          timeScale: pending.timeScale,
         },
       ]);
     } else {
@@ -654,6 +662,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   DEATH_IMAGE_READY_MAX_MS,
                   owningStepMs * 0.75,
                 ),
+                timeScale: Math.min(1, speedMultiplier),
               });
             } else {
               setActiveDeathClones((previous) => [
@@ -913,7 +922,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
             : getPlayerHudPosition(player);
           const id = ++rippleRevealIdCounter;
-          setActiveRippleReveals((prev) => [...prev, { id, cards: revealCards, from: fromPos }]);
+          setActiveRippleReveals((prev) => [
+            ...prev,
+            { id, cards: revealCards, from: fromPos, timeScale: Math.min(1, speedMultiplier) },
+          ]);
           break;
         }
 
@@ -1085,6 +1097,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`shatter-${shatter.id}`}
           position={shatter.position}
           image={shatter.image}
+          timeScale={shatter.timeScale}
           onComplete={() => handleShatterComplete(shatter.id)}
         />
       ))}
@@ -1124,6 +1137,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`ripple-${ripple.id}`}
           cards={ripple.cards}
           from={ripple.from}
+          timeScale={ripple.timeScale}
           onComplete={() => handleRippleRevealComplete(ripple.id)}
         />
       ))}

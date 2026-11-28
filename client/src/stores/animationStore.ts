@@ -62,6 +62,20 @@ interface AnimationStoreState {
    * `usePresentationPace()`; the Director's clock reads it too.
    */
   pace: number | null;
+  /**
+   * The highest `snapshotSeq` handed to the presentation, kept after its steps
+   * drain: a card flight may outlive its step and still owe its release to a
+   * commit that is no longer queued here.
+   */
+  presentationSnapshotSeq: number;
+  /**
+   * The highest `snapshotSeq` whose commit this presentation will never see,
+   * recorded when the dispatcher abandons in-flight work but keeps presenting
+   * (a finished game). A veil hold at or below it settles on landing instead of
+   * waiting for a commit that cannot come. Later snapshots carry higher stamps,
+   * so a new session is unaffected.
+   */
+  abandonedSnapshotSeq: number;
 }
 
 interface AnimationStoreActions {
@@ -82,6 +96,8 @@ interface AnimationStoreActions {
   /** Release a flight veil. */
   unveilFlight: (objectId: number) => void;
   setCardVfxReady: (ready: boolean) => void;
+  /** Record that no snapshot handed to the presentation so far will commit. */
+  abandonPendingSnapshotCommits: () => void;
   /** Drop every step. `keepFlightVeils` leaves the veils to their owners, for a
    *  clear that leaves effects still drawing: each releases its own on landing. */
   clearQueue: (options?: { keepFlightVeils?: boolean }) => void;
@@ -103,15 +119,21 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   flightVeiledObjectIds: NO_VEILED_OBJECTS,
   cardVfxReady: false,
   pace: null,
+  presentationSnapshotSeq: 0,
+  abandonedSnapshotSeq: 0,
 
   enqueueSteps: (unstamped, snapshotSeq, runId) => {
     if (unstamped.length === 0) return;
 
     const steps = unstamped.map((step) => ({ ...step, snapshotSeq, runId }));
-    const { activeStep, queue } = get();
+    const state = get();
+    const { activeStep, queue } = state;
+    // The newest snapshot the presentation has been handed, kept past the step
+    // queue so a flight that outlives its step can still be settled on abandon.
+    const presentationSnapshotSeq = Math.max(state.presentationSnapshotSeq, snapshotSeq);
     if (activeStep) {
       // Already animating — append to queue
-      set({ queue: [...queue, ...steps] });
+      set({ queue: [...queue, ...steps], presentationSnapshotSeq });
     } else {
       // Nothing playing — promote first step immediately
       const [first, ...rest] = steps;
@@ -120,6 +142,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
         activeGeneration: state.activeGeneration + 1,
         queue: rest,
         isPlaying: true,
+        presentationSnapshotSeq,
       }));
     }
   },
@@ -202,6 +225,10 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   },
 
   setCardVfxReady: (ready) => set({ cardVfxReady: ready }),
+
+  abandonPendingSnapshotCommits: () => set((state) => ({
+    abandonedSnapshotSeq: Math.max(state.abandonedSnapshotSeq, state.presentationSnapshotSeq),
+  })),
 
   clearQueue: (options) => set((state) => ({
     queue: [],
