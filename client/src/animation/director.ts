@@ -147,8 +147,11 @@ function presented(step: AnimationStep): void {
 function handleVisibilityChange(): void {
   if (!isDocumentHidden()) return;
   // Only a presentation in progress is dropped: an idle store may still hold a
-  // flight veil, or a landed life total waiting on its commit.
-  if (useAnimationStore.getState().activeStep) useAnimationStore.getState().clearQueue();
+  // flight veil, or a landed life total waiting on its commit. A flight in the
+  // air resumes when the tab returns, so its veil stays with it.
+  if (useAnimationStore.getState().activeStep) {
+    useAnimationStore.getState().clearQueue({ keepFlightVeils: true });
+  }
 }
 
 const unsubscribeClock = useAnimationStore.subscribe(handleStepChange);
@@ -216,8 +219,11 @@ function skip(scope: "block" | "all"): void {
   else useAnimationStore.getState().advanceStep();
 }
 
+// An abandoned action never commits, so its flights must not wait for it.
 function abandon(): void {
-  useAnimationStore.getState().clearQueue({ keepFlightVeils: true });
+  const store = useAnimationStore.getState();
+  store.abandonPendingSnapshotCommits();
+  store.clearQueue({ keepFlightVeils: true });
 }
 
 export const director: Director = { play, skip, setPace, attachPresenter, presented, abandon };

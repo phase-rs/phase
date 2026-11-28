@@ -271,10 +271,23 @@ describe("director", () => {
     expect(useAnimationStore.getState().abandonedSnapshotSeq).toBeGreaterThanOrEqual(7);
   });
 
-  it("does not mark a snapshot abandoned when the presentation is dropped too", () => {
+  it("marks the snapshot abandoned when the presentation is dropped too", () => {
     useAnimationStore.getState().enqueueSteps([step(200)], 8);
-    const before = useAnimationStore.getState().abandonedSnapshotSeq;
     abandonPendingDispatches();
-    expect(useAnimationStore.getState().abandonedSnapshotSeq).toBe(before);
+    expect(useAnimationStore.getState().abandonedSnapshotSeq).toBeGreaterThanOrEqual(8);
+  });
+
+  it("hiding an active presentation drops its steps and keeps its flight veil", async () => {
+    const run = director.play({ steps: [step(300)], snapshotSeq: 9, state: stateWithStack() });
+    useAnimationStore.getState().veilFlight(7);
+
+    setDocumentHidden(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await run;
+
+    expect(useAnimationStore.getState().activeStep).toBeNull();
+    expect(useAnimationStore.getState().flightVeiledObjectIds.has(7)).toBe(true);
+    // The action still commits, so its snapshot is not abandoned.
+    expect(useAnimationStore.getState().abandonedSnapshotSeq).toBeLessThan(9);
   });
 });
