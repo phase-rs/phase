@@ -2,8 +2,9 @@ import { Component, Suspense, type ComponentProps, useCallback, useEffect, useSt
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import { getPlayerId } from "../../hooks/usePlayerId";
+import { getPlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId";
 import { reportBoundaryError } from "../../services/telemetryEvents";
+import { useGameStore } from "../../stores/gameStore";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -74,8 +75,8 @@ function hasWebGL(): boolean {
 /**
  * Full-screen dice-roll / coin-flip moment. Gated on `uiStore.diceRoll` (set by
  * `flashDiceRoll`), it animates the engine's already-known result in real 3D.
- * Mirrors the TurnBanner pattern: `fixed inset-0`, AnimatePresence,
- * pointer-events-none. Falls back to a static result under reduced-motion, when
+ * `fixed inset-0` with AnimatePresence; its backdrop button skips the roll
+ * unless the roll has yielded to a decision prompt (below). Falls back to a static result under reduced-motion, when
  * WebGL is unavailable, or when an ability roll never reports its landing
  * (`uiStore.diceRollStalled`). The roll is cosmetic, so degrading is safe.
  *
@@ -84,6 +85,12 @@ function hasWebGL(): boolean {
  * sequenced ahead of the mulligan UI in `GamePage` (CR 103.1 before CR 103.5),
  * so the two never compete; the raised z-index is defense-in-depth for in-game
  * rolls that can fire while other overlays are up.
+ *
+ * An in-game roll yields while this player has a decision to make (the roll's
+ * own result can open one): the result moves to the top and lets every click
+ * through, with no backdrop, skip button, hint or Escape binding, so the
+ * prompt below stays usable. It still closes on its own countdown. The contest
+ * never yields: it holds until the player dismisses it.
  *
  * Its side gutters bound the captions that name a player (the roll winner, a
  * coin flip's outcome): each sits in a row as wide as the overlay inside them,
@@ -98,12 +105,16 @@ export function DiceRollOverlay() {
   // A roll whose landing never arrived shows its static result, as one whose
   // renderer threw does (the boundary's fallback).
   const animate = !shouldReduceMotion && hasWebGL() && !diceRollStalled;
+  const canAct = useCanActForWaitingState();
+  const waitingForType = useGameStore((s) => s.waitingFor?.type);
+  const yieldsToPrompt =
+    canAct && waitingForType !== "Priority" && diceRoll?.context !== "startingPlayer";
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is
-  // showing so it never shadows Escape elsewhere.
+  // showing and not yielding, so it never shadows Escape elsewhere.
   useEffect(() => {
-    if (!diceRoll) return;
+    if (!diceRoll || yieldsToPrompt) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -112,7 +123,7 @@ export function DiceRollOverlay() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [diceRoll, skipDiceRoll]);
+  }, [diceRoll, yieldsToPrompt, skipDiceRoll]);
 
   // Prefetch the code-split 3D chunk on mount. Every game opens with the
   // starting-player contest (CR 103.1), so `three` is needed within seconds —
@@ -138,7 +149,9 @@ export function DiceRollOverlay() {
     <AnimatePresence>
       {diceRoll && (
         <motion.div
-          className={`fixed inset-0 z-[55] flex items-center justify-center pointer-events-none ${BANNER_TITLE_GUTTERS}`}
+          className={`fixed inset-0 z-[55] flex justify-center pointer-events-none ${
+            yieldsToPrompt ? "items-start pt-16" : "items-center"
+          } ${BANNER_TITLE_GUTTERS}`}
           role="status"
           aria-live="polite"
           initial={{ opacity: 0 }}
@@ -149,12 +162,14 @@ export function DiceRollOverlay() {
           {/* Vignette backdrop: darker at the edges, focusing the eye centrally.
               Clickable (pointer-events re-enabled) to skip the roll — the overlay
               itself stays pointer-events-none so it never traps board input. */}
-          <button
-            type="button"
-            aria-label={dismissHint}
-            onClick={skipDiceRoll}
-            className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
-          />
+          {!yieldsToPrompt && (
+            <button
+              type="button"
+              aria-label={dismissHint}
+              onClick={skipDiceRoll}
+              className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
+            />
+          )}
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
               fresh component instance (resets settle state, re-runs the 3D mount),
               and by `animate` so a roll that falls back to its static face
@@ -165,14 +180,16 @@ export function DiceRollOverlay() {
           >
             <DiceRollContent payload={diceRoll} animate={animate} />
           </DiceRollBoundary>
-          <motion.span
-            className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 1, duration: 0.5 }}
-          >
-            {dismissHint}
-          </motion.span>
+          {!yieldsToPrompt && (
+            <motion.span
+              className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 1, duration: 0.5 }}
+            >
+              {dismissHint}
+            </motion.span>
+          )}
         </motion.div>
       )}
     </AnimatePresence>
