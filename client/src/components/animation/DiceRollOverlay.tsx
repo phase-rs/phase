@@ -88,7 +88,8 @@ function hasWebGL(): boolean {
  * rolls that can fire while other overlays are up.
  *
  * An in-game roll yields while this player has a decision to make (the roll's
- * own result can open one): the result moves to the top, drops beneath the
+ * own result can open one), or while a physical contest is on screen (it takes
+ * clicks without naming one acting player): the result moves to the top, drops beneath the
  * dialog layers so a prompt draws over it, and lets every click through, with
  * no backdrop, skip button, hint or Escape binding. It still closes on its own
  * countdown. The contest never yields: it holds until the player dismisses it.
@@ -109,7 +110,8 @@ export function DiceRollOverlay() {
   const canAct = useCanActForWaitingState();
   const waitingForType = useGameStore((s) => s.waitingFor?.type);
   const yieldsToPrompt =
-    canAct && waitingForType !== "Priority" && diceRoll?.context !== "startingPlayer";
+    diceRoll?.context !== "startingPlayer" &&
+    (waitingForType === "PhysicalContest" || (canAct && waitingForType !== "Priority"));
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is

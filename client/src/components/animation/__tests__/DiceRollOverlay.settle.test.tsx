@@ -288,6 +288,21 @@ describe("DiceRollOverlay yields to a decision prompt opened by its roll (#11411
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 
+  it("yields to a physical contest, whose prompt names no single player", async () => {
+    await act(async () => {
+      useGameStore.setState({
+        gameState: { active_player: 1 } as never,
+        waitingFor: { type: "PhysicalContest", data: {} } as never,
+      });
+    });
+    render(<DiceRollOverlay />);
+    await showRoll(lostCoinFlip());
+
+    expect(screen.getByRole("status")).toHaveClass(GAME_Z_LAYER.boardChoiceGrid);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(pressEscape().defaultPrevented).toBe(false);
+  });
+
   it("stays skippable while another player is deciding", async () => {
     await waitOn("SearchChoice", 1);
     render(<DiceRollOverlay />);
