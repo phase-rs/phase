@@ -6761,40 +6761,65 @@ fn try_parse_choose_revealed_anaphor(lower: &str) -> Option<ChooseImperativeAst>
     ))
     .parse(lower)
     .ok()?;
-    let (rest, _) = tag::<_, _, E>("one of ").parse(rest).ok()?;
-    let (rest, _) = alt((tag::<_, _, E>("the revealed "), tag("those revealed ")))
-        .parse(rest)
-        .ok()?;
+    revealed_pool_choice(rest, chooser)
+}
+
+/// CR 701.20a + CR 608.2c + CR 608.2d: the reveal-pool operand "one of the
+/// revealed [<type>] cards" / "one of the [<type>] cards revealed this way"
+/// (Dance, Pathetic Marionette; Gift of Perfection), lowered to a one-card
+/// choice from the chain's tracked set (the cards a preceding reveal revealed
+/// this resolution) narrowed by the optional type qualifier. Shared by the
+/// "choose …" production and the `assimilate` operand. All-consuming.
+fn revealed_pool_choice(input: &str, chooser: Chooser) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
     // The optional type qualifier: "creature cards", "nonland cards", or bare
     // "cards". Negation is caller-owned (`parse_type_filter_word` has none),
     // mirroring the reveal-top count gate's prefix strip.
-    let (filter, tail): (TargetFilter, &str) = if rest == "cards" {
-        (TargetFilter::Any, "")
-    } else {
-        let (rest, negated) = map(opt(alt((tag::<_, _, E>("non-"), tag("non")))), |prefix| {
-            prefix.is_some()
-        })
-        .parse(rest)
-        .ok()?;
-        let (rest, word) = crate::parser::oracle_nom::target::parse_type_filter_word(rest).ok()?;
-        let (rest, _) = alt((tag::<_, _, E>(" cards"), tag(" card")))
-            .parse(rest)
-            .ok()?;
-        let type_filter = if negated {
-            TypeFilter::Non(Box::new(word))
-        } else {
-            word
-        };
-        (TargetFilter::Typed(TypedFilter::new(type_filter)), rest)
-    };
-    let (_, selection) = all_consuming(alt((
-        value(
-            crate::types::ability::CardSelectionMode::Random,
-            tag::<_, _, E>(" at random"),
+    fn pool_noun(input: &str) -> OracleResult<'_, TargetFilter> {
+        alt((
+            value(TargetFilter::Any, tag::<_, _, E>("cards")),
+            map(
+                (
+                    opt(alt((tag::<_, _, E>("non-"), tag("non")))),
+                    crate::parser::oracle_nom::target::parse_type_filter_word,
+                    alt((tag(" cards"), tag(" card"))),
+                ),
+                |(negated, word, _)| {
+                    let type_filter = if negated.is_some() {
+                        TypeFilter::Non(Box::new(word))
+                    } else {
+                        word
+                    };
+                    TargetFilter::Typed(TypedFilter::new(type_filter))
+                },
+            ),
+        ))
+        .parse(input)
+    }
+
+    let (_, (filter, selection)) = all_consuming(preceded(
+        tag::<_, _, E>("one of "),
+        pair(
+            alt((
+                // "the revealed creature cards" / "those revealed cards"
+                preceded(
+                    alt((tag("the revealed "), tag("those revealed "))),
+                    pool_noun,
+                ),
+                // "the creature cards revealed this way"
+                terminated(preceded(tag("the "), pool_noun), tag(" revealed this way")),
+            )),
+            alt((
+                value(
+                    crate::types::ability::CardSelectionMode::Random,
+                    tag::<_, _, E>(" at random"),
+                ),
+                value(crate::types::ability::CardSelectionMode::Chosen, eof),
+            )),
         ),
-        value(crate::types::ability::CardSelectionMode::Chosen, eof),
-    )))
-    .parse(tail)
+    ))
+    .parse(input)
     .ok()?;
     Some(ChooseImperativeAst::FromZone {
         count: 1,
@@ -10862,7 +10887,11 @@ pub(super) fn parse_put_ast(
     // classification is delegated to `try_parse_put_zone_change_parts` (which
     // recognizes the reveal tracked anaphor via `tracked_anaphor_cause`),
     // mirroring the `has_mass_zone_origin` idiom above.
-    let is_this_way_partition = nom_primitives::scan_contains(lower, "the rest")
+    // CR 608.2c: "the other cards [they] revealed this way" (Gift of
+    // Perfection) is the same plural complement of the revealed set as "the
+    // rest", so it is a mass move over that set, never a one-card reposition.
+    let is_this_way_partition = (nom_primitives::scan_contains(lower, "the rest")
+        || nom_primitives::scan_contains(lower, "the other cards"))
         && nom_primitives::scan_contains(lower, "revealed this way");
 
     // CR 400.3: a positional put names its destination library. The singular
@@ -10971,11 +11000,18 @@ pub(super) fn parse_put_ast(
                 // the rest zone so the lowering emits the complement move for
                 // the cards the producer left behind (Winding Way). Only the
                 // tracked-set partition form carries a rest clause — a non-
-                // tracked mass move keeps `rest_destination: None`.
-                let rest_destination = matches!(
-                    target,
-                    TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
-                )
+                // tracked mass move keeps `rest_destination: None`. When "the
+                // rest" is the clause's own subject ("put the rest of the cards
+                // revealed this way on the bottom …" — Aethermage's Touch) there
+                // is no second half: the clause IS the rest move.
+                let subject_is_rest = (tag::<_, _, OracleError<'_>>("put "), tag("the rest"))
+                    .parse(lower.trim_start())
+                    .is_ok();
+                let rest_destination = (!subject_is_rest
+                    && matches!(
+                        target,
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+                    ))
                 .then(|| super::parse_put_rest_destination(lower))
                 .flatten();
                 // CR 401.4: only meaningful when the rest returns to the
@@ -15300,44 +15336,195 @@ fn anaphoric_trigger_body_note_value(rest: &str) -> Option<QuantityExpr> {
 }
 
 /// CR 205.1a + CR 205.1b + CR 110.2a + CR 122.1 + CR 115.2: recognize the
-/// `assimilate <target phrase>` keyword action and return the phrase's target
-/// filter.
+/// `assimilate <operand>` keyword action and classify what it acts on.
 ///
 /// Anchored on `tag("assimilate ")` — the trailing space IS the word boundary,
-/// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. The
-/// target phrase itself is delegated to `parse_target_with_ctx`, the shared
-/// target-phrase authority, so "from an opponent's graveyard" resolves through
+/// so `assimilates`/`assimilation`/`Assimilation Aegis` cannot match. Target
+/// phrases are delegated to `parse_target_with_ctx`, the shared target-phrase
+/// authority, so "from an opponent's graveyard" resolves through
 /// `parse_zone_suffix` to `Owned{Opponent}` + `InZone{Graveyard}` exactly as it
 /// does for Ashen Powder and Puppeteer Clique.
 ///
-/// The operand is either a graveyard target phrase or, CR 608.2c, an anaphor
-/// ("that card", "it") naming the card an earlier instruction of the same
-/// ability found (The Borg Queen: "… until they exile a creature card.
-/// Assimilate that card."). The anaphor lowers to `ParentTarget`; the
-/// lowering's `origin: None` then moves the found card from whatever zone the
-/// earlier instruction left it in.
+/// The operand's ZONE picks the reminder text that defines the action:
+///   * a card outside the battlefield — a graveyard target, a card linked to
+///     the source by exile (CR 607.2a: "a creature card exiled with it"), or
+///     the card an earlier instruction found (CR 608.2c: "that card") — is put
+///     onto the battlefield ([`AssimilateOperand::Card`]);
+///   * a card chosen from a preceding reveal ("one of the creature cards
+///     revealed this way") is chosen, then put onto the battlefield
+///     ([`AssimilateOperand::ChosenRevealed`]);
+///   * a permanent ("target nonartifact creature an opponent controls") is
+///     gained control of ([`AssimilateOperand::Permanent`]).
 ///
 /// Fails closed (returns `None`, so the caller falls through to the imperative
-/// `Effect::Unimplemented` fallback and coverage stays red) when either:
-///   * the target phrase leaves an unconsumed remainder, or
-///   * CR 115.2: the phrase is neither that anaphor nor a graveyard target.
-///     This guard exists for COVERAGE HONESTY, not to license an `origin`
-///     value: the lowering emits `ChangeZone { origin: None }` (the zone
-///     constraint travels on the target filter), and a battlefield `assimilate`
-///     phrasing (The Best of Both Worlds' "gain control of it" definition) is a
-///     shape this production does not model, so it must keep reporting as
-///     unsupported rather than be silently lowered into a zone move.
-fn parse_assimilate_target(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
+/// `Effect::Unimplemented` fallback and coverage stays red) when the target
+/// phrase leaves an unconsumed remainder, or names neither a card in one of
+/// those zones nor a permanent (a player, or a card in another zone).
+fn parse_assimilate_operand(lower: &str, ctx: &mut ParseContext) -> Option<AssimilateOperand> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("assimilate ")
         .parse(lower.trim())
         .ok()?;
+    let rest = rest.trim_end_matches('.');
+    if let Some(choose) = revealed_pool_choice(rest, Chooser::Controller) {
+        return Some(AssimilateOperand::ChosenRevealed {
+            choose: Box::new(choose),
+        });
+    }
     let (target, remainder) = parse_target_with_ctx(rest, ctx);
     if !remainder.trim().is_empty() {
         return None;
     }
-    (matches!(target, TargetFilter::ParentTarget)
-        || target.extract_in_zone() == Some(Zone::Graveyard))
-    .then_some(target)
+    if matches!(target, TargetFilter::ParentTarget) {
+        return Some(AssimilateOperand::Card {
+            target,
+            origin: None,
+        });
+    }
+    // CR 607.2a: "exiled with it" names the source's linked exile set, whose
+    // cards are in the exile zone.
+    if target.references_exiled_by_source() {
+        return Some(AssimilateOperand::Card {
+            target,
+            origin: Some(Zone::Exile),
+        });
+    }
+    match target.extract_in_zone() {
+        Some(Zone::Graveyard) => Some(AssimilateOperand::Card {
+            target,
+            origin: None,
+        }),
+        // An object filter naming no zone names a permanent on the battlefield.
+        None if matches!(target, TargetFilter::Typed(_)) => {
+            Some(AssimilateOperand::Permanent { target })
+        }
+        _ => None,
+    }
+}
+
+/// CR 205.1a + CR 205.1b + CR 613.1d + CR 611.2a: the "It's a Borg artifact
+/// creature and loses all other creature types" step every `assimilate` ends
+/// with — a `Duration::Permanent` layer-4 type override on the assimilated
+/// object (`ParentTarget`).
+///
+/// `entry_onset` is `WithEntry` when the object is entering the battlefield
+/// with this instruction (CR 611.2e: the "is" form applies simultaneously with
+/// the entry), and `WhenFollowed` when it is already a permanent.
+fn assimilate_retype_step(entry_onset: ContinuousEffectOnset) -> AbilityDefinition {
+    // CR 205.1b: "becomes a '[creature type or types] artifact creature'"
+    // RETAINS every prior card type, supertype, and non-creature subtype and
+    // REPLACES only the creature types. `SetCardTypes` would replace the whole
+    // card-type set and is therefore rules-WRONG here.
+    //
+    // WRITTEN ORDER IS LOAD-BEARING and all four modifications must ride ONE
+    // StaticDefinition: they are all layer 4 (CR 613.1d), so list order decides.
+    // The CR 613.8 intra-static dependency edge RemoveAllSubtypes -> AddSubtype
+    // is deliberately suppressed in layers.rs so the written pre-sort wins
+    // (guarded by layers.rs::same_static_modifications_apply_in_written_order);
+    // splitting these into separate StaticDefinitions would create separate
+    // transient effects ordered by CR 613.7 timestamp instead, and the wipe could
+    // erase Borg.
+    let retype = StaticDefinition::continuous()
+        .affected(TargetFilter::ParentTarget)
+        .modifications(vec![
+            // CR 205.1a: the new creature subtype replaces the existing
+            // creature-type set. Wipe first.
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Borg".to_string(),
+            },
+            // CR 205.1b: additive card types — prior card types and all
+            // supertypes (e.g. Legendary) are retained.
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            // CR 205.1b + CR 613.7: the phrase asserts the object IS a creature.
+            // A filter's creature guarantee is checked when the object is
+            // selected, not continuously, so a lower-timestamped type-removal
+            // effect must be overridden here. Idempotent when already present.
+            ContinuousModification::AddType {
+                core_type: CoreType::Creature,
+            },
+        ])
+        .description(
+            "It's a Borg artifact creature and loses all other creature types.".to_string(),
+        );
+
+    // CR 611.2a: no stated duration on a keyword-action definition means "until
+    // the end of the game" — Duration::Permanent. Setting this explicitly is
+    // REQUIRED: effects/effect.rs's
+    // `ability.duration.or(duration).unwrap_or(Duration::UntilEndOfTurn)` would
+    // otherwise let layers.rs::prune_end_of_turn_effects drop the override at the
+    // next cleanup.
+    // CR 611.2c: the affected set freezes to the resolved parent target at
+    // install.
+    let mut step = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![retype],
+            duration: Some(Duration::Permanent),
+            target: Some(TargetFilter::ParentTarget),
+            end_cost: None,
+        },
+    )
+    .duration(Duration::Permanent);
+    step.entry_onset = entry_onset;
+    step
+}
+
+/// CR 110.2a + CR 122.1 + CR 205.1b: assimilate a card outside the battlefield
+/// — "Put it onto the battlefield under your control with a +1/+1 counter. It's
+/// a Borg artifact creature and loses all other creature types." The same
+/// reanimate-then-retype chain the class already produces from spelled-out
+/// Oracle text (Ashen Powder's move, Rise from the Grave's type rider).
+fn assimilate_card_chain(target: TargetFilter, origin: Option<Zone>) -> AbilityDefinition {
+    // CR 110.2a: enters under the instruction's controller, not its owner
+    // (CR 108.3: ownership is unchanged).
+    // CR 122.1: the +1/+1 counter is placed as part of the entry event; it
+    // modifies P/T in layer 7c (CR 613.4c), never in the layer-4 list.
+    // CR 115.2: for a graveyard target `origin` stays None — the graveyard
+    // constraint travels on the target filter (FilterProp::InZone{Graveyard}),
+    // which both target enumeration and resolution-time re-legality consult,
+    // matching Ashen Powder / Puppeteer Clique / Macabre Mockery.
+    //
+    // CR 608.2c: the type override is a resolution STEP of the single
+    // `assimilate` instruction, not a following independent instruction, so the
+    // link stays the default `ContinuationStep` (mirroring Recruit).
+    // `forward_result` is intentionally NOT hand-set: the sub binds via
+    // `ParentTarget`, and `lower::rewire_result_anchored_subchain` already stamps
+    // the flag for this shape.
+    //
+    // CR 611.2e: "It's a Borg artifact creature" is the "is [characteristic]"
+    // form, which must apply SIMULTANEOUSLY with the entry. The continuation
+    // still installs it after entry, but it is stamped `WithEntry`, so enter
+    // observers read the entrant only once it has applied (same as Rise from the
+    // Grave / Grave Betrayal). Residual: the observation is the resolution's end,
+    // so observers also see any later instruction's change.
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
+            origin,
+            destination: Zone::Battlefield,
+            target,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: Some(ControllerRef::You),
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![(
+                crate::types::counter::CounterType::Plus1Plus1,
+                QuantityExpr::Fixed { value: 1 },
+            )],
+            conditional_enter_with_counters: Vec::new(),
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+    )
+    .sub_ability(assimilate_retype_step(ContinuousEffectOnset::WithEntry))
 }
 
 /// CR 701.71a: recognize the `empower Jace N` keyword action.
@@ -16163,8 +16350,8 @@ pub(super) fn parse_imperative_family_ast(
     // `recruit`, rather than as a `match first_word` arm: a new string-literal
     // match arm is exactly what `scripts/check-parser-combinators.sh` family (B)
     // forbids.
-    if let Some(target) = parse_assimilate_target(lower, ctx) {
-        return Some(ImperativeFamilyAst::Assimilate { target });
+    if let Some(operand) = parse_assimilate_operand(lower, ctx) {
+        return Some(ImperativeFamilyAst::Assimilate { operand });
     }
 
     // CR 701.71a: `empower Jace N` is a standalone keyword action. Anchored nom
@@ -18724,134 +18911,60 @@ fn lower_imperative_family_clause(ast: ImperativeFamilyAst) -> ParsedEffectClaus
             clause
         }
         // CR 205.1a + CR 205.1b + CR 613.1d + CR 110.2a + CR 122.1: `assimilate`
-        // expands to the same two-step chain the reanimate-then-retype class
-        // already produces from spelled-out Oracle text (Ashen Powder's move,
-        // Rise from the Grave's / Grave Betrayal's type rider): move the
-        // targeted graveyard card to the battlefield under the instruction's
-        // controller with a +1/+1 counter, then install a Duration::Permanent
-        // layer-4 type override on that same object.
-        ImperativeFamilyAst::Assimilate { target } => {
-            // CR 205.1b: "becomes a '[creature type or types] artifact
-            // creature'" RETAINS every prior card type, supertype, and
-            // non-creature subtype and REPLACES only the creature types.
-            // `SetCardTypes` would replace the whole card-type set and is
-            // therefore rules-WRONG here.
-            //
-            // WRITTEN ORDER IS LOAD-BEARING and all four modifications must ride
-            // ONE StaticDefinition: they are all layer 4 (CR 613.1d), so list
-            // order decides. The CR 613.8 intra-static dependency edge
-            // RemoveAllSubtypes -> AddSubtype is deliberately suppressed in
-            // layers.rs so the written pre-sort wins (guarded by
-            // layers.rs::same_static_modifications_apply_in_written_order);
-            // splitting these into separate StaticDefinitions would create
-            // separate transient effects ordered by CR 613.7 timestamp instead,
-            // and the wipe could erase Borg.
-            let retype = StaticDefinition::continuous()
-                .affected(TargetFilter::ParentTarget)
-                .modifications(vec![
-                    // CR 205.1a: the new creature subtype replaces the existing
-                    // creature-type set. Wipe first.
-                    ContinuousModification::RemoveAllSubtypes {
-                        set: crate::types::card_type::SubtypeSet::Creature,
+        // expands to the chain its reminder text spells out for the operand's
+        // zone — see `AssimilateOperand`.
+        ImperativeFamilyAst::Assimilate { operand } => match operand {
+            AssimilateOperand::Card { target, origin } => {
+                let card = assimilate_card_chain(target, origin);
+                let mut clause = parsed_clause(*card.effect);
+                clause.sub_ability = card.sub_ability;
+                clause
+            }
+            // CR 608.2d: choose the card from the revealed pool, then assimilate
+            // the chosen card (the choice's published pick, `ParentTarget`).
+            AssimilateOperand::ChosenRevealed { choose } => {
+                let mut clause = parsed_clause(lower_choose_ast(*choose));
+                clause.sub_ability = Some(Box::new(assimilate_card_chain(
+                    TargetFilter::ParentTarget,
+                    None,
+                )));
+                clause
+            }
+            // CR 613.1b + CR 122.1: "Gain control of it and put a +1/+1 counter
+            // on it. It's a Borg artifact creature and loses all other creature
+            // types."
+            AssimilateOperand::Permanent { target } => {
+                // CR 607.1: record the assimilated permanent on the source, so a
+                // linked ability of the same object ("the Borg assimilated with
+                // this Saga") names exactly the object this instruction affected.
+                let remember = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::RememberCard {
+                        target: TargetFilter::ParentTarget,
                     },
-                    ContinuousModification::AddSubtype {
-                        subtype: "Borg".to_string(),
-                    },
-                    // CR 205.1b: additive card types — prior card types and all
-                    // supertypes (e.g. Legendary) are retained.
-                    ContinuousModification::AddType {
-                        core_type: CoreType::Artifact,
-                    },
-                    // CR 205.1b + CR 613.7: the phrase asserts the object IS a
-                    // creature. The filter's creature guarantee was checked once
-                    // in the graveyard at target selection (CR 601.2c), not
-                    // continuously, so a lower-timestamped type-removal effect
-                    // must be overridden here. Idempotent when already present.
-                    ContinuousModification::AddType {
-                        core_type: CoreType::Creature,
-                    },
-                ])
-                .description(
-                    "It's a Borg artifact creature and loses all other creature types.".to_string(),
                 );
-
-            // CR 611.2a: no stated duration on a keyword-action definition means
-            // "until the end of the game" — Duration::Permanent. Setting this
-            // explicitly is REQUIRED: effects/effect.rs's
-            // `ability.duration.or(duration).unwrap_or(Duration::UntilEndOfTurn)`
-            // would otherwise let layers.rs::prune_end_of_turn_effects drop the
-            // override at the next cleanup.
-            // CR 611.2c: the affected set freezes to the resolved parent target
-            // at install.
-            let mut override_step = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GenericEffect {
-                    static_abilities: vec![retype],
-                    duration: Some(Duration::Permanent),
-                    target: Some(TargetFilter::ParentTarget),
-                    end_cost: None,
-                },
-            )
-            .duration(Duration::Permanent);
-            // CR 611.2e: the reminder text defines the retype with the "is" form
-            // ("It's a Borg artifact creature"), so it applies simultaneously with
-            // the entry: the resolution defers its enter observation until this step
-            // has applied.
-            override_step.entry_onset = ContinuousEffectOnset::WithEntry;
-
-            // CR 110.2a: enters under the instruction's controller, not its
-            // owner (CR 108.3: ownership is unchanged).
-            // CR 122.1: the +1/+1 counter is placed as part of the entry event;
-            // it modifies P/T in layer 7c (CR 613.4c), never in the layer-4
-            // modification list above.
-            // CR 115.2: `origin` stays None — the graveyard constraint travels
-            // on the target filter (FilterProp::InZone{Graveyard} +
-            // FilterProp::Owned{Opponent}), which is what both target
-            // enumeration and resolution-time re-legality consult. This matches
-            // every shipped card with this exact phrase ("from an opponent's
-            // graveyard"): Ashen Powder, Puppeteer Clique, Macabre Mockery all
-            // store origin: None. (Cards phrased "from A graveyard" — Rise from
-            // the Grave, Reanimate — store Some(Graveyard); that is a different
-            // phrase and not this card's.)
-            let mut clause = parsed_clause(Effect::ChangeZone {
-                actor: crate::types::ability::LibraryInstructionActor::Controller,
-                library_shuffle: Default::default(),
-                origin: None,
-                destination: Zone::Battlefield,
-                target,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: Some(ControllerRef::You),
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![(
-                    crate::types::counter::CounterType::Plus1Plus1,
-                    QuantityExpr::Fixed { value: 1 },
-                )],
-                conditional_enter_with_counters: Vec::new(),
-                face_down_profile: None,
-                enters_modified_if: None,
-            });
-            // CR 608.2c: the type override is a resolution STEP of the single
-            // `assimilate` instruction, not a following independent instruction,
-            // so the link stays the default `ContinuationStep` (mirroring
-            // Recruit). `forward_result` is intentionally NOT hand-set: the sub
-            // binds via `ParentTarget`, not `SelfRef`, and
-            // `lower::rewire_result_anchored_subchain` already stamps the flag
-            // for this shape.
-            //
-            // CR 611.2e: the definition's "It's a Borg artifact creature" is the
-            // "is [characteristic]" form, which the rule says must apply
-            // SIMULTANEOUSLY with the permanent entering the battlefield. This
-            // continuation still installs it after entry, but the step is stamped
-            // `WithEntry` above, so enter observers read the entrant only once it
-            // has applied (same as Rise from the Grave / Grave Betrayal, also the
-            // "is" form). Residual: the observation is the resolution's end, so
-            // observers also see any later instruction's change.
-            clause.sub_ability = Some(Box::new(override_step));
-            clause
-        }
+                // CR 611.2a: the retype has no stated duration, so it lasts for the
+                // rest of the game. The permanent is already on the battlefield,
+                // so the retype has no entry to apply alongside.
+                let retype = assimilate_retype_step(ContinuousEffectOnset::WhenFollowed)
+                    .sub_ability(remember);
+                let counter = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                )
+                .sub_ability(retype);
+                // CR 611.2a: a control change with no stated duration lasts for
+                // the rest of the game.
+                let mut clause = parsed_clause(Effect::GainControl { target });
+                clause.duration = Some(Duration::Permanent);
+                clause.sub_ability = Some(Box::new(counter));
+                clause
+            }
+        },
         // CR 118.12: A Counter with an "unless [player] pays [cost]" modifier
         // — intercepted here so the modifier propagates to
         // `ParsedEffectClause.unless_pay`. The Effect itself becomes the

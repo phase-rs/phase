@@ -74838,10 +74838,10 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
     );
 }
 
-/// Parser fail-closed: an `assimilate` phrasing whose target is NOT a
-/// graveyard card is a shape this production does not model, so it must keep
-/// producing `Effect::Unimplemented` and coverage must stay honestly RED rather
-/// than be silently lowered into a reanimation. The gap's name is the parser's
+/// Parser fail-closed: an `assimilate` phrasing whose operand is neither a card
+/// nor a permanent (here a player) is a shape this production does not model,
+/// so it must keep producing `Effect::Unimplemented` and coverage must stay
+/// honestly RED rather than be silently lowered into a zone move. The gap's name is the parser's
 /// VERDICT on which sub-grammar refused the clause — `unparsed_verb_arguments`,
 /// because `assimilate` is a clause head the imperative dispatcher knows and what
 /// failed is its argument grammar. (It was `"assimilate"` while the fallback named
@@ -74849,11 +74849,11 @@ fn borg_queen_assimilate_lowers_to_reanimate_then_retype_chain() {
 /// started.)
 ///
 /// Paired positive: the real card's phrasing in the same test produces a
-/// `ChangeZone`, so the negative is about the graveyard guard and not about a
+/// `ChangeZone`, so the negative is about the operand guard and not about a
 /// production that never fires.
 #[test]
-fn assimilate_without_a_graveyard_target_stays_unimplemented() {
-    const CLAUSE: &str = "assimilate target creature you control";
+fn assimilate_without_a_card_or_permanent_operand_stays_unimplemented() {
+    const CLAUSE: &str = "assimilate target player";
     let non_graveyard = parse_effect(CLAUSE);
     let Effect::Unimplemented {
         name,
@@ -75000,6 +75000,248 @@ fn abbreviated_rest_bottom_placement_after_exile_until_is_the_rest_cleanup() {
         );
         assert_last_sub_is_exile_until_rest_bottom(execute);
     }
+}
+
+/// The node a chain reaches by following `sub_ability` `depth` times.
+fn sub_at(ability: &AbilityDefinition, depth: usize) -> &AbilityDefinition {
+    let mut cursor = ability;
+    for _ in 0..depth {
+        cursor = cursor.sub_ability.as_deref().expect("chain is deep enough");
+    }
+    cursor
+}
+
+/// CR 607.2a: "assimilate a creature card exiled with it" (Assimilation
+/// Assessor, Borg Cube) puts a card from the source's linked exile set onto the
+/// battlefield — a move out of exile of `Creature AND ExiledBySource`.
+#[test]
+fn assimilate_a_card_exiled_with_the_source_moves_it_out_of_exile() {
+    let parsed = parse_oracle_text(
+        "Whenever ~ attacks, assimilate a creature card exiled with it.",
+        "Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("execute body");
+    assert!(!ability_chain_has_unimplemented(execute), "{execute:#?}");
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        target,
+        enters_under,
+        enter_with_counters,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!("expected the assimilate move, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *origin,
+        Some(Zone::Exile),
+        "CR 607.2a: from the linked exile set"
+    );
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enters_under, Some(ControllerRef::You));
+    assert!(target.references_exiled_by_source(), "{target:?}");
+    assert_eq!(enter_with_counters.len(), 1, "CR 122.1: one +1/+1 counter");
+    assert!(matches!(
+        sub_at(execute, 1).effect.as_ref(),
+        Effect::GenericEffect { .. }
+    ));
+}
+
+/// CR 613.1b + CR 122.1 + CR 607.1: the battlefield form ("Gain control of it
+/// and put a +1/+1 counter on it") gains control permanently, adds the counter,
+/// retypes, and records the permanent on the source for a linked reader.
+#[test]
+fn assimilate_a_permanent_gains_control_and_records_it() {
+    let effect = parse_effect("assimilate target nonartifact creature an opponent controls");
+    assert!(
+        matches!(effect, Effect::GainControl { .. }),
+        "the battlefield form gains control, got {effect:?}"
+    );
+    let parsed = parse_oracle_text(
+        "When ~ enters, assimilate target nonartifact creature an opponent controls.",
+        "Probe",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed.triggers[0].execute.as_deref().expect("execute body");
+    assert!(!ability_chain_has_unimplemented(execute), "{execute:#?}");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::GainControl { .. }
+    ));
+    assert_eq!(execute.duration, Some(Duration::Permanent), "CR 611.2a");
+    assert!(matches!(
+        sub_at(execute, 1).effect.as_ref(),
+        Effect::PutCounter {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert!(matches!(
+        sub_at(execute, 2).effect.as_ref(),
+        Effect::GenericEffect { .. }
+    ));
+    assert!(matches!(
+        sub_at(execute, 3).effect.as_ref(),
+        Effect::RememberCard {
+            target: TargetFilter::ParentTarget
+        }
+    ));
+}
+
+/// CR 701.20a + CR 608.2d: the reveal-pool operand reads in both word orders
+/// ("the revealed creature cards" / "the creature cards revealed this way"),
+/// for "choose" and for "assimilate", as a one-card choice from the revealed set.
+#[test]
+fn revealed_pool_operand_reads_both_word_orders() {
+    for text in [
+        "choose one of the revealed creature cards",
+        "choose one of the creature cards revealed this way",
+    ] {
+        let effect = parse_effect(text);
+        assert!(
+            matches!(
+                effect,
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Library,
+                    ..
+                }
+            ),
+            "{text}: {effect:?}"
+        );
+    }
+    let effect = parse_effect("assimilate one of the creature cards revealed this way");
+    assert!(
+        matches!(effect, Effect::ChooseFromZone { count: 1, .. }),
+        "assimilate chooses from the revealed pool first, got {effect:?}"
+    );
+}
+
+/// CR 607.1: "the <noun> assimilated with this Saga" reads the permanent the
+/// source recorded, scoped to the battlefield.
+#[test]
+fn assimilated_with_the_source_reads_the_recorded_permanent() {
+    for phrase in [
+        "the borg assimilated with this saga",
+        "the borg assimilated with ~",
+    ] {
+        let (filter, rest) = crate::parser::oracle_target::parse_target_with_ctx(
+            phrase,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(rest, "", "{phrase}");
+        assert_eq!(
+            filter,
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::ChosenCard,
+                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield
+                        }
+                    ])),
+                ],
+            },
+            "{phrase}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 401.4: "the other cards they revealed this way" (Gift of
+/// Perfection) is the revealed set minus the pick, placed on the bottom as one
+/// batch in a random order — the same shape as "all other cards revealed this
+/// way".
+#[test]
+fn the_other_cards_revealed_this_way_is_a_batch_bottom_placement() {
+    const GIFT: &str = "Each opponent reveals cards from the top of their library until they \
+         reveal a creature card. Assimilate one of the creature cards revealed this way. Then \
+         each opponent puts the other cards they revealed this way on the bottom of their \
+         library in a random order.";
+    let parsed = parse_oracle_text(
+        GIFT,
+        "Gift of Perfection",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("spell ability");
+    assert!(!ability_chain_has_unimplemented(ability), "{ability:#?}");
+    let mut cursor = ability;
+    while let Some(sub) = cursor.sub_ability.as_deref() {
+        cursor = sub;
+    }
+    let Effect::ChangeZoneAll {
+        destination,
+        target,
+        library_position,
+        random_order,
+        ..
+    } = cursor.effect.as_ref()
+    else {
+        panic!("the last step is a batch move, got {:?}", cursor.effect);
+    };
+    assert_eq!(*destination, Zone::Library);
+    assert_eq!(*library_position, Some(LibraryPosition::Bottom));
+    assert!(*random_order, "CR 401.4: in a random order");
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSetFiltered {
+            id: crate::types::identifiers::TrackedSetId(0),
+            filter: Box::new(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                },
+            ]))),
+            caused_by: None,
+        },
+        "the revealed set minus the pick"
+    );
+}
+
+/// CR 401.4 + CR 608.2c: "put the rest of the cards revealed this way on the
+/// bottom of your library in any order" (Aethermage's Touch) is ONE batch move
+/// to the library bottom: the clause's subject is the rest, so there is no
+/// second "and the rest …" half to emit.
+#[test]
+fn the_rest_of_the_cards_revealed_this_way_is_one_bottom_batch() {
+    const AETHERMAGES_TOUCH: &str = "Reveal the top four cards of your library. You may put a \
+         creature card from among them onto the battlefield. It gains \"At the beginning of your \
+         end step, return this creature to its owner's hand.\" Then put the rest of the cards \
+         revealed this way on the bottom of your library in any order.";
+    let parsed = parse_oracle_text(
+        AETHERMAGES_TOUCH,
+        "Aethermage's Touch",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("spell ability");
+    let mut cursor = ability;
+    while let Some(sub) = cursor.sub_ability.as_deref() {
+        cursor = sub;
+    }
+    let Effect::ChangeZoneAll {
+        destination,
+        library_position,
+        target,
+        ..
+    } = cursor.effect.as_ref()
+    else {
+        panic!("the last step is the batch move, got {:?}", cursor.effect);
+    };
+    assert_eq!(*destination, Zone::Library);
+    assert_eq!(*library_position, Some(LibraryPosition::Bottom));
+    assert!(
+        matches!(target, TargetFilter::TrackedSetFiltered { filter, .. }
+            if !matches!(filter.as_ref(), TargetFilter::Not { .. })),
+        "the move is the rest itself, not an empty complement: {target:?}"
+    );
 }
 
 const CODIE_CONTINUATION_TEXT: &str = "Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, \

@@ -953,9 +953,7 @@ pub(crate) enum ImperativeFamilyAst {
     /// invent one, and do not reuse Recruit's `CR 701.70a` — that number is
     /// Recruit's, not assimilate's.
     Assimilate {
-        /// The card the keyword action moves — "target creature card from an
-        /// opponent's graveyard" (CR 115.2: a non-battlefield-zone target).
-        target: TargetFilter,
+        operand: AssimilateOperand,
     },
     /// CR 509.1c: Block this turn/combat if able.
     ForceBlock {
@@ -1984,6 +1982,34 @@ pub(crate) enum HandRevealImperativeAst {
     /// "it"/"that card") and `RevealAll`/`RevealPartial` (hand reveals): this
     /// reveals a battlefield/zone object chosen via the targeting pipeline.
     RevealObject { target: TargetFilter },
+}
+
+/// What an `assimilate` instruction acts on. The two printed reminder texts
+/// split on where the object is: a card outside the battlefield is "put onto
+/// the battlefield under your control with a +1/+1 counter"; a permanent is
+/// "gain control of it and put a +1/+1 counter on it". Both then make it "a
+/// Borg artifact creature [that] loses all other creature types".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum AssimilateOperand {
+    /// CR 110.2a + CR 122.1: a card the instruction puts onto the battlefield —
+    /// a graveyard target (Borg Queen, Perfection Manifest), a card linked to
+    /// the source by exile (CR 607.2a: "a creature card exiled with it" —
+    /// Assimilation Assessor, Borg Cube), or the card an earlier instruction
+    /// found (CR 608.2c: "that card" — The Borg Queen). `origin` is the zone the
+    /// card is moved from when the operand fixes it (`Exile` for the linked
+    /// exile set); `None` leaves the zone on the filter.
+    Card {
+        target: TargetFilter,
+        origin: Option<Zone>,
+    },
+    /// CR 701.20a + CR 608.2d: "one of the [type] cards revealed this way" —
+    /// the controller chooses one card from the pool a preceding reveal
+    /// revealed (Gift of Perfection), then assimilates it as a `Card`.
+    ChosenRevealed { choose: Box<ChooseImperativeAst> },
+    /// CR 613.1b + CR 122.1: a permanent the instruction's controller gains
+    /// control of (The Best of Both Worlds: "assimilate target nonartifact
+    /// creature an opponent controls").
+    Permanent { target: TargetFilter },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

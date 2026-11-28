@@ -1,7 +1,7 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolve_tracked_set_sentinel;
-use crate::types::ability::{ChosenAttribute, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{ChosenAttribute, Effect, EffectError, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -35,13 +35,20 @@ pub fn resolve(
     // CR 608.2c: bind the `TrackedSetId(0)` sentinel to the resolution chain's
     // published pick (the cards chosen by the preceding `ChooseFromZone`).
     let resolved = resolve_tracked_set_sentinel(state, target.clone());
-    let ctx = FilterContext::from_source(state, ability.source_id);
-    let mut chosen: Vec<ObjectId> = state
-        .objects
-        .keys()
-        .copied()
-        .filter(|&id| matches_target_filter(state, id, &resolved, &ctx))
-        .collect();
+    let mut chosen: Vec<ObjectId> = if matches!(resolved, TargetFilter::ParentTarget) {
+        // CR 608.2c + CR 607.1: "it" — the object the preceding instruction of
+        // this ability affected (an `assimilate`d permanent), carried as the
+        // resolving ability's object target.
+        super::effect_object_targets(&resolved, &ability.targets)
+    } else {
+        let ctx = FilterContext::from_source(state, ability.source_id);
+        state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| matches_target_filter(state, id, &resolved, &ctx))
+            .collect()
+    };
     // Deterministic order so a (degenerate) multi-pick records the most recent.
     chosen.sort_unstable_by_key(|id| id.0);
 

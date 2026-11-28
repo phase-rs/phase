@@ -6794,7 +6794,14 @@ pub(super) fn handle_resolution_choice(
                 // rest". A sticker-recipient answer selects only that
                 // recipient, so it forwards nothing either. Gate the forward
                 // on the continuation's own effect.
+                // CR 608.2c: a head that forwards its result
+                // (`forward_result`) hands its sub the objects IT moved — the
+                // sub is a further step of that instruction acting on the pick
+                // (assimilate's "It's a Borg artifact creature" after the move,
+                // Gift of Perfection), not the other half of a partition, so
+                // the unchosen complement must not be forced onto it.
                 let is_partition = continuation_forwards_unchosen_complement(&cont.chain)
+                    && !cont.chain.forward_result
                     && sticker_recipient.is_none();
                 if is_partition {
                     if let Some(ref mut next_sub) = cont.chain.sub_ability {

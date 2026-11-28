@@ -1277,6 +1277,7 @@ pub fn parse_target_with_syntax<'a>(
                 TargetFilter::AmassedArmy,
                 alt((tag("the amassed army"), tag("the army you amassed"))),
             ),
+            parse_assimilated_with_source_reference,
             value(
                 TargetFilter::TriggeringSource,
                 (
@@ -1790,6 +1791,30 @@ pub fn parse_target_with_syntax<'a>(
             &text[lower.len() - rest.len()..],
             syntax,
         );
+    }
+
+    // CR 608.2c + CR 701.20a: "the other cards [they/you/that player] revealed
+    // this way" (Gift of Perfection) is the definite form of "all other cards
+    // revealed this way": the revealed set minus the card already singled out.
+    // It yields the same `Card + Another` filter and leaves the same
+    // " revealed this way" suffix for the caller's tracked-set wrap, so the
+    // reveal-pool choose rewrite (`rewrite_revealed_sweep_other_as_pick_exclusion`)
+    // turns "other" into the pick exclusion. Matched before TRACKED_SET_PHRASES,
+    // whose bare "the other" prefix would otherwise bind the whole set.
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        value(
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Another])),
+            terminated(
+                (
+                    tag::<_, _, OracleError<'_>>("the other cards"),
+                    opt(alt((tag(" they"), tag(" you"), tag(" that player")))),
+                ),
+                peek(tag(" revealed this way")),
+            ),
+        )
+        .parse(input)
+    }) {
+        return (filter, rest, syntax);
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
@@ -10105,6 +10130,33 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
         let _ = sep;
     }
     (filter, rest)
+}
+
+/// CR 607.1: "the <noun> assimilated with ~" (The Best of Both Worlds: "the
+/// Borg assimilated with this Saga") names the permanent a linked ability of
+/// the same object assimilated — that ability's `assimilate` records it on the
+/// source (`Effect::RememberCard`), and this reads the record back through the
+/// remembered-object reader `ChosenCard`. The reader matches the recorded
+/// incarnation only (CR 400.7: an object that left the battlefield is a new
+/// object), and `InZone { Battlefield }` scopes it to the permanent.
+fn parse_assimilated_with_source_reference(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ChosenCard,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }])),
+            ],
+        },
+        (
+            tag("the "),
+            nom_target::parse_type_filter_word,
+            tag(" assimilated with "),
+            super::oracle_nom::duration::parse_self_reference_subject,
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 608.2k: "the sacrificed/exiled <noun>" — an untargeted reference to the
