@@ -23953,7 +23953,7 @@ fn placement_noun_phrase_is_targeted(input: &str) -> bool {
     }
 }
 
-fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
+fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<bool> {
     let (input, _) = tag::<_, _, OracleError<'_>>("put the exiled cards")
         .parse(input)
         .ok()?;
@@ -23977,11 +23977,11 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
     ))
     .parse(input)
     .ok()?;
-    let (input, _) = opt(tag::<_, _, OracleError<'_>>(" in a random order"))
+    let (input, order) = opt(tag::<_, _, OracleError<'_>>(" in a random order"))
         .parse(input)
         .ok()?;
     let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
-    input.is_empty().then_some(())
+    input.is_empty().then_some(order.is_some())
 }
 
 /// CR 614.1a + CR 608.2n: could a typed owner consume this body in the dropped guard's
@@ -24081,9 +24081,31 @@ fn refine_put_at_library_position(
         ..
     } = clause.effect
     {
-        if parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()).is_some() {
-            *target = TargetFilter::ExiledBySource;
-            *count = QuantityExpr::Fixed { value: 0 };
+        if let Some(random_order) = parse_exiled_cards_not_cast_cleanup(&text.to_lowercase()) {
+            // CR 400.7j + CR 608.2c: the preceding loop owns this population.
+            // The source-linked "all cards exiled with this enchantment"
+            // wording does not enter this branch.
+            if random_order && ctx.chain_prior_exile_until_match.is_some() {
+                clause.effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Library,
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: Some(LibraryPosition::Bottom),
+                    library_shuffle: Default::default(),
+                    random_order,
+                };
+            } else {
+                *target = TargetFilter::ExiledBySource;
+                *count = QuantityExpr::Fixed { value: 0 };
+            }
             return placement_target_set;
         }
         let lower_put = text.to_lowercase();

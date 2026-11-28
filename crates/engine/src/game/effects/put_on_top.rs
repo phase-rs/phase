@@ -138,8 +138,8 @@ pub fn resolve(
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
     //
-    // CR 701.13a: A filter that references `ExiledBySource` — the bare Chaos
-    // Wand form or Jodah's `And { ExiledBySource, DistinctFrom { ParentTarget }
+    // CR 701.13a: A filter that references `ExiledBySource` — the bare linked
+    // form or Jodah's `And { ExiledBySource, DistinctFrom { ParentTarget }
     // }` — is a resolution-time EXILE-ZONE SCAN, not a pre-chosen target. On the
     // accept/decline path the cleanup INHERITS the cast's `ability.targets` (the
     // hit, so `DistinctFrom { ParentTarget }` can exclude it). Forwarding that
@@ -152,7 +152,7 @@ pub fn resolve(
         _ => crate::game::effects::effect_object_targets(&target_filter, &effective_targets),
     };
     // CR 701.13a + CR 608.2c: Any filter that references `ExiledBySource` — the
-    // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
+    // bare source-linked form or an `And`-composed
     // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
     // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
     // reads the exiled cards: the batch an exile-until loop handed down, or else
@@ -172,12 +172,8 @@ pub fn resolve(
         //
         // CR 607.2a: Possibility Storm's "all cards exiled with this
         // enchantment" is every card currently exiled with the source, which
-        // adds the spell its trigger exiled before the loop. The other bare
-        // form, "the exiled cards that weren't cast this way" (Gríma,
-        // Saruman's Footman; CR 608.2c), names this resolution's cards; with
-        // the engine's per-source link ledger that is the same set, because no
-        // card of these forms leaves a linked card in exile, unlike a found
-        // card the rest-forms keep.
+        // adds the spell its trigger exiled before the loop. Current-batch
+        // cleanup uses a tracked mass move instead of this source-ledger read.
         let resolution_batch = (!ability.context.exile_until_batch.is_empty()).then(|| {
             ability
                 .context
@@ -528,8 +524,8 @@ pub fn resolve(
         // CR 701.13a: Both the bare (`ExiledBySource`) and And-composed (Jodah's
         // `And { ExiledBySource, DistinctFrom { ParentTarget } }`) "put the rest
         // on the bottom" cleanups place their whole pool at once. Jodah's ruling
-        // requires a RANDOM order; the bare Chaos Wand form is likewise
-        // randomized. Detect either via `references_exiled_by_source`.
+        // requires a random order, as does Possibility Storm's source-linked
+        // placement. Detect either via `references_exiled_by_source`.
         if matches!(position, LibraryPosition::Bottom)
             && target_filter.references_exiled_by_source()
         {

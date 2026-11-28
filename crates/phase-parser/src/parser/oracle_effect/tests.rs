@@ -60220,24 +60220,80 @@ fn chaos_wand_lowers_to_targeted_exile_until_optional_cast_and_cleanup() {
     assert!(*without_paying_mana_cost);
     assert!(cast.optional);
 
-    for cleanup in [cast.sub_ability.as_deref(), cast.else_ability.as_deref()] {
-        let cleanup = cleanup.expect("cleanup should run after accept or decline");
-        let Effect::PutAtLibraryPosition {
-            target,
-            count,
-            position,
-            arranger: _,
-        } = &*cleanup.effect
-        else {
-            panic!(
-                "expected PutAtLibraryPosition cleanup, got {:?}",
-                cleanup.effect
-            );
-        };
-        assert_eq!(*target, TargetFilter::ExiledBySource);
-        assert_eq!(*count, QuantityExpr::Fixed { value: 0 });
-        assert_eq!(*position, LibraryPosition::Bottom);
-    }
+    let cleanup = cast.sub_ability.as_deref().expect("sequential cleanup");
+    assert!(
+        matches!(
+            &*cleanup.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Library,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: true,
+                ..
+            }
+        ),
+        "expected exact random-bottom cleanup, got {:?}",
+        cleanup.effect
+    );
+}
+
+#[test]
+fn grima_random_cleanup_carries_the_damaged_player_as_actor() {
+    let trigger = crate::parser::oracle_trigger::parse_trigger_line(
+        "Whenever Gríma deals combat damage to a player, that player exiles cards from the top of their library until they exile an instant or sorcery card. You may cast that card without paying its mana cost. Then that player puts the exiled cards that weren't cast this way on the bottom of their library in a random order.",
+        "Gríma, Saruman's Footman",
+    );
+    let cleanup = trigger
+        .execute
+        .as_deref()
+        .and_then(|loop_node| loop_node.sub_ability.as_deref())
+        .and_then(|cast| cast.sub_ability.as_deref())
+        .expect("random-bottom cleanup");
+    assert!(
+        matches!(
+            &*cleanup.effect,
+            Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Player {
+                    player: TargetFilter::TriggeringPlayer,
+                },
+                ..
+            }
+        ),
+        "the damaged player performs the placement: {:?}",
+        cleanup.effect
+    );
+}
+
+#[test]
+fn tibalts_trickery_bare_cleanup_reads_the_exile_until_batch() {
+    let def = parse_effect_chain(
+        "Counter target spell. Choose 1, 2, or 3 at random. Its controller mills that many cards, then exiles cards from the top of their library until they exile a nonland card with a different name than that spell. They may cast that card without paying its mana cost. Then they put the exiled cards on the bottom of their library in a random order.",
+        AbilityKind::Spell,
+    );
+    let chain = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref());
+    let effects: Vec<_> = chain.map(|node| &*node.effect).collect();
+    let loop_index = effects
+        .iter()
+        .position(|effect| matches!(effect, Effect::ExileFromTopUntil { .. }))
+        .expect("the exile loop lowered");
+    assert!(
+        effects[loop_index + 1..].iter().any(|effect| matches!(
+            effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                },
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: true,
+                ..
+            }
+        )),
+        "the bare cleanup must read the loop's batch: {effects:?}"
+    );
 }
 
 /// CR 608.2c + CR 401.4: Sanwell, Avenger Ace exiles six, offers an optional

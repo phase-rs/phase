@@ -32423,6 +32423,21 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 608.2c: recognize random bottom placement independently of the
+    /// membership filter supplied by its producer.
+    pub fn is_random_bottom_from_exile(&self) -> bool {
+        matches!(
+            self,
+            Self::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Library,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: true,
+                ..
+            }
+        )
+    }
+
     /// CR 605.1a + CR 701.10f: whether resolving this effect adds mana to a mana
     /// pool — `Effect::Mana`, or doubling a pool's mana (CR 701.10f: "that player
     /// adds an amount of mana of that type equal to the amount they already have").
