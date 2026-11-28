@@ -1972,3 +1972,78 @@ describe("CardVfxLayer board sweep", () => {
     expect(cracked(450)).toBeGreaterThan(0);
   });
 });
+
+describe("CardVfxLayer abandoned commits", () => {
+  const TO_EXILE: CardFlightRoute = { from: "Hand", to: "Exile", ownerId: 1 };
+
+  beforeEach(() => {
+    useAnimationStore.setState({ presentationSnapshotSeq: 0, abandonedSnapshotSeq: 0 });
+  });
+
+  /** Records `seq` as the newest snapshot the presentation was handed, then
+   *  abandons it, exactly as a kept game-over clear does. */
+  function abandonPresentation(seq: number) {
+    act(() => useAnimationStore.setState({ presentationSnapshotSeq: seq }));
+    act(() => useAnimationStore.getState().abandonPendingSnapshotCommits());
+  }
+
+  const landFlight = () =>
+    advance(RESOLVE_FLIGHT_MS + LAND_STATIONARY_WAIT_MAX_MS + LAND_REVEAL_WAIT_MAX_MS + 10 * FRAME_MS);
+
+  it("V17-1: a landed flight already waiting on the commit unveils when that commit is abandoned", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor({ "data-exile-pile": "1" }, 40, 700);
+    const seq = queuedSeq();
+
+    present({ ...spec(X, TO_EXILE), snapshotSeq: seq });
+    await landFlight();
+    expect(veiled(X)).toBe(true);
+    expect(unveilSpy).not.toHaveBeenCalled();
+
+    abandonPresentation(seq);
+
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("V17-2: a flight still in the air settles on landing once its commit is abandoned", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor({ "data-exile-pile": "1" }, 40, 700);
+    const seq = queuedSeq();
+
+    present({ ...spec(X, TO_EXILE), snapshotSeq: seq });
+    await frames(1);
+    expect(veiled(X)).toBe(true);
+    abandonPresentation(seq);
+    // Abandoning the commit does not release a flight before it lands.
+    expect(veiled(X)).toBe(true);
+
+    await landFlight();
+
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("V17-3: a later snapshot's flight still waits for its own commit after an earlier abandon", async () => {
+    const { present } = await readyLayer();
+    handCard(X);
+    anchor({ "data-exile-pile": "1" }, 40, 700);
+    const abandoned = queuedSeq();
+    const later = abandoned + 1;
+    abandonPresentation(abandoned);
+
+    present({ ...spec(X, TO_EXILE), snapshotSeq: later });
+    await landFlight();
+    expect(veiled(X)).toBe(true);
+
+    // Two commits carry the gate to `later`.
+    commitEngine();
+    expect(veiled(X)).toBe(true);
+    commitEngine();
+
+    expect(veiled(X)).toBe(false);
+    expect(unveilSpy).toHaveBeenCalledTimes(1);
+  });
+});

@@ -27,8 +27,8 @@ import { useUiStore } from "../stores/uiStore.ts";
  * this clear. Closing that remaining race requires changing its restore path, not
  * this boundary.
  */
-export function clearPromptOverlayState(): void {
-  abandonPendingDispatches();
+export function clearPromptOverlayState(options: { keepPresentation?: boolean } = {}): void {
+  abandonPendingDispatches(options);
   useGameStore.setState({
     waitingFor: null,
     legalActions: [],

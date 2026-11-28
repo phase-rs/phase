@@ -2,6 +2,9 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { TargetRef } from "../../adapter/types.ts";
+// The Director owns the one step clock that advances animationStore's active
+// step; the overlay only reports when it has presented a step.
+import { director } from "../../animation/director.ts";
 import {
   CARD_SLAM_FLIGHT_MS,
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
@@ -13,6 +16,7 @@ import {
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
+import { usePresentationPace } from "../../hooks/usePresentationPace.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -71,6 +75,8 @@ interface ActiveShatter {
   id: number;
   position: { x: number; y: number; width: number; height: number };
   image: HTMLImageElement;
+  /** Fixed when the death was presented, so a later pace change cannot retime it. */
+  timeScale: number;
 }
 
 interface ActiveCastArc {
@@ -79,6 +85,8 @@ interface ActiveCastArc {
   to: { x: number; y: number };
   snapshot: AnimationImageSnapshot | null;
   mode: "cast" | "resolve-permanent" | "resolve-spell";
+  /** Fixed when the arc spawns, so a later pace change cannot retime it mid-flight. */
+  timeScale: number;
 }
 
 interface ActiveMillReveal {
@@ -87,6 +95,7 @@ interface ActiveMillReveal {
   startIndex: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
+  timeScale: number;
 }
 
 interface ActiveMeldForge {
@@ -103,6 +112,8 @@ interface ActiveRippleReveal {
   id: number;
   cards: MillCard[];
   from: { x: number; y: number };
+  /** Fixed when the reveal spawns, so a later pace change cannot retime it. */
+  timeScale: number;
 }
 
 interface PendingDeath {
@@ -111,6 +122,9 @@ interface PendingDeath {
   snapshot: AnimationImageSnapshot;
   position: { x: number; y: number; width: number; height: number };
   readinessDeadlineMs: number;
+  /** Captured when the death is presented, not when its image resolves: a
+   *  later pace change must not retime the shatter this death becomes. */
+  timeScale: number;
 }
 
 type DeathReadinessOutcome =
@@ -205,7 +219,6 @@ function findCardElement(objectId: number): HTMLElement | null {
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeStep = useAnimationStore((s) => s.activeStep);
   const activeGeneration = useAnimationStore((s) => s.activeGeneration);
-  const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
   const cardVfxRef = useRef<CardVfxLayerHandle>(null);
@@ -225,7 +238,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeMeldForges, setActiveMeldForges] = useState<ActiveMeldForge[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  // One clock, one pace: the Director's speed × stack pressure while its run
+  // plays, else the speed preference. The overlay schedules no step timer.
+  const speedMultiplier = usePresentationPace();
   const reduceMotion = useReducedMotion();
   const cardAnimationStyle = usePreferencesStore((s) => s.cardAnimationStyle);
   // Style Classic, tier minimal, reduced motion and no WebGL 2 mount no layer,
@@ -308,6 +323,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           id: ++deathCloneIdCounter,
           position: pending.position,
           image: outcome.image,
+          timeScale: pending.timeScale,
         },
       ]);
     } else {
@@ -646,6 +662,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   DEATH_IMAGE_READY_MAX_MS,
                   owningStepMs * 0.75,
                 ),
+                timeScale: Math.min(1, speedMultiplier),
               });
             } else {
               setActiveDeathClones((previous) => [
@@ -681,7 +698,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 const id = ++castArcIdCounter;
                 setActiveCastArcs((previous) => [
                   ...previous,
-                  { id, from: pos, to: stackPos, snapshot, mode: "cast" },
+                  { id, from: pos, to: stackPos, snapshot, mode: "cast", timeScale: Math.min(1, speedMultiplier) },
                 ]);
               }
             }
@@ -719,6 +736,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                       to: pos,
                       snapshot,
                       mode: "resolve-permanent",
+                      timeScale: Math.min(1, speedMultiplier),
                     },
                   ]);
                 }
@@ -737,6 +755,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   to: stackPos,
                   snapshot,
                   mode: "resolve-spell",
+                  timeScale: Math.min(1, speedMultiplier),
                 },
               ]);
             }
@@ -773,6 +792,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                   id,
                   cards: [card],
                   startIndex: Math.max(startIndex, 0),
+                  timeScale: Math.min(1, speedMultiplier),
                   from: libRect ? rectCenter(libRect) : hudFallback,
                   to: gyRect ? rectCenter(gyRect) : hudFallback,
                 },
@@ -902,7 +922,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
             : getPlayerHudPosition(player);
           const id = ++rippleRevealIdCounter;
-          setActiveRippleReveals((prev) => [...prev, { id, cards: revealCards, from: fromPos }]);
+          setActiveRippleReveals((prev) => [
+            ...prev,
+            { id, cards: revealCards, from: fromPos, timeScale: Math.min(1, speedMultiplier) },
+          ]);
           break;
         }
 
@@ -954,7 +977,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [damageTargetPosition, landDamageHit, processClassicEffect, speedMultiplier],
   );
 
-  // Process effects when activeStep changes, then advance after its duration
+  useEffect(() => director.attachPresenter(), []);
+
+  // Present the active step's effects, then start the Director's clock for it.
+  // The cleanup only drops this step's own sub-step timers (impacts, flashes)
+  // so they cannot outlive it.
   useEffect(() => {
     if (!activeStep) return;
 
@@ -966,15 +993,14 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         activeStep.snapshotSeq,
       );
     }
+    director.presented(activeStep);
 
-    const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
     return () => {
-      clearTimeout(timer);
       for (const stepTimeout of stepTimeoutsRef.current) clearTimeout(stepTimeout);
       stepTimeoutsRef.current = [];
       setActiveVignette(null);
     };
-  }, [activeStep, advanceStep, processEffect, speedMultiplier]);
+  }, [activeStep, processEffect, speedMultiplier]);
 
   const handleFloatComplete = useCallback((id: number) => {
     setActiveFloats((prev) => prev.filter((f) => f.id !== id));
@@ -1071,6 +1097,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`shatter-${shatter.id}`}
           position={shatter.position}
           image={shatter.image}
+          timeScale={shatter.timeScale}
           onComplete={() => handleShatterComplete(shatter.id)}
         />
       ))}
@@ -1083,6 +1110,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           to={arc.to}
           snapshot={arc.snapshot}
           mode={arc.mode}
+          timeScale={arc.timeScale}
           onComplete={() => handleCastArcComplete(arc.id)}
         />
       ))}
@@ -1096,6 +1124,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`mill-${mill.id}`}
           cards={mill.cards}
           startIndex={mill.startIndex}
+          timeScale={mill.timeScale}
           from={mill.from}
           to={mill.to}
           onComplete={() => handleMillRevealComplete(mill.id)}
@@ -1108,6 +1137,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           key={`ripple-${ripple.id}`}
           cards={ripple.cards}
           from={ripple.from}
+          timeScale={ripple.timeScale}
           onComplete={() => handleRippleRevealComplete(ripple.id)}
         />
       ))}

@@ -10,6 +10,8 @@ interface CastArcAnimationProps {
   to: { x: number; y: number };
   snapshot: AnimationImageSnapshot | null;
   mode: "cast" | "resolve-permanent" | "resolve-spell";
+  /** Compresses the flight with its step when presentation runs faster than 1. */
+  timeScale?: number;
   onComplete: () => void;
 }
 
@@ -56,6 +58,7 @@ export function CastArcAnimation({
   to,
   snapshot,
   mode,
+  timeScale = 1,
   onComplete,
 }: CastArcAnimationProps) {
   // `normal`, not `small`: this renders a bare image element with no ladder at
@@ -68,7 +71,7 @@ export function CastArcAnimation({
       <motion.div
         initial={{ opacity: 1, scale: 1 }}
         animate={{ opacity: 0, scale: 0.3 }}
-        transition={{ duration: 0.3, ease: "easeIn" }}
+        transition={{ duration: 0.3 * timeScale, ease: "easeIn" }}
         onAnimationComplete={onComplete}
         style={{
           position: "fixed",
@@ -91,7 +94,7 @@ export function CastArcAnimation({
   // Cast (hand->stack) or resolve-permanent (stack->battlefield): parabolic arc
   const midX = (from.x + to.x) / 2;
   const midY = Math.min(from.y, to.y) - ARC_HEIGHT;
-  const duration = mode === "cast" ? 0.4 : 0.3;
+  const duration = (mode === "cast" ? 0.4 : 0.3) * timeScale;
 
   return (
     <motion.div
