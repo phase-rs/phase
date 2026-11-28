@@ -1,3 +1,5 @@
+use crate::game::engine::EngineError;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::CounterPlacementProhibitions;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
@@ -8,6 +10,44 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+pub(crate) fn validate_blight_selection(
+    state: &GameState,
+    player: PlayerId,
+    count: u32,
+    offered: &[ObjectId],
+    chosen: &[ObjectId],
+) -> Result<ObjectId, EngineError> {
+    let [recipient] = chosen else {
+        return Err(EngineError::InvalidAction(format!(
+            "Must blight exactly one creature, got {}",
+            chosen.len()
+        )));
+    };
+    (offered.contains(recipient)
+        && eligible_blight_creatures(state, player, count).contains(recipient))
+    .then_some(*recipient)
+    .ok_or_else(|| EngineError::InvalidAction("Selected creature not eligible for blight".into()))
+}
+
+pub(crate) fn place_blight_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    recipient: ObjectId,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) -> super::counters::CounterAdditionOutcome {
+    super::counters::place_counter_addition(
+        state,
+        player,
+        recipient,
+        CounterType::Minus1Minus1,
+        count,
+        // CR 614.16: paying a cost is neither a resolving effect nor a replacement.
+        crate::types::proposed_event::CounterCause::Other,
+        events,
+    )
+}
+
 /// CR 701.68a + CR 701.68b: the creatures `player` can blight for `count`: those
 /// they control that exist (CR 702.26b: a phased-out creature is treated as
 /// though it doesn't exist, CR 702.26d: though it stays on the battlefield)
@@ -17,7 +57,7 @@ use crate::types::zones::Zone;
 /// cloned and the replacement index is neither rebuilt nor consulted. The real
 /// placement still runs the pipeline, so CR 616.1 ordering among Doubling
 /// Season, Vorinclex and Vizier of Remedies is chosen when the counters are put.
-fn blightable_creatures(
+pub(crate) fn blightable_creatures(
     state: &GameState,
     player: PlayerId,
     count: u32,
@@ -38,6 +78,24 @@ fn blightable_creatures(
                 )
         })
     })
+}
+
+/// The live creatures that can receive a Blight payment.
+pub fn eligible_blight_creatures(state: &GameState, player: PlayerId, count: u32) -> Vec<ObjectId> {
+    blightable_creatures(state, player, count)
+        .filter(|id| {
+            let object = &state.objects[id];
+            crate::game::effects::counters::preview_counter_addition(
+                state,
+                player,
+                crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+                CounterType::Minus1Minus1,
+                count,
+                crate::types::proposed_event::CounterCause::Other,
+            )
+            .is_some_and(|preview| !preview.is_prohibited())
+        })
+        .collect()
 }
 
 /// CR 101.4 + CR 608.2c + CR 701.68b: the generic gate's judge of an optional blight, asked

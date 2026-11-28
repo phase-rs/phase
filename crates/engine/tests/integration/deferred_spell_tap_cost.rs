@@ -181,6 +181,8 @@ enum AtTargets {
     Choose,
     /// Save and restore through the production serializer, then choose.
     RestoreThenChoose,
+    /// Restore the old wire form of the Conspire payment.
+    RestoreLegacyConspireThenChoose,
     /// Cancel the cast instead of completing it.
     Cancel,
 }
@@ -277,6 +279,20 @@ fn round_trip(runner: &GameRunner) -> GameRunner {
     GameRunner::from_state(state)
 }
 
+fn round_trip_legacy_conspire(runner: &GameRunner) -> GameRunner {
+    let mut state = runner.state().clone();
+    let pending = state.waiting_for.pending_cast_mut().expect("a paused cast");
+    let payment = pending
+        .ability
+        .context
+        .additional_cost_payments
+        .iter_mut()
+        .find(|payment| payment.origin == AdditionalCostOrigin::Conspire)
+        .expect("Conspire was paid");
+    payment.origin = AdditionalCostOrigin::Other;
+    round_trip(&GameRunner::from_state(state))
+}
+
 fn tapped(runner: &GameRunner, ids: &[ObjectId]) -> Vec<bool> {
     ids.iter()
         .map(|id| runner.state().objects[id].tapped)
@@ -353,9 +369,15 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                 }
             }
             WaitingFor::TargetSelection { .. } => {
-                if script.at_targets == AtTargets::RestoreThenChoose && !restored {
+                if !restored {
+                    match script.at_targets {
+                        AtTargets::RestoreThenChoose => *runner = round_trip(runner),
+                        AtTargets::RestoreLegacyConspireThenChoose => {
+                            *runner = round_trip_legacy_conspire(runner);
+                        }
+                        AtTargets::Choose | AtTargets::Cancel => {}
+                    }
                     restored = true;
-                    *runner = round_trip(runner);
                 }
                 run.prompts.push(Prompt::Target);
                 run.tapped_at_targets = Some(tapped(runner, watch));
@@ -611,7 +633,7 @@ fn pyromatics_board() -> PyromaticsBoard {
 fn conspire_script(board: &PyromaticsBoard) -> Script {
     let mut script = Script::new(board.victim);
     script.replicate = 1;
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![board.goblins.clone()];
     script
 }
@@ -620,7 +642,7 @@ fn conspire_trail() -> Vec<Prompt> {
     vec![
         Prompt::Replicate(PaymentDecision::Pay),
         Prompt::Replicate(PaymentDecision::Decline),
-        Prompt::Once(AdditionalCostOrigin::Other, PaymentDecision::Pay),
+        Prompt::Once(AdditionalCostOrigin::Conspire, PaymentDecision::Pay),
         Prompt::PayCost,
         Prompt::Target,
     ]
@@ -677,14 +699,19 @@ fn conspire_creatures_stay_untapped_through_the_manual_payment_window() {
 /// The selection survives a save and restore at target selection.
 #[test]
 fn conspire_selection_survives_a_restore_at_target_selection() {
-    let mut board = pyromatics_board();
-    let mut script = conspire_script(&board);
-    script.at_targets = AtTargets::RestoreThenChoose;
-    let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
+    for restore in [
+        AtTargets::RestoreThenChoose,
+        AtTargets::RestoreLegacyConspireThenChoose,
+    ] {
+        let mut board = pyromatics_board();
+        let mut script = conspire_script(&board);
+        script.at_targets = restore;
+        let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
 
-    assert_eq!(run.prompts, conspire_trail());
-    assert_eq!(run.tapped_at_targets, Some(vec![false, false]));
-    assert_conspire_paid(&mut board, &run);
+        assert_eq!(run.prompts, conspire_trail());
+        assert_eq!(run.tapped_at_targets, Some(vec![false, false]));
+        assert_conspire_paid(&mut board, &run);
+    }
 }
 
 /// CR 601.2: cancelling at target selection taps nothing and keeps no stale
@@ -760,7 +787,10 @@ fn creature_held_for_teamwork_makes_conspire_unofferable() {
     let mut board = tactics_board(0);
     let mut script = Script::new(board.victim);
     script.replicate = 1;
-    script.pay_once = vec![AdditionalCostOrigin::Teamwork, AdditionalCostOrigin::Other];
+    script.pay_once = vec![
+        AdditionalCostOrigin::Teamwork,
+        AdditionalCostOrigin::Conspire,
+    ];
     script.selections = vec![vec![board.wort]];
     let watch = [board.wort, board.djinn];
     let run = cast(&mut board.runner, board.tactics, &script, &watch);
@@ -780,8 +810,11 @@ fn creature_held_for_teamwork_makes_conspire_unofferable() {
     assert_eq!(taps(&run, board.wort), 1);
     assert_eq!(taps(&run, board.djinn), 0);
     assert_eq!(spent(&board.runner, 12), 4, "{{1}}{{R}} + one replicate");
-    // One replicate copy. Found, not fixed: a granted-Conspire trigger also
-    // fires here off the teamwork payment (aggregate `additional_cost_paid`).
+    assert_eq!(
+        board.runner.state().stack.len(),
+        2,
+        "only the spell and the Replicate trigger"
+    );
     let replicate_triggers = board.runner.state().stack.iter().filter(|entry| {
         matches!(&entry.kind, StackEntryKind::TriggeredAbility { description: Some(d), .. } if d == "Replicate")
     });
@@ -796,7 +829,10 @@ fn creature_held_for_teamwork_is_not_offered_to_conspire() {
     let goblin = board.goblins[0];
     let mut script = Script::new(board.victim);
     script.replicate = 1;
-    script.pay_once = vec![AdditionalCostOrigin::Teamwork, AdditionalCostOrigin::Other];
+    script.pay_once = vec![
+        AdditionalCostOrigin::Teamwork,
+        AdditionalCostOrigin::Conspire,
+    ];
     script.selections = vec![vec![goblin], vec![board.wort, board.djinn]];
     let watch = [board.wort, board.djinn, goblin];
     let run = cast(&mut board.runner, board.tactics, &script, &watch);
@@ -808,7 +844,7 @@ fn creature_held_for_teamwork_is_not_offered_to_conspire() {
             Prompt::Replicate(PaymentDecision::Decline),
             Prompt::Once(AdditionalCostOrigin::Teamwork, PaymentDecision::Pay),
             Prompt::PayCost,
-            Prompt::Once(AdditionalCostOrigin::Other, PaymentDecision::Pay),
+            Prompt::Once(AdditionalCostOrigin::Conspire, PaymentDecision::Pay),
             Prompt::PayCost,
             Prompt::Target,
         ]
@@ -853,7 +889,7 @@ fn creatures_held_for_conspire_cant_convoke() {
     let mut runner = scenario.build();
 
     let mut script = Script::new(victim);
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![goblins.clone()];
     script.convoke = vec![helper];
     script.probe_convoke = goblins.clone();
@@ -939,7 +975,7 @@ fn tapped_for_mana(run: &Run, id: ObjectId) -> Option<usize> {
 fn mana_is_activated_before_held_creatures_are_tapped() {
     let mut board = druid_board(1);
     let mut script = Script::new(board.victim);
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![board.goblins.clone()];
     let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
 
@@ -961,7 +997,7 @@ fn creature_held_for_conspire_is_not_tapped_for_mana() {
     let (held_druid, free_druid) = (board.druids[0], board.druids[1]);
     let held = vec![held_druid, board.goblins[0]];
     let mut script = Script::new(board.victim);
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![held.clone()];
     let run = cast(&mut board.runner, board.pyromatics, &script, &held);
 
@@ -998,7 +1034,10 @@ fn creature_tapped_for_conspire_is_then_sacrificed_for_casualty() {
     let mut runner = scenario.build();
 
     let mut script = Script::new(victim);
-    script.pay_once = vec![AdditionalCostOrigin::Casualty, AdditionalCostOrigin::Other];
+    script.pay_once = vec![
+        AdditionalCostOrigin::Casualty,
+        AdditionalCostOrigin::Conspire,
+    ];
     script.selections = vec![vec![djinn], vec![djinn, goblin]];
     let run = cast(&mut runner, temper, &script, &[djinn, goblin]);
 
@@ -1074,7 +1113,7 @@ fn phyrexian_payment_pause_keeps_the_selection_held() {
     let mut runner = scenario.build();
 
     let mut script = Script::new(victim);
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![goblins.clone()];
     let run = cast(&mut runner, gut_shot, &script, &goblins);
 
@@ -1111,7 +1150,7 @@ fn harmonize_does_not_offer_creatures_held_for_conspire() {
     let mut runner = scenario.build();
 
     let mut script = Script::new(victim);
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![goblins.clone()];
     script.harmonize_with = Some(helper);
     let run = cast(&mut runner, dragonfire, &script, &goblins);
@@ -1218,7 +1257,7 @@ fn held_creature_still_counts_its_non_tap_mana_toward_x() {
         let partner = [thermopod, goblins[1]][case];
         let mut script = Script::new(target);
         script.payment_mode = CastPaymentMode::Manual;
-        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.pay_once = vec![AdditionalCostOrigin::Conspire];
         script.selections = vec![vec![wort, partner]];
         script.x = 1;
         script.mana_abilities = vec![(thermopod, Some(goblins[0]))];
@@ -1301,7 +1340,7 @@ fn held_creature_still_tapped_at_the_commit_is_refused() {
     let (druid, goblin) = (board.druids[0], board.goblins[0]);
     let mut script = Script::new(board.victim);
     script.payment_mode = CastPaymentMode::Manual;
-    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.pay_once = vec![AdditionalCostOrigin::Conspire];
     script.selections = vec![vec![druid, goblin]];
     // The Druid and the Mountain pay {1}{R}; the commit then refuses the tap.
     script.mana_abilities = vec![(druid, None), (board.mountain, None)];
@@ -1334,7 +1373,7 @@ fn held_creature_does_not_count_its_tap_mana_toward_x() {
 
         let partner = [druid, goblins[0]][case];
         let mut script = Script::new(target);
-        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.pay_once = vec![AdditionalCostOrigin::Conspire];
         script.selections = vec![vec![wort, partner]];
         let run = cast(&mut runner, heat_ray, &script, &[wort, partner]);
 
@@ -1361,7 +1400,7 @@ fn held_creatures_pay_a_mana_ability_tap_cost_only_by_the_players_choice() {
         let held = vec![wort, goblins[0]];
         let mut script = Script::new(victim);
         script.payment_mode = CastPaymentMode::Manual;
-        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.pay_once = vec![AdditionalCostOrigin::Conspire];
         script.selections = vec![held.clone()];
         let pays_with = *goblins.last().expect("a Goblin");
         script.mana_abilities = vec![(drum, Some(if case == 0 { wort } else { pays_with }))];
@@ -1406,7 +1445,7 @@ fn held_land_creature_taps_for_its_intrinsic_mana_by_the_players_choice() {
         let held = vec![arbor, goblins[0]];
         let mut script = Script::new(wort);
         script.payment_mode = CastPaymentMode::Manual;
-        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.pay_once = vec![AdditionalCostOrigin::Conspire];
         script.selections = vec![held.clone()];
         if completion == Completion::Refused {
             script.mana_abilities = vec![(arbor, None)];

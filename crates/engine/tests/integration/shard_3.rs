@@ -172,6 +172,7 @@ mod exhibition_tidecaller_target_player_mill;
 mod exile_dynamic_from_top;
 mod exile_one_card_from_each_graveyard_9213;
 mod exile_origin_target_acquisition;
+mod exile_until_cleanup;
 mod exocrine_compound_damage_subject;
 mod exotic_orchard_colorless_excluded;
 mod expensive_taste_look_and_play;

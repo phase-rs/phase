@@ -1,12 +1,14 @@
 use std::convert::Infallible;
 use std::fmt;
+use std::num::NonZeroI32;
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, opt, value};
-use nom::sequence::{preceded, terminated};
+use nom::bytes::complete::{tag, take_till1};
+use nom::character::complete::{char, digit1, multispace0, one_of};
+use nom::combinator::{all_consuming, opt, recognize, value};
+use nom::multi::many1;
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,247 @@ use super::player::PlayerId;
 use super::text_grammar::{parse_number, OracleError};
 
 pub use super::text_grammar::craft_materials_default;
+
+/// CR 702.56a: The cost of one Replicate payment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReplicateCost {
+    Mana(ManaCost),
+    #[serde(with = "replicate_tap_one")]
+    TapOne(Box<TargetFilter>),
+    #[serde(with = "replicate_pay_energy")]
+    PayEnergy(ReplicateEnergy),
+}
+
+/// A positive fixed energy amount representable by the normal cost machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "i32", into = "i32")]
+pub struct ReplicateEnergy(NonZeroI32);
+
+impl ReplicateEnergy {
+    pub fn new(amount: i32) -> Option<Self> {
+        NonZeroI32::new(amount)
+            .filter(|value| value.get() > 0)
+            .map(Self)
+    }
+
+    pub fn get(self) -> i32 {
+        self.0.get()
+    }
+}
+
+impl TryFrom<i32> for ReplicateEnergy {
+    type Error = &'static str;
+
+    fn try_from(amount: i32) -> Result<Self, Self::Error> {
+        Self::new(amount).ok_or("Replicate energy must be positive")
+    }
+}
+
+impl From<ReplicateEnergy> for i32 {
+    fn from(amount: ReplicateEnergy) -> Self {
+        amount.get()
+    }
+}
+
+mod replicate_tap_one {
+    use crate::types::ability::TapOneDisplay;
+
+    use super::{Deserialize, Serialize, TargetFilter};
+
+    #[derive(Serialize)]
+    #[serde(tag = "type")]
+    enum DisplayPayload<'a> {
+        TapOne {
+            filter: &'a TargetFilter,
+            tap_display: TapOneDisplay<'a>,
+        },
+    }
+
+    #[derive(Deserialize)]
+    #[serde(tag = "type")]
+    enum Payload {
+        TapOne { filter: Box<TargetFilter> },
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        filter: &TargetFilter,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        DisplayPayload::TapOne {
+            filter,
+            tap_display: TapOneDisplay::from_filter(filter),
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Box<TargetFilter>, D::Error> {
+        let Payload::TapOne { filter } = Payload::deserialize(deserializer)?;
+        Ok(filter)
+    }
+}
+
+mod replicate_pay_energy {
+    use super::{Deserialize, ReplicateEnergy, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "type")]
+    enum Payload {
+        PayEnergy { amount: ReplicateEnergy },
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        amount: &ReplicateEnergy,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Payload::PayEnergy { amount: *amount }.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ReplicateEnergy, D::Error> {
+        let Payload::PayEnergy { amount } = Payload::deserialize(deserializer)?;
+        Ok(amount)
+    }
+}
+
+#[cfg(test)]
+mod replicate_codec_tests {
+    use super::*;
+    use crate::types::ability::TapCreaturesSelectionMode;
+    use crate::types::statics::StaticMode;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_replicate_mana_keeps_its_wire_shape_and_text_price() {
+        let priced = json!({"Replicate": {"type": "Cost", "shards": ["Red"], "generic": 1}});
+        let keyword: Keyword = serde_json::from_value(priced.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&keyword).unwrap(), priced);
+        for spelling in ["replicate {1}{R}", "Replicate:{1}{R}", "Replicate:1R"] {
+            assert_eq!(
+                serde_json::from_value::<Keyword>(json!(spelling)).unwrap(),
+                keyword
+            );
+        }
+        let grant = json!({
+            "CastWithKeyword": {"keyword": {"Replicate": {"type": "SelfManaCost"}}}
+        });
+        let mode: StaticMode = serde_json::from_value(grant.clone()).unwrap();
+        assert_eq!(
+            mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Replicate(ReplicateCost::Mana(ManaCost::SelfManaCost)),
+            }
+        );
+        assert_eq!(serde_json::to_value(mode).unwrap(), grant);
+        assert_eq!(
+            "replicate {0}".parse::<Keyword>().unwrap(),
+            Keyword::Replicate(ReplicateCost::Mana(ManaCost::zero()))
+        );
+        for spelling in [
+            "replicate",
+            "replicate {E}",
+            "replicate {1}{R} extra",
+            "replicate:4294967296",
+            "replicate:4294967295R1",
+            "replicate:S",
+        ] {
+            assert!(matches!(
+                spelling.parse::<Keyword>().unwrap(),
+                Keyword::Unknown(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn non_mana_replicate_wire_is_disjoint_and_requires_positive_fixed_energy() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Subtype("Dalek".into())).controller(ControllerRef::You),
+        );
+        let creature_filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
+        );
+        for (keyword, payload) in [
+            (
+                Keyword::Replicate(ReplicateCost::TapOne(Box::new(filter.clone()))),
+                json!({
+                    "type": "TapOne",
+                    "filter": filter,
+                    "tap_display": {"type": "ControlledSubtype", "subtype": "Dalek"},
+                }),
+            ),
+            (
+                Keyword::Replicate(ReplicateCost::TapOne(Box::new(creature_filter.clone()))),
+                json!({
+                    "type": "TapOne",
+                    "filter": creature_filter,
+                    "tap_display": {"type": "Creature"},
+                }),
+            ),
+            (
+                Keyword::Replicate(ReplicateCost::PayEnergy(ReplicateEnergy::new(3).unwrap())),
+                json!({"type": "PayEnergy", "amount": 3}),
+            ),
+        ] {
+            let wire = json!({"Replicate": payload});
+            assert_eq!(serde_json::to_value(&keyword).unwrap(), wire);
+            assert_eq!(serde_json::from_value::<Keyword>(wire).unwrap(), keyword);
+        }
+        for payload in [
+            json!({"type": "TapTwo", "filter": filter}),
+            json!({"type": "TapOne"}),
+            json!({"type": "PayEnergy", "amount": 0}),
+            json!({"type": "PayEnergy", "amount": -1}),
+            json!({"type": "PayEnergy", "amount": 2147483648u32}),
+            json!({"type": "PayEnergy", "amount": {"type": "X"}}),
+        ] {
+            assert!(serde_json::from_value::<Keyword>(json!({"Replicate": payload})).is_err());
+        }
+    }
+
+    #[test]
+    fn generic_tap_payment_gains_a_display_descriptor_on_round_trip() {
+        let legacy = json!({
+            "type": "TapCreatures",
+            "count": 1,
+            "filter": {"type": "Typed", "type_filters": ["Creature"], "controller": "You"}
+        });
+        let cost: AbilityCost = serde_json::from_value(legacy).unwrap();
+        let payment = serde_json::to_value(&cost).unwrap();
+        assert_eq!(payment["tap_display"], json!({"type": "Creature"}));
+        assert_eq!(
+            serde_json::from_value::<AbilityCost>(payment).unwrap(),
+            cost
+        );
+    }
+
+    #[test]
+    fn replicate_payload_leaves_legacy_tap_x_and_numeric_blight_decodable() {
+        let tap: AbilityCost = serde_json::from_value(json!({
+            "type": "TapCreatures",
+            "count": u32::MAX,
+            "filter": { "type": "Typed", "type_filters": ["Creature"], "controller": "You" }
+        }))
+        .unwrap();
+        let AbilityCost::TapCreatures { requirement, .. } = tap else {
+            panic!("Expected the legacy tap cost");
+        };
+        assert_eq!(
+            requirement.selection_mode(),
+            TapCreaturesSelectionMode::VariableX
+        );
+        let blight: AbilityCost =
+            serde_json::from_value(json!({"type": "Blight", "count": 2})).unwrap();
+        assert_eq!(
+            blight,
+            AbilityCost::Blight {
+                count: crate::types::ability::BlightCount::Fixed(2)
+            }
+        );
+    }
+}
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
@@ -974,6 +1217,7 @@ impl MatchedProtectionQuality {
 #[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
+    Blight(u32),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
@@ -1576,7 +1820,7 @@ pub enum Keyword {
     /// replicate cost was paid. If the spell has any targets, you may
     /// choose new targets for any of the copies." Carries the per-copy
     /// mana cost.
-    Replicate(ManaCost),
+    Replicate(ReplicateCost),
 
     /// CR 702.113a: Awaken N—{cost} — alternative cost that also puts N +1/+1
     /// counters on target land you control, animating it as a 0/0 Elemental
@@ -2519,6 +2763,8 @@ impl Keyword {
     ///   (CR 702.40b: each instance triggers separately) — stack-functioning
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
+    /// - Prowess (CR 702.108b: each instance triggers separately) — a
+    ///   battlefield triggered ability counted by the spell-cast collector.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
     ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
     ///   CR 702.191b: each instance triggers separately) / Provoke (CR 702.39b:
@@ -2534,13 +2780,12 @@ impl Keyword {
     ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
     ///   `Keyword::Sunburst`), not by the runtime trigger installer this
     ///   predicate gates. Out of this class for that reason.
-    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
-    ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
         matches!(
             self,
             Keyword::Cascade
                 | Keyword::Storm
+                | Keyword::Prowess
                 | Keyword::Myriad
                 | Keyword::Increment
                 | Keyword::Provoke
@@ -2549,19 +2794,14 @@ impl Keyword {
         )
     }
 
-    /// CR 702.164b + CR 702.44d: Keywords whose multiple instances must COEXIST on
-    /// the keyword list rather than collapse to one when an identical instance is
-    /// granted on top of a printed one. When such a keyword is granted on top of an
-    /// identical printed instance, BOTH must remain on the keyword list so each
-    /// instance's effect is realized separately. Two disjoint reasons a keyword
-    /// belongs here, both served by the same "don't dedup identical instances"
-    /// mechanic in the keyword-grant paths:
+    /// Keywords whose identical instances must coexist when granted. Each
+    /// occurrence contributes to the keyword's effect in one of these ways:
     ///
     /// - **Parameter-value summation** (CR 702.164b): the aggregate reader sums
     ///   each instance's parameter (a creature's total toxic value). Only Toxic
     ///   sums today. Protection (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do
     ///   NOT sum — they keep deduping identical instances.
-    /// - **Instance-count multiplicity** (CR 702.44d + CR 702.54c): an as-enters
+    /// - **As-enters multiplicity** (CR 702.44d + CR 702.54c): an as-enters
     ///   static ability where "each instance works separately" — Sunburst places
     ///   its as-enters counters once per instance (CR 702.44a), and Bloodthirst
     ///   likewise places its counters once per instance (CR 702.54a). A GRANTED
@@ -2574,12 +2814,13 @@ impl Keyword {
     ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
     ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
     ///   printed `bloodthirst 1` never dedup regardless.)
+    /// - **Triggered-ability multiplicity** (CR 702.108b): each instance of
+    ///   Prowess supplies its own trigger when its controller casts a
+    ///   noncreature spell.
     ///
-    /// Distinct from `instances_function_separately` (which gates per-instance
-    /// TRIGGER installation, and deliberately excludes Sunburst because its
-    /// multiplicity is realized by synthesis / the granted-replacement path, not by
-    /// the trigger installer — a different semantic axis). Add any future keyword
-    /// whose identical instances must coexist here.
+    /// `instances_function_separately` preserves repeated printed keyword
+    /// occurrences for their trigger paths. This policy preserves identical
+    /// instances added by grants.
     ///
     /// Out of scope (intentionally not gated by this predicate): cast-time spell
     /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
@@ -2588,7 +2829,7 @@ impl Keyword {
     pub fn instances_must_coexist(&self) -> bool {
         matches!(
             self,
-            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_) | Keyword::Prowess
         )
     }
 
@@ -2832,6 +3073,32 @@ fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     }
 
     ManaCost::Cost { shards, generic }
+}
+
+fn parse_legacy_replicate_mana(text: &str) -> Option<Keyword> {
+    let uppercase = text.trim().to_ascii_uppercase();
+    let (_, symbols) = all_consuming(alt((
+        many1(delimited(
+            char::<_, OracleError<'_>>('{'),
+            take_till1(|c| c == '}'),
+            char('}'),
+        )),
+        many1(alt((digit1, recognize(one_of("WUBRGCX"))))),
+    )))
+    .parse(uppercase.as_str())
+    .ok()?;
+    let mut shards = Vec::new();
+    let mut generic = 0u32;
+    for symbol in symbols {
+        match symbol.parse() {
+            Ok(shard) => shards.push(shard),
+            Err(_) => generic = generic.checked_add(symbol.parse().ok()?)?,
+        }
+    }
+    Some(Keyword::Replicate(ReplicateCost::Mana(ManaCost::Cost {
+        shards,
+        generic,
+    })))
 }
 
 /// CR 702.41a: Parse the text from "Affinity for [text]" into the permanents
@@ -3148,6 +3415,10 @@ impl FromStr for Keyword {
         // path. Without this, granted Affinity becomes Keyword::Unknown — a silent no-op.
         if param.is_none() {
             if let Some((kw, rest)) = name_lower.split_once(' ') {
+                if kw == "replicate" {
+                    return Ok(parse_legacy_replicate_mana(rest)
+                        .unwrap_or_else(|| Keyword::Unknown(s.to_string())));
+                }
                 if kw == "affinity" {
                     if let Some(tf) = parse_affinity_type(rest) {
                         return Ok(Keyword::Affinity(tf));
@@ -3183,7 +3454,22 @@ impl FromStr for Keyword {
                         parse_keyword_mana_cost(p),
                     )))
                 }
-                "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
+                "ward" => {
+                    let mut words = p.split_ascii_whitespace();
+                    if words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("blight"))
+                    {
+                        return Ok(match (words.next(), words.next()) {
+                            (Some(count), None) => count.parse().map_or_else(
+                                |_| Keyword::Unknown(s.to_string()),
+                                |count| Keyword::Ward(WardCost::Blight(count)),
+                            ),
+                            _ => Keyword::Unknown(s.to_string()),
+                        });
+                    }
+                    return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p))));
+                }
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
@@ -3406,7 +3692,10 @@ impl FromStr for Keyword {
                 "squad" => return Ok(Keyword::Squad(parse_keyword_mana_cost(p))),
                 // CR 702.56a: Replicate {cost} — repeatable optional additional
                 // cost paid at cast; copy the spell once per payment.
-                "replicate" => return Ok(Keyword::Replicate(parse_keyword_mana_cost(p))),
+                "replicate" => {
+                    return Ok(parse_legacy_replicate_mana(p)
+                        .unwrap_or_else(|| Keyword::Unknown(s.to_string())));
+                }
                 // CR 702.29: Typecycling — "typecycling:{subtype}:{cost}"
                 "typecycling" => {
                     if let Some(colon_pos) = p.find(':') {
@@ -4462,7 +4751,9 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.157
         "Squad" => Ok(Keyword::Squad(mana(data)?)),
         // CR 702.56a: Replicate {cost}
-        "Replicate" => Ok(Keyword::Replicate(mana(data)?)),
+        "Replicate" => serde_json::from_value(data.clone())
+            .map(Keyword::Replicate)
+            .map_err(|e| format!("ReplicateCost: {e}")),
         // CR 702.29
         "Typecycling" => {
             let obj = data.as_object().ok_or("Typecycling: expected object")?;
@@ -4745,7 +5036,7 @@ pub mod test_helpers {
             Keyword::Escalate(pay_life_cost()),
             Keyword::Recover(mc("{2}{R}")),
             Keyword::Cleave(mc("{2}{R}")),
-            Keyword::Replicate(mc("{2}{R}")),
+            Keyword::Replicate(ReplicateCost::Mana(mc("{2}{R}"))),
             Keyword::Awaken {
                 count: 4,
                 cost: mc("{5}{W}{W}{W}"),

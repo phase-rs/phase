@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Attack declaration records carry per-incarnation turn ordinals and trigger definitions can require one. An older full-game or P2P peer drops both, widening first-attack triggers. The SourceIsAttacking intervening-if condition also carries an optional directly attacked player predicate, which an older peer drops and evaluates as any attack."
+}

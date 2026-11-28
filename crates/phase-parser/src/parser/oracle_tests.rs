@@ -16,9 +16,166 @@ use crate::types::ability::{
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::identifiers::TrackedSetId;
-use crate::types::keywords::{CompanionCondition, Keyword};
+use crate::types::keywords::{CompanionCondition, Keyword, ReplicateCost, ReplicateEnergy};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
+
+#[test]
+fn soul_immolation_parses_the_complete_blight_cap_and_shared_damage_x() {
+    use crate::types::ability::{BlightCount, CardTypeSetSource, PlayerFilter, PropertyAggregate};
+
+    let text = "As an additional cost to cast this spell, blight X. X can't be greater than the greatest toughness among creatures you control. (Put X -1/-1 counters on a creature you control.)\nSoul Immolation deals X damage to each opponent and each creature they control.";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Soul Immolation",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        )
+    };
+    let parsed = parse_card(text);
+    let Some(AdditionalCost::Required(AbilityCost::Blight {
+        count: BlightCount::AnnouncedX { maximum },
+    })) = parsed.additional_cost
+    else {
+        panic!(
+            "expected announced Blight X, got {:?}",
+            parsed.additional_cost
+        );
+    };
+    let creatures_you_control =
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You));
+    assert_eq!(
+        *maximum,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Max,
+                    ObjectProperty::Toughness,
+                    CardTypeSetSource::Objects {
+                        filter: creatures_you_control,
+                    },
+                )
+                .unwrap(),
+            ),
+        }
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    assert!(matches!(
+        parsed.abilities[0].effect.as_ref(),
+        Effect::DamageAll {
+            amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name } },
+            target: TargetFilter::Typed(filter),
+            player_filter: Some(PlayerFilter::Opponent),
+            ..
+        } if name == "X" && filter.controller == Some(ControllerRef::Opponent)
+            && filter.type_filters == [TypeFilter::Creature]
+    ));
+
+    for malformed in [
+        text.replace(
+            " X can't be greater than the greatest toughness among creatures you control.",
+            "",
+        ),
+        text.replace("creatures you control.", "creatures."),
+        text.replace("you control.", "you control nonsense."),
+        text.replace("blight X.", "blight Xylophone."),
+        text.replace("blight X.", "blight 2."),
+    ] {
+        assert!(
+            matches!(
+                parse_card(&malformed).additional_cost,
+                Some(AdditionalCost::Required(AbilityCost::Unimplemented { .. }))
+            ),
+            "{malformed}"
+        );
+    }
+}
+
+#[test]
+fn auntie_ool_blight_ward_is_a_fixed_payload_and_rejects_malformed_legs() {
+    use crate::types::keywords::WardCost;
+
+    let text = "Ward—Blight 2. (To blight 2, a player puts two -1/-1 counters on a creature they control.)\nWhenever one or more -1/-1 counters are put on a creature, draw a card if you control that creature. If you don't control it, its controller loses 1 life.";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Auntie Ool, Cursewretch",
+            &["Ward".to_string()],
+            &["Creature".to_string()],
+            &["Goblin".to_string(), "Warlock".to_string()],
+        )
+    };
+    let printed = parse_card(text);
+    assert_eq!(
+        printed.extracted_keywords,
+        [Keyword::Ward(WardCost::Blight(2))]
+    );
+    assert!(printed.abilities.is_empty(), "{:?}", printed.abilities);
+    assert_eq!(printed.triggers.len(), 1);
+    for bad_cost in [
+        "Blight",
+        "Blight X",
+        "Blight 4294967296",
+        "Blight 2x",
+        "Blight 2, nonsense",
+        "{2}, Blight 2",
+        "Blight 2, Pay 2 life",
+    ] {
+        let mutated = text.replace("Blight 2.", &format!("{bad_cost}."));
+        let parsed = parse_card(&mutated);
+        assert!(parsed.extracted_keywords.is_empty(), "{bad_cost}");
+        assert!(parsed.abilities.iter().any(has_unimplemented), "{bad_cost}");
+    }
+}
+
+#[test]
+fn sinister_gnarlbark_draw_and_blight_is_a_sequential_chain() {
+    let text = "At the beginning of your end step, draw a card and blight 1. (Put a -1/-1 counter on a creature you control.)";
+    let parse_card = |oracle: &str| {
+        parse_oracle_text(
+            oracle,
+            "Sinister Gnarlbark",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        )
+    };
+    let parsed = parse_card(text);
+    let [trigger] = parsed.triggers.as_slice() else {
+        panic!("expected one end-step trigger, got {:?}", parsed.triggers);
+    };
+    let draw = trigger
+        .execute
+        .as_deref()
+        .expect("trigger must execute the draw");
+    assert!(matches!(draw.effect.as_ref(), Effect::Draw { .. }));
+    let blight = draw
+        .sub_ability
+        .as_deref()
+        .expect("draw must chain into Blight");
+    assert!(matches!(
+        blight.effect.as_ref(),
+        Effect::BlightEffect {
+            count: 1,
+            player: TargetFilter::Controller
+        }
+    ));
+    assert!(blight.sub_ability.is_none());
+
+    for bad in [
+        "blight 1 nonsense",
+        "blight count",
+        "blight 1x",
+        "blight 4294967296",
+    ] {
+        let bad = text.replace("blight 1.", &format!("{bad}."));
+        let malformed = parse_card(&bad);
+        let effect = malformed.triggers[0].execute.as_deref().unwrap();
+        assert!(has_unimplemented(effect), "{bad}");
+    }
+}
 
 #[test]
 fn delayed_this_turn_head_requires_a_terminal_word_boundary_and_keeps_body_case() {
@@ -5082,16 +5239,6 @@ fn brine_hag_durationless_descriptor_base_pt_effect_remains_unimplemented() {
     );
 }
 
-/// CR 106.6 + CR 702.6a: Hydraulic Helper — the full card must parse with
-/// zero `Effect::Unimplemented` parts. "Defender" extracts as a keyword and
-/// the `{T}: Add {U}` mana ability carries the negative spend restriction
-/// ("This mana can't be spent to cast a nonartifact spell") lowered to
-/// `ManaSpendRestriction::SpellTypeOrAbilityActivation { spell_type:
-/// "Artifact", ability: Any }`. The restriction governs only what *spells*
-/// the mana may cast (artifact spells); it must leave ability activation
-/// UNRESTRICTED. This is the discriminating assertion: a `SpellType("Artifact")`
-/// lowering would wrongly forbid paying for any ability, so the `ability: Any`
-/// scope is exactly what keeps ability activation payable.
 /// CR 613.4c + CR 701.10a: Tifa's Limit Break (Tiered) — all three tiers
 /// parse with zero Unimplemented. Somersault → `Pump`, Meteor Strikes →
 /// `DoublePT factor:2`, Final Heaven → `DoublePT factor:3`. The discriminating
@@ -5222,6 +5369,8 @@ fn crew_history_quantity_guard_is_typed_and_position_independent() {
     );
 }
 
+/// CR 106.6 + CR 702.3a: Hydraulic Helper parses Defender and retains its
+/// nonartifact spell prohibition as `AnyNonSpellPayment` on the mana ability.
 #[test]
 fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
     use crate::types::ability::{ManaProduction, ManaSpendRestriction};
@@ -5264,10 +5413,9 @@ fn hydraulic_helper_full_card_supported_with_artifact_spend_restriction() {
         restrictions,
         &[ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
-        "negative nonartifact restriction must lower to \
-             SpellTypeOrAbilityActivation so ability activation stays unrestricted"
+        "negative nonartifact restriction must leave all non-spell payments eligible"
     );
 }
 
@@ -11662,7 +11810,7 @@ fn jetfire_front_face_activated_ability() {
         restrictions,
         &vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         }],
         "the following sentence must fold in the 'nonartifact' spend restriction"
     );
@@ -21355,10 +21503,8 @@ fn mana_spend_restriction_spell_only() {
 #[test]
 fn mana_spend_restriction_negative_nonartifact() {
     // CR 106.6: "this mana can't be spent to cast nonartifact spells" (Karn,
-    // Legacy Reforged) restricts spell-casting to artifact spells but leaves
-    // ability activation unrestricted — so it lowers to the OR variant with
-    // `ability: Any`, NOT a spells-only `SpellType` (which would wrongly
-    // forbid paying for abilities).
+    // Legacy Reforged) restricts spell-casting to artifact spells and leaves
+    // all non-spell payments eligible.
     use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
     use crate::types::ability::ManaSpendRestriction;
     use crate::types::mana::AbilityActivationScope;
@@ -21369,7 +21515,7 @@ fn mana_spend_restriction_negative_nonartifact() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21388,7 +21534,7 @@ fn mana_spend_restriction_negative_article_singular_nonartifact() {
         Some(
             crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::Any,
+                ability: crate::types::mana::AbilityActivationScope::AnyNonSpellPayment,
             }
         )
     );
@@ -21408,7 +21554,7 @@ fn mana_spend_restriction_negative_noncreature() {
             .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Creature".to_string(),
-            ability: AbilityActivationScope::Any,
+            ability: AbilityActivationScope::AnyNonSpellPayment,
         })
     );
 }
@@ -21435,7 +21581,7 @@ At the beginning of your upkeep, add {C} for each artifact you control. This man
         if let Effect::Mana { restrictions, .. } = effect {
             if restrictions.contains(&ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }) {
                 *found = true;
             }
@@ -31590,6 +31736,161 @@ fn t123_kicker_family_valid_lines_still_route() {
         "Replicate {{2}} must yield a Replicate keyword, got {:?}",
         replicate.extracted_keywords
     );
+}
+
+#[test]
+fn printed_non_mana_replicate_extracts_the_cost_and_keeps_the_spell() {
+    let reminder = "(When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
+    for (name, subtype, effect, expected_effects) in [
+        (
+            "Exterminate!",
+            Some("Dalek"),
+            "Destroy target creature. Its controller loses 3 life.",
+            &["Destroy", "LoseLife"][..],
+        ),
+        (
+            "Psionic Ritual",
+            Some("Horror"),
+            "Exile target instant or sorcery card from a graveyard and copy it. You may cast the copy without paying its mana cost.\nExile Psionic Ritual.",
+            &["ChangeZone", "CastCopyOfCard", "ChangeZone"][..],
+        ),
+        (
+            "Reiterating Bolt",
+            None,
+            "Reiterating Bolt deals 3 damage to target creature or planeswalker.",
+            &["DealDamage"][..],
+        ),
+    ] {
+        let (cost_text, expected) = match subtype {
+            Some(subtype) => (
+                format!("Tap an untapped {subtype} you control"),
+                ReplicateCost::TapOne(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype(subtype.into()))
+                        .controller(ControllerRef::You),
+                ))),
+            ),
+            None => (
+                "Pay {E}{E}{E}".into(),
+                ReplicateCost::PayEnergy(ReplicateEnergy::new(3).unwrap()),
+            ),
+        };
+        let text = format!("Replicate—{cost_text}. {reminder}\n{effect}");
+        let parsed =
+            parse_oracle_text(&text, name, &["replicate".into()], &["Sorcery".into()], &[]);
+        assert_eq!(parsed.extracted_keywords, [Keyword::Replicate(expected)], "{name}");
+        let effects: Vec<_> = parsed
+            .abilities
+            .iter()
+            .flat_map(|ability| std::iter::successors(Some(ability), |def| def.sub_ability.as_deref()))
+            .map(|ability| crate::types::ability::effect_variant_name(&ability.effect))
+            .collect();
+        assert!(!effects.contains(&"Unimplemented"), "{name}: {parsed:#?}");
+        assert_eq!(effects, expected_effects, "{name}");
+    }
+}
+
+#[test]
+fn unsupported_replicate_costs_stay_strict_gaps_even_with_keyword_metadata() {
+    for declaration in [
+        "Replicate",
+        "Replicate—Tap an untapped Dalek you control, Discard a card.",
+        "Replicate—Tap X untapped Daleks you control.",
+        "Replicate—Tap two untapped Daleks you control.",
+        "Replicate—Tap an untapped Wug you control.",
+        "Replicate—Tap an untapped Dalek you control if it attacked.",
+        "Replicate—Pay X {E}.",
+        "Replicate—Pay three energy {E}.",
+        "Replicate—Pay {E}{E}{E} and discard a card.",
+        "Replicate {1}{R} and discard a card.",
+        "Replicate {4294967295}{1}",
+    ] {
+        let parsed = t123_parse(declaration, &["replicate"], &["Sorcery"]);
+        t123_assert_not_swallowed(declaration, &parsed);
+        assert!(parsed.extracted_keywords.is_empty(), "{declaration}");
+    }
+}
+
+#[test]
+fn printed_and_granted_mana_replicate_keep_their_individual_prices() {
+    for (name, oracle, keywords, types, subtypes, printed, granted) in [
+        (
+            "Pyromatics",
+            "Replicate {1}{R} (When you cast this spell, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)\nPyromatics deals 1 damage to any target.",
+            &[][..],
+            &["Instant"][..],
+            &[][..],
+            Some("{1}{R}"),
+            None,
+        ),
+        (
+            "Djinn Illuminatus",
+            "({U/R} can be paid with either {U} or {R}.)\nFlying\nEach instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)",
+            &[Keyword::Flying][..],
+            &["Creature"][..],
+            &["Djinn"][..],
+            None,
+            Some(ManaCost::SelfManaCost),
+        ),
+        (
+            "Hatchery Sliver",
+            "Replicate {1}{G} (When you cast this spell, copy it for each time you paid its replicate cost.)\nEach Sliver spell you cast has replicate. The replicate cost is equal to its mana cost. (A copy of a permanent spell becomes a token.)",
+            &[][..],
+            &["Creature"][..],
+            &["Sliver"][..],
+            Some("{1}{G}"),
+            Some(ManaCost::SelfManaCost),
+        ),
+        (
+            "Hugh, First of Many",
+            "Artifact spells you cast have replicate {2}{U}. (Whenever you cast an artifact spell, copy it for each time you paid its replicate cost. Each copy becomes a token.)",
+            &[][..],
+            &["Creature"][..],
+            &["Human"][..],
+            None,
+            Some(crate::types::mana::parse_mtgjson_mana_cost("{2}{U}")),
+        ),
+        (
+            "Threefold Signal",
+            "When this artifact enters, scry 3.\nEach spell you cast that's exactly three colors has replicate {3}. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies. A copy of a permanent spell becomes a token.)",
+            &[][..],
+            &["Artifact"][..],
+            &[][..],
+            None,
+            Some(crate::types::mana::parse_mtgjson_mana_cost("{3}")),
+        ),
+    ] {
+        let parsed = parse(oracle, name, keywords, types, subtypes);
+        assert_eq!(t123_unimplemented_count(&parsed), 0, "{name}: {parsed:#?}");
+        let prices: Vec<_> = parsed
+            .extracted_keywords
+            .iter()
+            .filter_map(|keyword| {
+                let Keyword::Replicate(ReplicateCost::Mana(price)) = keyword else {
+                    return None;
+                };
+                Some(price.clone())
+            })
+            .collect();
+        assert_eq!(
+            prices,
+            printed.map(crate::types::mana::parse_mtgjson_mana_cost).as_slice(),
+            "{name}"
+        );
+        let grants: Vec<_> = parsed
+            .statics
+            .iter()
+            .filter_map(|definition| {
+                let StaticMode::CastWithKeyword {
+                    keyword: Keyword::Replicate(ReplicateCost::Mana(price)),
+                } = &definition.mode
+                else {
+                    return None;
+                };
+                Some(price.clone())
+            })
+            .collect();
+        assert_eq!(grants, granted.as_slice(), "{name}");
+    }
 }
 
 /// THE SHADOW witness (priority 1b). This is the finding the census did not

@@ -179,7 +179,11 @@ pub fn parse_mana_cost(input: &str) -> OracleResult<'_, ManaCost> {
     for elem in symbols {
         match elem {
             ManaElement::Shard(s) => shards.push(s),
-            ManaElement::Generic(n) => generic += n,
+            ManaElement::Generic(n) => {
+                generic = generic.checked_add(n).ok_or_else(|| {
+                    nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::TooLarge))
+                })?;
+            }
         }
     }
     Ok((rest, ManaCost::Cost { shards, generic }))

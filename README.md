@@ -450,13 +450,15 @@ including requests claimed before that candidate is abandoned.
 A replacement transport stays private until its own `JoinGameWithPassword` or
 `CreateDraftWithSettings`/`JoinDraftWithPassword` has entered the serialized
 write order, and a `Reconnect`/`ReconnectDraft` candidate until its positive
-bootstrap (or, for a draft, the server's rejection) arrives; only then may
+bootstrap (or, for a draft, the server's correlated refusal of that reattach)
+arrives; only then may
 `serverHello` or pending indicator consumers issue requests. The server
 replaces the seat's sender when it handles a reconnect, so between that write
 and the bootstrap neither socket is known to own the seat. The incumbent stays
 current for the replies it still owes, but new seat-bound submissions (game
 commands, draft picks, decisions and decks) are refused with the typed unsent
-error, and an `Error` it receives answers only its own request. A close, an
+error, and an `Error` it receives answers only its own request (the draft
+adapter settles no command on an `Error` the incumbent receives). A close, an
 `Error` refusal, an abort or the bound (`SETUP_CONFIRMATION_TIMEOUT_MS`, counted
 from the write) retires both sockets and settles the incumbent's work (an abort
 while the write receipt is still pending retires the candidate and releases the
@@ -469,10 +471,17 @@ is not waited for past the bound or once the server has answered, on initial
 attachments (the first frame received after the setup write) as on reconnects,
 and a cancellation raised synchronously inside the transport's setup send
 retires the candidate at once (a game reconnect can decode its bootstrap Full inside the interval; a
-draft reattach is answered by a plain frame first, so this server never puts a
-decode there). A draft `DraftActionRejected` adopts the candidate instead, as before:
-the server sends it both for refusals and after it has already moved the seat
-to the candidate, so the rejection replays there and rejects the reattach. A
+draft reattach is answered by a plain frame first, `DraftMatchStart` or its own
+correlated result, so this server never puts a decode there). A draft
+reattach's interval is classified by the results that carry the reattach's own
+request id: its `Reconnected` acceptance is positive, and its
+`DraftCommandRefused` adopts the candidate instead of retiring it, because the
+server may refuse a reattach after it has already moved the seat to the
+candidate, so the refusal is dispatched there and rejects the reattach. A
+`DraftMatchStart` is positive too: it adopts the candidate but settles nothing,
+and the reattach still waits for its result. A `DraftStateUpdate`, or a result
+carrying another command's id, or an accepted result of another kind, is neither: it is kept in order for the adopted
+socket. A
 candidate's terminal codec failure moves the sticky snapshot-only policy: each
 adapter applies it when it retires the candidate (`retireSocket`,
 `abandonCandidate`), and a successor started meanwhile from a listener still
@@ -511,18 +520,11 @@ also settles that source's owned work before releasing it, including synchronous
 `serverHello` reentry and setup-send failure. The only new reply bound is the
 reconnect interval above; Create and Join keep waiting without one.
 
-A draft view completes a pick only when its inventory proves the exact newly
-selected instance. Reply ownership and pick counters alone are not outcome
-evidence. A pick backed by the complete selection offered in the original
-authoritative view can be completed by a replacement's view too, if the
-replacement matches the original draft code/token. A pick without that
-evidence can be completed only by its own sending socket; once a different
-socket is adopted it is retired as unconfirmed with a recoverable error.
-Retired views can settle their own permitted reply but cannot overwrite the
-current view, phase or credentials, or publish themselves as the current view.
-This reports the selected-inventory outcome, not a new request-level
-acknowledgement: an automatic timer pick of the identical instance is
-indistinguishable on the existing wire.
+A draft pick settles only on its own correlated command result on the sending
+socket, or on transport failure or disposal. Unsolicited and replacement views
+update inventory independently and never acknowledge the pick. A retired socket
+may settle its own pending command, but its result cannot overwrite the current
+view, phase or credentials.
 
 A command already sent for the outgoing match cannot complete once that same
 socket announces a replacement match: its addressed reply is fenced by the new

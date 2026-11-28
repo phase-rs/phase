@@ -2,13 +2,16 @@ use std::borrow::Cow;
 
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{alpha1, alphanumeric1, space0, space1};
-use nom::combinator::{all_consuming, eof, not, opt, peek, value};
+use nom::combinator::{all_consuming, eof, not, opt, peek, recognize, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
-use super::oracle_cost::{parse_discard_cost_body, parse_oracle_cost};
+use super::oracle_cost::{
+    parse_blight_head, parse_discard_cost_body, parse_fixed_energy_amount, parse_oracle_cost,
+    parse_single_cost,
+};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::{scan_at_word_boundaries, scan_contains, split_once_on};
@@ -16,14 +19,14 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
-    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, BlightCount, CostObjectCount,
+    CostReduction, DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement,
+    TapCreaturesRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
     EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword,
-    WardCost,
+    ReplicateCost, ReplicateEnergy, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::text_grammar::craft_materials_from_typed_filter;
@@ -403,6 +406,12 @@ fn parse_keyword_list_with_policy(
     let line_without_reminder = strip_reminder_text(line);
     let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
 
+    // A Replicate cost occupies the entire declaration. Give its cost grammar
+    // the compound-cost delimiter before the generic comma-list splitter runs.
+    if matches_keyword_prefix_at_word_boundary(&line.to_ascii_lowercase(), "replicate") {
+        return parse_router_keyword_line(line).map(|routed| routed.keyword.into_iter().collect());
+    }
+
     if mtgjson_keyword_names.is_empty() {
         return parse_mtgjson_missing_standalone_keyword_line(line, policy);
     }
@@ -697,11 +706,16 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
             // so every comma-separated leg is part of the one cost; a leg the
             // grammar declines leaves the cost unmodeled — decline rather than
             // re-read the whole text as one leg.
-            return parts
+            let legs = parts
                 .iter()
                 .map(|part| parse_ward_cost_single(part.trim()))
-                .collect::<Option<Vec<WardCost>>>()
-                .map(|legs| Keyword::Ward(WardCost::Compound(legs)));
+                .collect::<Option<Vec<WardCost>>>()?;
+            // CR 702.21a + CR 616.1: only standalone Blight can resume its
+            // payment after a counter placement replacement choice.
+            if legs.iter().any(|leg| matches!(leg, WardCost::Blight(_))) {
+                return None;
+            }
+            return Some(Keyword::Ward(WardCost::Compound(legs)));
         }
     }
 
@@ -798,6 +812,52 @@ fn parse_ward_mana_leg(text: &str) -> Option<ManaCost> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 701.68a: Auntie Ool's Ward uses the same fixed Blight cost
+    // grammar as a spell cost. An unrecognized Blight leg remains unsupported.
+    if parse_blight_head(lower).is_ok() {
+        return match parse_single_cost(lower) {
+            AbilityCost::Blight {
+                count: BlightCount::Fixed(count),
+            } => Some(WardCost::Blight(count)),
+            AbilityCost::Blight {
+                count: BlightCount::AnnouncedX { .. },
+            }
+            | AbilityCost::Composite { .. }
+            | AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::SayPhrase { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::PerCounter { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Unimplemented { .. } => None,
+        };
+    }
+
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
     // current power on resolution, or its last known information if it left its
     // expected public zone.
@@ -1554,8 +1614,60 @@ fn parse_devour_keyword_line(text: &str) -> Option<(Keyword, &str)> {
     ))
 }
 
+/// CR 702.56a: Parse one repeatable payment, preserving the enclosing punctuation.
+fn parse_replicate_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (after_head, _) = tag::<_, _, OracleError<'_>>("replicate").parse(text).ok()?;
+    let (body, dash) = alt((
+        value(true, (space0, tag::<_, _, OracleError<'_>>("—"), space0)),
+        value(false, space1),
+    ))
+    .parse(after_head)
+    .ok()?;
+    let (remainder, cost_text) = take_till::<_, _, OracleError<'_>>(|c| c == '.')
+        .parse(body)
+        .ok()?;
+    let cost_text = cost_text.trim_end();
+    let uppercase = cost_text.to_ascii_uppercase();
+    let cost = if let Ok((_, mana)) =
+        all_consuming(nom_primitives::parse_mana_cost).parse(uppercase.as_str())
+    {
+        ReplicateCost::Mana(mana)
+    } else if dash {
+        if let Some(amount) = all_consuming(preceded(tag("pay "), parse_fixed_energy_amount))
+            .parse(cost_text)
+            .ok()
+            .and_then(|(_, amount)| ReplicateEnergy::new(amount))
+        {
+            ReplicateCost::PayEnergy(amount)
+        } else {
+            peek((
+                tag::<_, _, OracleError<'_>>("tap "),
+                alt((recognize(nom_primitives::parse_number), tag("another"))),
+                preceded(space1, tag("untapped ")),
+            ))
+            .parse(cost_text)
+            .ok()?;
+            let AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::Count { count: 1 },
+                filter,
+            } = parse_single_cost(cost_text)
+            else {
+                return None;
+            };
+            ReplicateCost::TapOne(Box::new(filter))
+        }
+    } else {
+        return None;
+    };
+    Some((Keyword::Replicate(cost), remainder))
+}
+
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
+
+    if matches_keyword_prefix_at_word_boundary(text, "replicate") {
+        return parse_replicate_keyword_line(text);
+    }
 
     if let Some(kw) = parse_disguise_keyword_line(text) {
         return Some((kw, ""));
@@ -2308,6 +2420,9 @@ fn parse_emerge_from_quality_keyword_line(text: &str) -> Option<(Keyword, &str)>
 /// swallow. Routers must use `parse_router_keyword_line`, which is mechanically
 /// enforced by `scripts/check-parser-combinators.sh`.
 pub fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
+    if matches_keyword_prefix_at_word_boundary(text, "replicate") {
+        return parse_router_keyword_fragment(text);
+    }
     parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
 }
 
@@ -3112,7 +3227,7 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
 /// exactly how a candidate recognizer starts silently swallowing card text.
 ///
 /// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
-pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 99] = [
     "cycling",
     "basic landcycling",
     "flashback",
@@ -3161,6 +3276,7 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 98] = [
     "forecast",
     "recover",
     "escalate",
+    "replicate",
     "awaken",
     "reinforce",
     "retrace",
@@ -3404,6 +3520,21 @@ mod tests {
                 assert_eq!(filter.type_filters, vec![TypeFilter::Creature]);
             }
             other => panic!("expected creature-qualified Emerge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replicate_cost_parsing_preserves_the_keyword_boundary() {
+        for (text, remainder) in [
+            ("replicate {0}", ""),
+            ("replicate — {1}{g}.", "."),
+            ("replicate—tap an untapped horror you control.", "."),
+            ("replicate—pay {e}{e}{e}.", "."),
+            ("replicate—pay three {e}.", "."),
+        ] {
+            let (keyword, tail) = parse_keyword_line_core(text).unwrap();
+            assert!(matches!(keyword, Keyword::Replicate(_)), "{text}");
+            assert_eq!(tail, remainder, "{text}");
         }
     }
 
@@ -3760,9 +3891,9 @@ mod tests {
 
         for unmodeled in [
             "Collect evidence 4.",
-            "Blight 2.",
-            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
-            "{2}, Blight 2.",
+            "Blight 2 nonsense.",
+            // No printed Ward has this shape; extends Auntie Ool, Cursewretch's "Ward—Blight 2.".
+            "{2}, Blight X.",
             // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
             "Waterbend frob.",
             // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
@@ -3781,6 +3912,14 @@ mod tests {
         assert_eq!(
             parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
             Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Blight 2.").and_then(|r| r.keyword),
+            None
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward\u{2014}blight 2"),
+            Some(Keyword::Ward(WardCost::Blight(2)))
         );
         for unread_tail in [
             // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
@@ -6753,6 +6892,11 @@ mod router_registry_tests {
         RouterKeywordCase {
             prefix: "cycling",
             valid_line: "Cycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "replicate",
+            valid_line: "Replicate {1}{R}",
             reach: ProductionReach::KeywordCostLine,
         },
         RouterKeywordCase {

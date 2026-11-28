@@ -836,6 +836,12 @@ pub(crate) fn can_pay_ward_cost(
                 .count();
             eligible as u32 >= *count
         }
+        WardCost::Blight(count) => !engine::game::effects::blight::eligible_blight_creatures(
+            ctx.state,
+            ctx.ai_player,
+            *count,
+        )
+        .is_empty(),
         WardCost::Sacrifice { count, filter } => {
             let Some(source) = ctx.source_object() else {
                 return true;

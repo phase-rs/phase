@@ -8530,7 +8530,7 @@ fn fire_time_conditions_read_projected_resource_scoped(
     // `synthesize_granted_keyword_triggers` / `KeywordTriggerInstaller` and — for
     // off-zone grants, and in any state where layer 6 has not (re)installed them —
     // never land on `obj.trigger_definitions`, so loop (i) cannot reach them. A
-    // granted Dethrone (CR 702.105a) carries a fire-time intervening-if reading the
+    // granted Dethrone (CR 702.105a) carries an event-time qualifier reading the
     // defending player's `LifeTotal` (CR 119, a projected axis this pass zeroes); a
     // dormant such condition would arm mid-extrapolation and break the replay.
     // Reuse the collection path's synthesis authority (single authority, no

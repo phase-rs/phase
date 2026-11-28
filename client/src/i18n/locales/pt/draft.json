@@ -675,6 +675,7 @@
     "connection": "Erro de Conexão",
     "incompatible": "Este draft não é compatível com sua versão do protocolo.",
     "unreadable": "Este draft salvo não pode ser lido, então não pode ser retomado.",
+    "recoverySave": "Não foi possível salvar os dados de recuperação do draft",
     "retry": "Tentar reconectar"
   },
   "winston": {

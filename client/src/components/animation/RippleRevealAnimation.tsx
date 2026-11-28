@@ -8,6 +8,8 @@ interface RippleRevealAnimationProps {
   cards: MillCard[];
   /** Origin the fan flies out from (the revealing player's library pile). */
   from: { x: number; y: number };
+  /** Compresses the stagger, flight and hold with the step when presentation runs faster than 1. */
+  timeScale?: number;
   onComplete: () => void;
 }
 
@@ -24,6 +26,7 @@ function RippleCardElement({
   target,
   index,
   isLast,
+  timeScale,
   onComplete,
 }: {
   card: MillCard;
@@ -31,11 +34,13 @@ function RippleCardElement({
   target: { x: number; y: number };
   index: number;
   isLast: boolean;
+  timeScale: number;
   onComplete: () => void;
 }) {
   const glowColor = card.colors.length > 0 ? card.colors[0] : "#f59e0b";
-  const delay = index * (STAGGER_MS / 1000);
+  const delay = index * (STAGGER_MS / 1000) * timeScale;
   const holdSeconds = HOLD_MS / 1000;
+  const totalSeconds = (FLIGHT_DURATION + holdSeconds) * timeScale;
 
   return (
     <motion.div
@@ -62,7 +67,7 @@ function RippleCardElement({
         opacity: [0, 1, 1, 0],
       }}
       transition={{
-        duration: FLIGHT_DURATION + holdSeconds,
+        duration: totalSeconds,
         delay,
         ease: "easeInOut",
         times: [0, FLIGHT_DURATION / (FLIGHT_DURATION + holdSeconds), 0.9, 1],
@@ -132,14 +137,27 @@ function RippleCardElement({
 export function RippleRevealAnimation({
   cards,
   from,
+  timeScale = 1,
   onComplete,
 }: RippleRevealAnimationProps) {
   const completedRef = useRef(false);
   const displayedCards = cards;
+  // A non-positive scale is instant: there is no wall-clock duration to divide
+  // by, and no frame worth presenting.
+  const instant = timeScale <= 0;
 
   useEffect(() => {
+    if (instant) {
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onComplete();
+      }
+      return;
+    }
+    // Every part of the fan — stagger, flight, hold and the safety buffer —
+    // scales together, so the picture is the same, only sooner.
     const expectedMs =
-      (displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + HOLD_MS + 500;
+      ((displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + HOLD_MS + 500) * timeScale;
     const timer = setTimeout(() => {
       if (!completedRef.current) {
         completedRef.current = true;
@@ -147,7 +165,7 @@ export function RippleRevealAnimation({
       }
     }, expectedMs);
     return () => clearTimeout(timer);
-  }, [displayedCards.length, onComplete]);
+  }, [displayedCards.length, instant, onComplete, timeScale]);
 
   const handleComplete = () => {
     if (!completedRef.current) {
@@ -155,6 +173,8 @@ export function RippleRevealAnimation({
       onComplete();
     }
   };
+
+  if (instant) return null;
 
   const spanWidth =
     displayedCards.length * CARD_WIDTH + (displayedCards.length - 1) * CARD_GAP;
@@ -172,6 +192,7 @@ export function RippleRevealAnimation({
           target={{ x: startX + i * (CARD_WIDTH + CARD_GAP), y: rowY }}
           index={i}
           isLast={i === displayedCards.length - 1}
+          timeScale={timeScale}
           onComplete={handleComplete}
         />
       ))}

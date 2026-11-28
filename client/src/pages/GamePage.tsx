@@ -215,6 +215,7 @@ import {
   abilityChoiceLabel,
   abilityLabel,
   formatAbilityCost,
+  formatBlightCost,
   loyaltyBadge,
   stripCostPrefix,
   stripLoyaltyCostPrefix,
@@ -547,7 +548,7 @@ export function GamePage() {
         markGameOver();
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -555,7 +556,7 @@ export function GamePage() {
         break;
       case "terminalDelivery":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
@@ -788,7 +789,7 @@ export function GamePage() {
         break;
       case "gameOver":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -796,7 +797,7 @@ export function GamePage() {
         break;
       case "terminalResult":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         // Display is independent of native guest convergence. The provider /
         // adapter owns deletion after durable cleanup ownership is established.
         setTerminalReason(event.result.display.reason);
@@ -3414,13 +3415,15 @@ export function manaRestrictionLabel(
   restriction: InteractionManaRestriction,
 ): string {
   switch (restriction.type) {
-    case "onlyForTypeSpellsOrAbilities":
-      return t(
-        restriction.data.ability === "ofSpellType"
-          ? "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType"
-          : "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
-        { spellType: restriction.data.spellType },
-      );
+    case "onlyForTypeSpellsOrAbilities": {
+      const { ability, spellType } = restriction.data;
+      const labelKeys = {
+        ofSpellType: "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesOfSpellType",
+        any: "gamePage.manaRestrictions.onlyForTypeSpellsOrAbilitiesAny",
+        anyNonSpellPayment: "gamePage.manaRestrictions.cannotCastSpellsOutsideType",
+      } as const;
+      return t(labelKeys[ability], { spellType });
+    }
     case "onlyForSpell":
       return t("gamePage.manaRestrictions.onlyForSpell");
     case "onlyForActivation":
@@ -3993,6 +3996,8 @@ function formatUnlessCost(
     return t("gamePage.cost.playerCounters", { count: cost.count, kind });
   }
   switch (cost.type) {
+    case "Blight":
+      return formatBlightCost(cost.count) ?? t("gamePage.cost.generic");
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
     case "SayPhrase":

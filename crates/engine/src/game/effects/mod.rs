@@ -12660,6 +12660,7 @@ fn ward_cost_reads_filter_population(
         | WardCost::PayLife(_)
         | WardCost::PayLifeEqualToPower
         | WardCost::Waterbend(_)
+        | WardCost::Blight(_)
         | WardCost::GetPlayerCounters { .. } => false,
     }
 }
@@ -12707,6 +12708,7 @@ fn trigger_matchers_read_filter_population(
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,
+        attack_declaration_ordinal: _,
         // CR 509.3e: the blocker-count filter is a matcher like `valid_target`.
         blocker_count,
         player_actions: _,
@@ -12985,6 +12987,7 @@ fn trigger_condition_reads_filter_population(
     match condition {
         TriggerCondition::ControlsType { filter } => has_filter(filter),
         TriggerCondition::DuringPlayersTurn { player } => has_player(player),
+        TriggerCondition::SourceIsAttacking { player } => player.as_deref().is_some_and(has_player),
         TriggerCondition::MinCoAttackers { filter, .. } => filter.as_ref().is_some_and(has_filter),
         TriggerCondition::DealtDamageThisTurnBySource { source } => has_filter(source),
         TriggerCondition::ControlCount { filter, .. } => has_filter(filter),
@@ -13030,7 +13033,6 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::WasCast { .. }
         | TriggerCondition::WasPlayed
         | TriggerCondition::AdditionalCostPaid { .. }
-        | TriggerCondition::SourceIsAttacking
         | TriggerCondition::CastVariantPaid { .. }
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
@@ -18874,6 +18876,10 @@ fn when_you_do_mandatory_parent_did_nothing(
 ///   ("If you put a card into your hand this way" — Sidequest: Catch a Fish)
 ///   directly after a draw. Lord Windgrace's "Discard a card, then draw a
 ///   card. If a land card is discarded this way, draw an additional card."
+///   The draw's frame also holds the ledger in force when it began and
+///   restores it on completion (`DrawSequenceFrame::this_way_antecedent_ledger`),
+///   because an action replacing one of its draws (CR 614.6: Dredge, Notion
+///   Thief) runs as its own chain and publishes its own ledger.
 /// - The heads of one gated run all name the run's shared antecedent, so a
 ///   gated node — even one that moved an object or created a token (CR 111.1)
 ///   — is not the antecedent. Old Rutstein's "mill a card. If a land card is
@@ -30925,7 +30931,8 @@ fn resolve_chain_body(
     // CR 608.2c: "… this way" names the earlier instruction that moved the
     // cards. A node that is not that instruction (a play permission, a draw, a
     // member of the head's gated run) directly followed by a "this way" head
-    // leaves the moving instruction's ledger in place for the head.
+    // leaves the moving instruction's ledger in place for the head. A draw's
+    // frame holds and restores that ledger across any replacement of its draws.
     if !keeps_this_way_ledger_for_following_head(ability) {
         state.last_zone_changed_ids = zone_changed_ids;
     }
@@ -33996,10 +34003,33 @@ pub(crate) fn unless_payment_prompt(
     // CR 118.12a + CR 608.2c: surface the object the gated effect acts on. A
     // member-driven loop rebinds each iteration's member into the first object
     // slot, so every per-card prompt names its own card.
-    let affected_object = ability.targets.iter().find_map(|target| match target {
-        TargetRef::Object(id) => Some(*id),
-        _ => None,
-    });
+    let affected_object = ability
+        .targets
+        .iter()
+        .find_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .or_else(|| {
+            // CR 702.21a: Ward's counter refers to the targeting spell or
+            // ability through the trigger event.
+            if matches!(
+                ability.effect,
+                Effect::Counter {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                }
+            ) {
+                counter::countered_targets(state, ability)
+                    .into_iter()
+                    .find_map(|target| match target {
+                        TargetRef::Object(id) => Some(id),
+                        _ => None,
+                    })
+            } else {
+                None
+            }
+        });
     // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
     // sub-cost choice first; the chosen single cost re-enters
     // `WaitingFor::UnlessPayment` via

@@ -18,6 +18,8 @@ interface MillRevealAnimationProps {
   startIndex?: number;
   from: { x: number; y: number };
   to: { x: number; y: number };
+  /** Compresses the stagger and flight with the step when presentation runs faster than 1. */
+  timeScale?: number;
   onComplete: () => void;
 }
 
@@ -32,6 +34,7 @@ function MillCardElement({
   to,
   index,
   isLast,
+  timeScale,
   onComplete,
 }: {
   card: MillCard;
@@ -39,6 +42,7 @@ function MillCardElement({
   to: { x: number; y: number };
   index: number;
   isLast: boolean;
+  timeScale: number;
   onComplete: () => void;
 }) {
   // `normal`, not `small`: this renders a bare image element with no ladder at
@@ -48,7 +52,7 @@ function MillCardElement({
   const glowColor = card.colors.length > 0
     ? card.colors[0]
     : "#6366f1";
-  const delay = index * (STAGGER_MS / 1000);
+  const delay = index * (STAGGER_MS / 1000) * timeScale;
 
   const midX = (from.x + to.x) / 2;
   const midY = Math.min(from.y, to.y) - 60;
@@ -68,7 +72,7 @@ function MillCardElement({
         opacity: [0, 1, 0],
       }}
       transition={{
-        duration: FLIGHT_DURATION,
+        duration: FLIGHT_DURATION * timeScale,
         delay,
         ease: "easeInOut",
         times: [0, 0.4, 1],
@@ -137,7 +141,7 @@ function MillCardElement({
             `0 0 8px ${glowColor}66`,
           ],
         }}
-        transition={{ duration: FLIGHT_DURATION, delay, times: [0, 0.4, 1] }}
+        transition={{ duration: FLIGHT_DURATION * timeScale, delay, times: [0, 0.4, 1] }}
         style={{
           position: "absolute",
           inset: 0,
@@ -154,6 +158,7 @@ export function MillRevealAnimation({
   startIndex = 0,
   from,
   to,
+  timeScale = 1,
   onComplete,
 }: MillRevealAnimationProps) {
   const completedRef = useRef(false);
@@ -161,7 +166,8 @@ export function MillRevealAnimation({
 
   // Safety timeout: if onAnimationComplete never fires, clean up after expected duration + buffer
   useEffect(() => {
-    const expectedMs = (startIndex + displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
+    const flightMs = (startIndex + displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000;
+    const expectedMs = flightMs * timeScale + 500;
     const timer = setTimeout(() => {
       if (!completedRef.current) {
         completedRef.current = true;
@@ -169,7 +175,7 @@ export function MillRevealAnimation({
       }
     }, expectedMs);
     return () => clearTimeout(timer);
-  }, [displayedCards.length, onComplete, startIndex]);
+  }, [displayedCards.length, onComplete, startIndex, timeScale]);
 
   const handleComplete = () => {
     if (!completedRef.current) {
@@ -188,6 +194,7 @@ export function MillRevealAnimation({
           to={to}
           index={startIndex + i}
           isLast={i === displayedCards.length - 1}
+          timeScale={timeScale}
           onComplete={handleComplete}
         />
       ))}

@@ -854,9 +854,12 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // first with `SelectCards` — and is classified `ActingAuthority::One(player)`
     // alongside `ReplacementChoice`. Not actorless: the staged population cannot
     // advance without that player's selection.
-    if declared.len() != 149 {
+    // `UnlessBlightChoice` names the payer as `ActingAuthority::One(player)`.
+    // That player selects one creature with `SelectCards` or declines with
+    // `PayUnlessCost { pay: false }`.
+    if declared.len() != 150 {
         failures.push(format!(
-            "PIN declared.len()={} != 149.\n\
+            "PIN declared.len()={} != 150.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\

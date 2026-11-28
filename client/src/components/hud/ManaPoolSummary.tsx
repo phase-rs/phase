@@ -53,7 +53,7 @@ export function ManaPoolSummary({ playerId, size = "default" }: ManaPoolSummaryP
         </span>
       )}
       {entries.map((group, index) => {
-        const title = manaGroupTooltip((k) => t(k), group);
+        const title = manaGroupTooltip((key, options) => t(key, options), group);
         return (
           <span
             key={index}

@@ -36,10 +36,165 @@ pub struct DraftSession {
     pub active_matches: HashMap<String, String>,
     /// Lobby metadata -- set at creation, cleared when draft starts.
     pub lobby_meta: Option<PersistedLobbyMeta>,
+    /// What drives this session between operations. Chosen once, at
+    /// construction, from [`native_flow`]; never serialized.
+    pub schedule: DraftSchedule,
+}
+
+/// What drives a native draft session between operations. Process-local: a
+/// restore builds a fresh schedule, so nothing here outlives its process.
+pub enum DraftSchedule {
+    /// The pod-wide pick timer of a legacy pick-and-pass or shared-stack pod.
+    Legacy(LegacySchedule),
+    /// A private FIFO session: its owner identity, its registered wake and any
+    /// staged result not yet saved.
+    Fifo(FifoSchedule),
+}
+
+/// The legacy pick timer's process-local state.
+#[derive(Default)]
+pub struct LegacySchedule {
     /// Server-side remaining pick timer in ms. Injected into DraftPlayerView before send.
     pub timer_remaining_ms: Option<u32>,
     /// JoinHandle for the active pick timer task (prevents double-fire).
     pub timer_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// A FIFO session's process-local schedule. Its fields are private: only the
+/// manager moves them.
+pub struct FifoSchedule {
+    owner: DraftOwnerId,
+    wake: Option<FifoWake>,
+    /// Boxed: a whole core session, which would otherwise dwarf the legacy arm.
+    pending: Option<Box<PendingFifoResult>>,
+}
+
+impl FifoSchedule {
+    /// A fresh owner with no registration and no unsaved result.
+    fn new(owner: DraftOwnerId) -> Self {
+        Self {
+            owner,
+            wake: None,
+            pending: None,
+        }
+    }
+
+    /// Clears the registration and aborts its task, if any.
+    fn abort_wake(&mut self) {
+        if let Some(task) = self.wake.take().and_then(|wake| wake.task) {
+            task.abort();
+        }
+    }
+}
+
+/// The identity of one installed FIFO session. A later owner of the same code
+/// gets a different identity, so nothing bound to this one moves to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DraftOwnerId(u64);
+
+/// The authority a FIFO wake carries: which owner registered it, which
+/// registration of that owner it is, and the core deadline it waits for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FifoWakeRegistration {
+    owner: DraftOwnerId,
+    serial: u64,
+    due_ms: u64,
+}
+
+impl FifoWakeRegistration {
+    /// The core deadline, in epoch milliseconds, this wake waits for.
+    pub fn due_ms(&self) -> u64 {
+        self.due_ms
+    }
+}
+
+struct FifoWake {
+    registration: FifoWakeRegistration,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// A staged FIFO result and the row it is saved as, held until the save lands.
+struct PendingFifoResult {
+    candidate: draft_core::types::DraftSession,
+    row: String,
+}
+
+/// Which native runtime flow a core session runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRowFlow {
+    Legacy,
+    Fifo,
+}
+
+/// The one classification of a core session: a core the legacy admission
+/// accepts runs the legacy flow; every other core (a FIFO core, or a
+/// legacy-flow core carrying FIFO state) is FIFO.
+pub fn native_flow(core: &draft_core::types::DraftSession) -> NativeRowFlow {
+    match core.validate_legacy_admission() {
+        Ok(()) => NativeRowFlow::Legacy,
+        Err(_) => NativeRowFlow::Fifo,
+    }
+}
+
+/// Who submits a FIFO operation: a seat, resolved from its token, or the
+/// server itself (start, control, clock expiry).
+#[derive(Debug, Clone, Copy)]
+pub enum DraftActor<'a> {
+    Seat { token: &'a str },
+    Server,
+}
+
+/// What staging a FIFO operation produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FifoStaged {
+    /// The operation left the committed core as it was; nothing to save.
+    Unchanged,
+    /// A result is staged and must be saved before it is committed.
+    Pending,
+}
+
+/// A validated private FIFO session and the row it will be saved as, not yet
+/// installed in the manager.
+pub struct StagedFifoSession {
+    session: DraftSession,
+    row: String,
+}
+
+impl StagedFifoSession {
+    pub fn draft_code(&self) -> &str {
+        &self.session.draft_code
+    }
+
+    pub fn row(&self) -> &str {
+        &self.row
+    }
+
+    pub fn player_tokens(&self) -> &[String] {
+        &self.session.player_tokens
+    }
+}
+
+/// A FIFO operation is refused while an earlier result is unsaved.
+pub const FIFO_RESULT_UNSAVED: &str = "the previous draft result has not been saved";
+/// A FIFO operation names a session that runs the legacy flow.
+pub const NOT_A_FIFO_SESSION: &str = "this draft session does not run the FIFO flow";
+/// The internal FIFO restore was handed a legacy row.
+pub const LEGACY_ROW_NOT_PRIVATE_FIFO: &str =
+    "a legacy draft row restores only through the native restore";
+/// A FIFO install names a code a session already holds.
+pub const DRAFT_CODE_RESIDENT: &str = "a draft session already holds this code";
+
+/// Refuses a FIFO core with the shared runtime text.
+fn refuse_fifo_core(core: &draft_core::types::DraftSession) -> Result<(), String> {
+    match native_flow(core) {
+        NativeRowFlow::Legacy => Ok(()),
+        NativeRowFlow::Fifo => Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string()),
+    }
+}
+
+/// Refuses a resident FIFO session on a public entry, before any other check.
+fn refuse_fifo_resident(session: &DraftSession) -> Result<(), String> {
+    refuse_fifo_core(&session.session)
 }
 
 impl DraftSession {
@@ -84,27 +239,65 @@ impl DraftSession {
 
     /// Create a serializable snapshot for disk persistence.
     pub fn to_persisted(&self) -> PersistedDraftSession {
+        self.persisted_with_core(&self.session)
+    }
+
+    /// This wrapper's row with `core` as its core session. A FIFO session
+    /// carries no legacy timer, so its row writes none.
+    fn persisted_with_core(&self, core: &draft_core::types::DraftSession) -> PersistedDraftSession {
         PersistedDraftSession {
             draft_code: self.draft_code.clone(),
-            session: self.session.clone(),
+            session: core.clone(),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
             config: self.config.clone(),
             active_matches: self.active_matches.clone(),
             lobby_meta: self.lobby_meta.clone(),
-            timer_remaining_ms: self.timer_remaining_ms,
+            timer_remaining_ms: self
+                .legacy_schedule()
+                .and_then(|legacy| legacy.timer_remaining_ms),
+        }
+    }
+
+    /// The legacy pick timer, or `None` for a FIFO session.
+    pub fn legacy_schedule(&self) -> Option<&LegacySchedule> {
+        match &self.schedule {
+            DraftSchedule::Legacy(legacy) => Some(legacy),
+            DraftSchedule::Fifo(_) => None,
+        }
+    }
+
+    /// The legacy pick timer, or `None` for a FIFO session.
+    pub fn legacy_schedule_mut(&mut self) -> Option<&mut LegacySchedule> {
+        match &mut self.schedule {
+            DraftSchedule::Legacy(legacy) => Some(legacy),
+            DraftSchedule::Fifo(_) => None,
+        }
+    }
+
+    fn fifo_schedule(&self) -> Option<&FifoSchedule> {
+        match &self.schedule {
+            DraftSchedule::Legacy(_) => None,
+            DraftSchedule::Fifo(fifo) => Some(fifo),
+        }
+    }
+
+    fn fifo_schedule_mut(&mut self) -> Option<&mut FifoSchedule> {
+        match &mut self.schedule {
+            DraftSchedule::Legacy(_) => None,
+            DraftSchedule::Fifo(fifo) => Some(fifo),
         }
     }
 
     /// Restore a draft session from a persisted snapshot.
     ///
-    /// All players start disconnected. `timer_task` is None — the caller
-    /// should re-arm from `timer_remaining_ms` if needed.
+    /// All players start disconnected. The legacy schedule has no timer task —
+    /// the caller should re-arm from `timer_remaining_ms` if needed.
     pub fn from_persisted(ps: PersistedDraftSession) -> Result<Self, String> {
         Self::try_from_persisted(ps)
     }
 
-    fn from_validated_persisted(ps: PersistedDraftSession) -> Self {
+    fn from_validated_persisted(ps: PersistedDraftSession, schedule: DraftSchedule) -> Self {
         let pod_size = ps.player_tokens.len();
         Self {
             draft_code: ps.draft_code,
@@ -115,13 +308,34 @@ impl DraftSession {
             config: ps.config,
             active_matches: ps.active_matches,
             lobby_meta: ps.lobby_meta,
-            timer_remaining_ms: ps.timer_remaining_ms,
-            timer_task: None,
+            schedule,
         }
     }
 
     /// Validate a disk snapshot before it becomes a live server session.
+    ///
+    /// The public restore: a FIFO row is refused with the shared runtime text
+    /// before its snapshot is validated.
     fn try_from_persisted(ps: PersistedDraftSession) -> Result<Self, String> {
+        Self::check_persisted_wrapper(&ps)?;
+        match native_flow(&ps.session) {
+            NativeRowFlow::Fifo => Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string()),
+            NativeRowFlow::Legacy => {
+                ps.session
+                    .validate_persisted_snapshot()
+                    .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
+                let schedule = DraftSchedule::Legacy(LegacySchedule {
+                    timer_remaining_ms: ps.timer_remaining_ms,
+                    timer_task: None,
+                });
+                Ok(Self::from_validated_persisted(ps, schedule))
+            }
+        }
+    }
+
+    /// The wrapper checks every restore shares: the row's code, configuration
+    /// and seat vectors agree with its core session, and its tokens are unique.
+    fn check_persisted_wrapper(ps: &PersistedDraftSession) -> Result<(), String> {
         let core = &ps.session;
         let seat_count = core.seats.len();
         if ps.draft_code != core.draft_code {
@@ -145,17 +359,16 @@ impl DraftSession {
         {
             return Err("persisted draft player tokens must be unique".to_string());
         }
-        core.validate_legacy_admission()
-            .map_err(|_| draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string())?;
-        core.validate_persisted_snapshot()
-            .map_err(|error| format!("invalid persisted draft snapshot: {error}"))?;
-        Ok(Self::from_validated_persisted(ps))
+        Ok(())
     }
 
-    /// Inject server-side timer into the filtered view before serializing.
+    /// Inject server-side timer into the filtered view before serializing. A
+    /// FIFO session has no legacy timer to inject.
     pub fn view_for_seat(&self, seat: usize) -> DraftPlayerView {
         let mut view = draft_core::view::filter_for_player(&self.session, seat as u8);
-        view.timer_remaining_ms = self.timer_remaining_ms;
+        if let Some(legacy) = self.legacy_schedule() {
+            view.timer_remaining_ms = legacy.timer_remaining_ms;
+        }
         view
     }
 }
@@ -210,6 +423,9 @@ pub struct DraftSessionManager {
     /// companion designation is checked against it (CR 702.139a/b); without it
     /// a designation fails closed.
     card_db: Option<std::sync::Arc<engine::database::CardDatabase>>,
+    /// The last identity issued to a FIFO owner or wake registration. Never
+    /// persisted: nothing that holds an identity outlives its process.
+    next_serial: u64,
 }
 
 impl DraftSessionManager {
@@ -219,7 +435,14 @@ impl DraftSessionManager {
             reconnect: ReconnectManager::default(),
             token_to_draft: HashMap::new(),
             card_db: None,
+            next_serial: 0,
         }
+    }
+
+    /// Issues a fresh identity for a FIFO owner or a wake registration.
+    fn mint(&mut self) -> u64 {
+        self.next_serial += 1;
+        self.next_serial
     }
 
     /// Supply the server's card database so deck submissions can be checked
@@ -289,8 +512,7 @@ impl DraftSessionManager {
             config,
             active_matches: HashMap::new(),
             lobby_meta: None,
-            timer_remaining_ms: None,
-            timer_task: None,
+            schedule: DraftSchedule::Legacy(LegacySchedule::default()),
         };
 
         self.token_to_draft
@@ -313,6 +535,7 @@ impl DraftSessionManager {
             .sessions
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
+        refuse_fifo_resident(session)?;
 
         if let Some(meta) = &session.lobby_meta {
             match (&meta.password, password) {
@@ -455,6 +678,11 @@ impl DraftSessionManager {
         disconnected_at: std::time::Instant,
     ) {
         if let Some(session) = self.sessions.get_mut(draft_code) {
+            // A FIFO session's seats record no reconnect lapse here; its
+            // reconnect grace lands with native admission.
+            if refuse_fifo_resident(session).is_err() {
+                return;
+            }
             session.connected[seat] = false;
             // Mirror into the engine bitmap so the view reflects it.
             let _ = draft_core::session::apply(
@@ -484,6 +712,7 @@ impl DraftSessionManager {
             .sessions
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
+        refuse_fifo_resident(session)?;
 
         let seat = session
             .seat_for_token(token)
@@ -907,8 +1136,12 @@ impl DraftSessionManager {
 
     /// Remove a draft session entirely, cleaning up the token_to_draft index.
     /// Returns the removed session if it existed.
+    /// A removed FIFO owner's wake task is aborted.
     pub fn remove_draft(&mut self, draft_code: &str) -> Option<DraftSession> {
-        let session = self.sessions.remove(draft_code)?;
+        let mut session = self.sessions.remove(draft_code)?;
+        if let Some(fifo) = session.fifo_schedule_mut() {
+            fifo.abort_wake();
+        }
         for token in &session.player_tokens {
             if !token.is_empty() {
                 self.token_to_draft.remove(token);
@@ -916,6 +1149,299 @@ impl DraftSessionManager {
         }
         self.reconnect.remove_game(draft_code);
         Some(session)
+    }
+
+    /// A FIFO schedule for a fresh owner.
+    fn new_fifo_schedule(&mut self) -> DraftSchedule {
+        DraftSchedule::Fifo(FifoSchedule::new(DraftOwnerId(self.mint())))
+    }
+
+    /// Pairs a validated FIFO session with the row it will be saved as.
+    fn staged(session: DraftSession) -> Result<StagedFifoSession, String> {
+        let row = serde_json::to_string(&session.to_persisted())
+            .map_err(|error| format!("failed to serialize draft session: {error}"))?;
+        Ok(StagedFifoSession { session, row })
+    }
+
+    /// The internal FIFO restore. Shares the public restore's wrapper step,
+    /// then admits only a valid FIFO row: the classification runs before the
+    /// snapshot validation, as in the public restore. Builds a fresh owner with
+    /// no registration and no unsaved result; the manager's maps are untouched.
+    pub fn stage_restored_fifo(
+        &mut self,
+        ps: PersistedDraftSession,
+    ) -> Result<StagedFifoSession, String> {
+        DraftSession::check_persisted_wrapper(&ps)?;
+        match native_flow(&ps.session) {
+            NativeRowFlow::Legacy => return Err(LEGACY_ROW_NOT_PRIVATE_FIFO.to_string()),
+            NativeRowFlow::Fifo => {}
+        }
+        ps.session
+            .validate_persisted_snapshot()
+            .map_err(|error| format!("invalid persisted FIFO snapshot: {error}"))?;
+        if ps.timer_remaining_ms.is_some() {
+            return Err("a FIFO draft row carries no legacy pick timer".to_string());
+        }
+        if ps.lobby_meta.is_some() {
+            return Err("a private FIFO draft row carries no lobby listing".to_string());
+        }
+        let schedule = self.new_fifo_schedule();
+        Self::staged(DraftSession::from_validated_persisted(ps, schedule))
+    }
+
+    /// A private FIFO pod with one human seat per name, under a code no
+    /// resident holds. Core validates the FIFO configuration and snapshot.
+    pub fn stage_private_fifo(
+        &mut self,
+        config: DraftConfig,
+        display_names: Vec<String>,
+    ) -> Result<StagedFifoSession, String> {
+        if display_names.len() != usize::from(config.pod_size) {
+            return Err("a private FIFO pod names one player per seat".to_string());
+        }
+        let draft_code = loop {
+            let code = generate_draft_code();
+            if !self.sessions.contains_key(&code) {
+                break code;
+            }
+        };
+        let seats = display_names
+            .iter()
+            .enumerate()
+            .map(|(seat, name)| {
+                Ok(DraftSeat::Human {
+                    player_id: PlayerId(
+                        u8::try_from(seat).map_err(|_| "Invalid seat index".to_string())?,
+                    ),
+                    display_name: name.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let core = draft_core::types::DraftSession::new_fifo(
+            config.clone(),
+            seats,
+            draft_code.clone(),
+            draft_core::types::DraftSessionId(generate_player_token()),
+        )
+        .map_err(|error| format!("Draft error: {error}"))?;
+        let pod_size = display_names.len();
+        let session = DraftSession {
+            draft_code,
+            session: core,
+            player_tokens: (0..pod_size).map(|_| generate_player_token()).collect(),
+            connected: vec![false; pod_size],
+            display_names,
+            config,
+            active_matches: HashMap::new(),
+            lobby_meta: None,
+            schedule: self.new_fifo_schedule(),
+        };
+        Self::staged(session)
+    }
+
+    /// Installs a staged FIFO session. Never replaces a resident: a code any
+    /// session holds is refused. Its tokens are not indexed and no reconnect
+    /// lapse is recorded, so no token lookup and no seat sweep reaches it.
+    pub fn install_fifo(&mut self, staged: StagedFifoSession) -> Result<(), String> {
+        let code = staged.session.draft_code.clone();
+        if self.sessions.contains_key(&code) {
+            return Err(DRAFT_CODE_RESIDENT.to_string());
+        }
+        self.sessions.insert(code, staged.session);
+        Ok(())
+    }
+
+    /// The earliest running core deadline of a FIFO session, as draft-core's
+    /// clock reports it. `None` when the code holds no FIFO session, a result
+    /// is unsaved, or no clock runs. Decides nothing about expiry: core's
+    /// `AdvanceClock` is the one expiry transaction.
+    pub fn fifo_next_due(&self, draft_code: &str) -> Option<u64> {
+        let session = self.sessions.get(draft_code)?;
+        if session.fifo_schedule()?.pending.is_some() {
+            return None;
+        }
+        draft_core::clock::next_running_deadline(&session.session)
+    }
+
+    /// Registers a new wake for a FIFO session's owner, replacing (and
+    /// aborting) its previous one. The task is attached separately.
+    pub fn register_fifo_wake(
+        &mut self,
+        draft_code: &str,
+        due_ms: u64,
+    ) -> Option<FifoWakeRegistration> {
+        self.sessions
+            .get(draft_code)
+            .and_then(DraftSession::fifo_schedule)?;
+        let serial = self.mint();
+        let fifo = self
+            .sessions
+            .get_mut(draft_code)
+            .and_then(DraftSession::fifo_schedule_mut)?;
+        fifo.abort_wake();
+        let registration = FifoWakeRegistration {
+            owner: fifo.owner,
+            serial,
+            due_ms,
+        };
+        fifo.wake = Some(FifoWake {
+            registration: registration.clone(),
+            task: None,
+        });
+        Some(registration)
+    }
+
+    /// Stores a wake's task while its registration is current and has none;
+    /// otherwise aborts the task.
+    pub fn attach_fifo_wake_task(
+        &mut self,
+        draft_code: &str,
+        registration: &FifoWakeRegistration,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        let wake = self
+            .sessions
+            .get_mut(draft_code)
+            .and_then(DraftSession::fifo_schedule_mut)
+            .and_then(|fifo| fifo.wake.as_mut())
+            .filter(|wake| wake.registration == *registration && wake.task.is_none());
+        match wake {
+            Some(wake) => wake.task = Some(task),
+            None => task.abort(),
+        }
+    }
+
+    /// Clears a FIFO session's wake and aborts its task.
+    pub fn cancel_fifo_wake(&mut self, draft_code: &str) {
+        if let Some(fifo) = self
+            .sessions
+            .get_mut(draft_code)
+            .and_then(DraftSession::fifo_schedule_mut)
+        {
+            fifo.abort_wake();
+        }
+    }
+
+    /// The FIFO session's current wake registration, if any.
+    pub fn current_fifo_wake(&self, draft_code: &str) -> Option<FifoWakeRegistration> {
+        self.sessions
+            .get(draft_code)
+            .and_then(DraftSession::fifo_schedule)?
+            .wake
+            .as_ref()
+            .map(|wake| wake.registration.clone())
+    }
+
+    /// The wake's recheck under the manager lock. True only when the resident
+    /// under `draft_code` is a FIFO session, its owner is the registration's,
+    /// its current registration is the one the wake carries, and no result is
+    /// unsaved. A claimed wake is cleared and its task handle dropped, not
+    /// aborted: the caller is that task, and aborting it would cancel it at its
+    /// next await, mid-operation.
+    pub fn claim_fifo_wake(
+        &mut self,
+        draft_code: &str,
+        registration: &FifoWakeRegistration,
+    ) -> bool {
+        let Some(fifo) = self
+            .sessions
+            .get_mut(draft_code)
+            .and_then(DraftSession::fifo_schedule_mut)
+        else {
+            return false;
+        };
+        let current = fifo.owner == registration.owner
+            && fifo.pending.is_none()
+            && fifo
+                .wake
+                .as_ref()
+                .is_some_and(|wake| wake.registration == *registration);
+        if current {
+            // Dropping the handle detaches the task; it keeps running.
+            fifo.wake = None;
+        }
+        current
+    }
+
+    /// Stages one FIFO operation on a clone of the committed core. Refuses a
+    /// legacy session and refuses while a result is unsaved. A seat's action is
+    /// bound to its token's seat through the client authority. Core's own
+    /// staged transaction validates and bumps the revision; a result that
+    /// changes the core is held unsaved with its row, and the owner's wake is
+    /// cleared, until [`Self::commit_fifo_result`].
+    pub fn stage_fifo_operation(
+        &mut self,
+        draft_code: &str,
+        actor: DraftActor<'_>,
+        action: DraftAction,
+        pack_source: Option<&dyn PackSource>,
+        now_ms: u64,
+    ) -> Result<FifoStaged, String> {
+        let card_db = self.card_db.clone();
+        let session = self
+            .sessions
+            .get_mut(draft_code)
+            .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
+        let fifo = session
+            .fifo_schedule()
+            .ok_or_else(|| NOT_A_FIFO_SESSION.to_string())?;
+        if fifo.pending.is_some() {
+            return Err(FIFO_RESULT_UNSAVED.to_string());
+        }
+        let action = match actor {
+            DraftActor::Seat { token } => {
+                let seat = session
+                    .seat_for_token(token)
+                    .ok_or_else(|| "Invalid player token".to_string())?;
+                authorize_client_draft_action(seat, action)?
+            }
+            DraftActor::Server => action,
+        };
+        check_submit_companion(&session.session, card_db.as_deref(), &action)?;
+        let mut candidate = session.session.clone();
+        draft_core::session::apply_at(&mut candidate, action, pack_source, now_ms).map_err(
+            |error| {
+                warn!(draft = %draft_code, %error, "FIFO draft operation rejected");
+                format!("Draft error: {error}")
+            },
+        )?;
+        if candidate == session.session {
+            return Ok(FifoStaged::Unchanged);
+        }
+        let row = serde_json::to_string(&session.persisted_with_core(&candidate))
+            .map_err(|error| format!("failed to serialize draft session: {error}"))?;
+        let fifo = session
+            .fifo_schedule_mut()
+            .ok_or_else(|| NOT_A_FIFO_SESSION.to_string())?;
+        fifo.pending = Some(Box::new(PendingFifoResult { candidate, row }));
+        fifo.abort_wake();
+        Ok(FifoStaged::Pending)
+    }
+
+    /// The row of the FIFO session's unsaved result, if any.
+    pub fn pending_fifo_row(&self, draft_code: &str) -> Option<&str> {
+        self.sessions
+            .get(draft_code)
+            .and_then(DraftSession::fifo_schedule)?
+            .pending
+            .as_deref()
+            .map(|pending| pending.row.as_str())
+    }
+
+    /// Makes the saved result the committed core.
+    pub fn commit_fifo_result(&mut self, draft_code: &str) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(draft_code)
+            .ok_or_else(|| format!("Draft not found: {draft_code}"))?;
+        let pending = session
+            .fifo_schedule_mut()
+            .ok_or_else(|| NOT_A_FIFO_SESSION.to_string())?
+            .pending
+            .take()
+            .ok_or_else(|| "no draft result is staged".to_string())?;
+        session.session = pending.candidate;
+        Ok(())
     }
 }
 
@@ -1007,9 +1533,7 @@ fn admit_dormant_action(
     session: &draft_core::types::DraftSession,
     action: &DraftAction,
 ) -> Result<(), String> {
-    session
-        .validate_legacy_admission()
-        .map_err(|_| draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string())?;
+    refuse_fifo_core(session)?;
     if action.is_fifo_only() {
         return Err(draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
     }
@@ -1245,13 +1769,17 @@ mod tests {
         let wire = serde_json::json!({
             "type": "DraftAction", "data": {
                 "draft_code": code,
-                "action": { "type": "SubmitDeck", "data": data }
+                "action": { "type": "SubmitDeck", "data": data },
+                "request_id": 1
             }
         });
         let message: ClientMessage =
             serde_json::from_str(&wire.to_string()).map_err(|error| error.to_string())?;
         guard_client_message_before_dispatch(&message, crate::protocol::ServerMode::Full)?;
-        let ClientMessage::DraftAction { draft_code, action } = message else {
+        let ClientMessage::DraftAction {
+            draft_code, action, ..
+        } = message
+        else {
             unreachable!()
         };
         mgr.handle_draft_action(&draft_code, token, action, None)
@@ -1373,12 +1901,12 @@ mod tests {
             r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[{"section":"main_deck","name":"Plains","count":1,"printing":{"set_code":"lea","collector_number":"001"}}]}"#,
         ] {
             let expected = format!(
-                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}}}}}}"#
+                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}},"request_id":1}}}}"#
             );
             for wire in [
                 expected.clone(),
                 format!(
-                    r#"{{"data":{{"draft_code":"ABCD12","action":{{"data":{data},"type":"SubmitDeck"}}}},"type":"DraftAction"}}"#
+                    r#"{{"data":{{"request_id":1,"draft_code":"ABCD12","action":{{"data":{data},"type":"SubmitDeck"}}}},"type":"DraftAction"}}"#
                 ),
             ] {
                 let message: ClientMessage = serde_json::from_str(&wire).unwrap();
@@ -2858,7 +3386,11 @@ mod tests {
         let restored = DraftSession::from_persisted(persisted).unwrap();
 
         assert!(restored.connected.iter().all(|&c| !c));
-        assert!(restored.timer_task.is_none());
+        assert!(restored
+            .legacy_schedule()
+            .expect("a restored legacy pod runs the legacy schedule")
+            .timer_task
+            .is_none());
     }
 
     #[test]
@@ -3275,5 +3807,508 @@ mod tests {
         let seats = draft_seats_needing_auto_pick(&mut session, 2);
         assert_eq!(seats, vec![1]);
         assert!(!seats.contains(&0));
+    }
+
+    /// The private FIFO fixture: 8 seats, `TST`, 2-card packs, 3 packs, a
+    /// fixed 1000 ms pick clock and a 1000 ms Review.
+    fn private_fifo_config() -> DraftConfig {
+        use draft_core::types::{DraftClockPolicy, DraftFlow, PickClockPolicy};
+        DraftConfig {
+            flow: DraftFlow::FifoAsync,
+            cards_per_pack: 2,
+            clock_policy: DraftClockPolicy {
+                pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+                review_duration_ms: 1000,
+            },
+            ..test_config()
+        }
+    }
+
+    fn fifo_source() -> draft_core::pack_source::FixturePackSource {
+        draft_core::pack_source::FixturePackSource {
+            set_code: "TST".into(),
+            cards_per_pack: 2,
+        }
+    }
+
+    /// Stages and installs a private FIFO pod; returns its code and tokens.
+    fn install_private_pod(mgr: &mut DraftSessionManager, config: DraftConfig) -> String {
+        let names = (0..config.pod_size)
+            .map(|seat| format!("Player {seat}"))
+            .collect();
+        let staged = mgr.stage_private_fifo(config, names).unwrap();
+        let code = staged.draft_code().to_string();
+        mgr.install_fifo(staged).unwrap();
+        code
+    }
+
+    /// Stages one FIFO operation and commits it as a saved result would be.
+    fn fifo_op(
+        mgr: &mut DraftSessionManager,
+        code: &str,
+        actor: DraftActor<'_>,
+        action: DraftAction,
+        now_ms: u64,
+    ) -> FifoStaged {
+        let staged = mgr
+            .stage_fifo_operation(code, actor, action, Some(&fifo_source()), now_ms)
+            .unwrap();
+        if staged == FifoStaged::Pending {
+            mgr.commit_fifo_result(code).unwrap();
+        }
+        staged
+    }
+
+    /// The seat's head selection, submitted through its own token.
+    fn fifo_select_head(mgr: &mut DraftSessionManager, code: &str, seat: u8, now_ms: u64) {
+        let token = mgr.sessions[code].player_tokens[usize::from(seat)].clone();
+        let action = draft_core::pick_pass::legal_auto_selection(&mgr.sessions[code].session, seat)
+            .expect("the seat has a head");
+        assert_eq!(
+            fifo_op(
+                mgr,
+                code,
+                DraftActor::Seat { token: &token },
+                action,
+                now_ms
+            ),
+            FifoStaged::Pending
+        );
+    }
+
+    /// A seat prompt's running deadline, read from the committed core.
+    fn prompt_deadline(mgr: &DraftSessionManager, code: &str, seat: usize) -> Option<u64> {
+        let clock = mgr.sessions[code].session.fifo.as_ref()?.seats[seat]
+            .prompt
+            .as_ref()?
+            .clock
+            .as_ref()?;
+        match clock.state {
+            draft_core::types::DraftClockState::Running { deadline_ms } => Some(deadline_ms),
+            draft_core::types::DraftClockState::Frozen { .. } => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_a_fifo_owner_aborts_its_wake_task() {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let mut mgr = DraftSessionManager::new();
+        let code = install_private_pod(&mut mgr, private_fifo_config());
+        let registration = mgr
+            .register_fifo_wake(&code, 2000)
+            .expect("a FIFO owner registers a wake");
+        // A wake task that never finishes on its own; `ended` reports
+        // `Closed` once the task is dropped.
+        let (alive, mut ended) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        mgr.attach_fifo_wake_task(&code, &registration, task);
+        tokio::task::yield_now().await;
+        assert_eq!(mgr.current_fifo_wake(&code), Some(registration));
+        assert_eq!(ended.try_recv(), Err(TryRecvError::Empty));
+
+        let removed = mgr.remove_draft(&code).expect("the FIFO owner");
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(ended.try_recv(), Err(TryRecvError::Closed));
+        drop(removed);
+    }
+
+    #[test]
+    fn schedule_arm_follows_the_native_classification() {
+        let is_legacy =
+            |session: &DraftSession| matches!(session.schedule, DraftSchedule::Legacy(_));
+        // A created legacy pod.
+        let mut mgr = DraftSessionManager::new();
+        let created = start_pod(&mut mgr, test_config());
+        assert_eq!(
+            native_flow(&mgr.sessions[&created].session),
+            NativeRowFlow::Legacy
+        );
+        assert!(is_legacy(&mgr.sessions[&created]));
+        // A restored legacy pod and a restored Winston row.
+        let mut winston_mgr = DraftSessionManager::new();
+        let winston = start_pod(&mut winston_mgr, winston_test_config());
+        let mut fresh = DraftSessionManager::new();
+        fresh
+            .restore_persisted_session(mgr.sessions[&created].to_persisted())
+            .unwrap();
+        fresh
+            .restore_persisted_session(winston_mgr.sessions[&winston].to_persisted())
+            .unwrap();
+        for code in [&created, &winston] {
+            assert_eq!(
+                native_flow(&fresh.sessions[code].session),
+                NativeRowFlow::Legacy
+            );
+            assert!(is_legacy(&fresh.sessions[code]));
+        }
+        // A private stage and an internal restore.
+        let private = install_private_pod(&mut fresh, private_fifo_config());
+        assert_eq!(
+            native_flow(&fresh.sessions[&private].session),
+            NativeRowFlow::Fifo
+        );
+        assert!(!is_legacy(&fresh.sessions[&private]));
+        let row = fresh.sessions[&private].to_persisted();
+        let mut restored = DraftSessionManager::new();
+        let staged = restored.stage_restored_fifo(row).unwrap();
+        restored.install_fifo(staged).unwrap();
+        assert!(!is_legacy(&restored.sessions[&private]));
+        assert_eq!(restored.sessions.len(), 1);
+    }
+
+    #[test]
+    fn fifo_next_due_reads_the_earliest_running_core_deadline() {
+        use draft_core::types::{DraftControl, DraftPauseReason};
+        let mut mgr = DraftSessionManager::new();
+        let code = install_private_pod(&mut mgr, private_fifo_config());
+        // Unsaved: a staged start is not yet committed.
+        assert_eq!(
+            mgr.stage_fifo_operation(
+                &code,
+                DraftActor::Server,
+                DraftAction::StartDraft,
+                Some(&fifo_source()),
+                1000
+            ),
+            Ok(FifoStaged::Pending)
+        );
+        assert!(mgr.pending_fifo_row(&code).is_some());
+        assert_eq!(mgr.fifo_next_due(&code), None);
+        mgr.commit_fifo_result(&code).unwrap();
+        assert_eq!(prompt_deadline(&mgr, &code, 0), Some(2000));
+        assert_eq!(mgr.fifo_next_due(&code), Some(2000));
+
+        fifo_select_head(&mut mgr, &code, 0, 1500);
+        assert_eq!(mgr.fifo_next_due(&code), Some(2000));
+        // Seat 1 takes its own head; seat 0's remainder becomes its next head.
+        fifo_select_head(&mut mgr, &code, 1, 1500);
+        assert_eq!(prompt_deadline(&mgr, &code, 1), Some(2500));
+        for seat in 2..8 {
+            assert_eq!(prompt_deadline(&mgr, &code, seat), Some(2000));
+        }
+        assert_eq!(mgr.fifo_next_due(&code), Some(2000));
+
+        let pause = DraftAction::Control {
+            control: DraftControl::Pause {
+                reason: DraftPauseReason::PausedByHost,
+            },
+        };
+        fifo_op(&mut mgr, &code, DraftActor::Server, pause, 1600);
+        assert_eq!(mgr.fifo_next_due(&code), None);
+        let resume = DraftAction::Control {
+            control: DraftControl::Resume,
+        };
+        fifo_op(&mut mgr, &code, DraftActor::Server, resume, 3000);
+        assert_eq!(prompt_deadline(&mgr, &code, 1), Some(3900));
+        assert_eq!(prompt_deadline(&mgr, &code, 2), Some(3400));
+        assert_eq!(mgr.fifo_next_due(&code), Some(3400));
+
+        // A session with no pick clock.
+        let off = install_private_pod(
+            &mut mgr,
+            DraftConfig {
+                clock_policy: draft_core::types::DraftClockPolicy {
+                    pick: draft_core::types::PickClockPolicy::Off,
+                    review_duration_ms: 0,
+                },
+                ..private_fifo_config()
+            },
+        );
+        fifo_op(
+            &mut mgr,
+            &off,
+            DraftActor::Server,
+            DraftAction::StartDraft,
+            1000,
+        );
+        assert_eq!(mgr.sessions[&off].session.status, DraftStatus::Drafting);
+        assert_eq!(mgr.fifo_next_due(&off), None);
+
+        // In Review, the Review deadline.
+        let review = install_private_pod(&mut mgr, private_fifo_config());
+        fifo_op(
+            &mut mgr,
+            &review,
+            DraftActor::Server,
+            DraftAction::StartDraft,
+            1000,
+        );
+        for _ in 0..2 {
+            for seat in 0..8 {
+                fifo_select_head(&mut mgr, &review, seat, 1100);
+            }
+        }
+        assert_eq!(mgr.sessions[&review].session.status, DraftStatus::Review);
+        let review_deadline = match mgr.sessions[&review]
+            .session
+            .fifo
+            .as_ref()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .clock
+            .state
+        {
+            draft_core::types::DraftClockState::Running { deadline_ms } => deadline_ms,
+            draft_core::types::DraftClockState::Frozen { .. } => panic!("Review runs"),
+        };
+        assert_eq!(review_deadline, 2100);
+        assert_eq!(mgr.fifo_next_due(&review), Some(review_deadline));
+        // A legacy pod has no FIFO deadline.
+        let legacy = start_pod(&mut mgr, test_config());
+        assert_eq!(mgr.fifo_next_due(&legacy), None);
+    }
+
+    #[test]
+    fn internal_fifo_restore_validates_after_the_classification() {
+        use draft_core::types::{DraftControl, DraftPauseReason};
+        let mut manager = DraftSessionManager::new();
+        let code = start_pod(&mut manager, test_config());
+        let legacy = manager.sessions[&code].to_persisted();
+        let (config, fifo) = started_fifo_core(&legacy);
+        let mut valid = legacy.clone();
+        valid.config = config.clone();
+        valid.session = fifo.clone();
+        valid.session.validate_persisted_snapshot().unwrap();
+
+        // A legacy row the validator also refuses keeps the legacy-row text.
+        let mut mislabelled = legacy.clone();
+        mislabelled.session.kind = DraftKind::Traditional;
+        assert!(mislabelled.session.validate_persisted_snapshot().is_err());
+        let mut without_fifo_state = valid.clone();
+        without_fifo_state.session.fifo = None;
+        let snapshot_refusal = without_fifo_state
+            .session
+            .validate_persisted_snapshot()
+            .unwrap_err();
+        let mut with_timer = valid.clone();
+        with_timer.timer_remaining_ms = Some(5000);
+        let mut with_listing = valid.clone();
+        with_listing.lobby_meta = Some(PersistedLobbyMeta {
+            host_name: "Alice".into(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            start_when_full: true,
+            ranked: false,
+        });
+        let mut seat_mismatch = valid.clone();
+        seat_mismatch.display_names.pop();
+        for (row, expected) in [
+            (legacy.clone(), LEGACY_ROW_NOT_PRIVATE_FIFO.to_string()),
+            (mislabelled, LEGACY_ROW_NOT_PRIVATE_FIFO.to_string()),
+            (
+                without_fifo_state,
+                format!("invalid persisted FIFO snapshot: {snapshot_refusal}"),
+            ),
+            (
+                with_timer,
+                "a FIFO draft row carries no legacy pick timer".to_string(),
+            ),
+            (
+                with_listing,
+                "a private FIFO draft row carries no lobby listing".to_string(),
+            ),
+            (
+                seat_mismatch,
+                "persisted draft seat vectors do not match core seats".to_string(),
+            ),
+        ] {
+            let before = serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap();
+            let tokens = manager.token_to_draft.clone();
+            assert_eq!(manager.stage_restored_fifo(row).err(), Some(expected));
+            assert_eq!(manager.sessions.len(), 1);
+            assert_eq!(manager.token_to_draft, tokens);
+            assert_eq!(
+                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(),
+                before
+            );
+        }
+
+        // A valid FIFO row under a resident legacy pod's code is refused
+        // and the legacy pod is unchanged.
+        let before = serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap();
+        let staged = manager.stage_restored_fifo(valid.clone()).unwrap();
+        assert_eq!(
+            manager.install_fifo(staged),
+            Err(DRAFT_CODE_RESIDENT.to_string())
+        );
+        assert!(matches!(
+            manager.sessions[&code].schedule,
+            DraftSchedule::Legacy(_)
+        ));
+        assert_eq!(
+            serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(),
+            before
+        );
+
+        // The valid row installs in a fresh manager, as do its Review and
+        // paused cores.
+        let mut review = fifo.clone();
+        for _ in 0..2 {
+            for seat in 0..8 {
+                let action = draft_core::pick_pass::legal_auto_selection(&review, seat).unwrap();
+                draft_core::session::apply_at(&mut review, action, None, 1100).unwrap();
+            }
+        }
+        assert_eq!(review.status, DraftStatus::Review);
+        let mut paused = review.clone();
+        draft_core::session::apply_at(
+            &mut paused,
+            DraftAction::Control {
+                control: DraftControl::Pause {
+                    reason: DraftPauseReason::PausedByHost,
+                },
+            },
+            None,
+            1500,
+        )
+        .unwrap();
+        for (core, due) in [(fifo, Some(2000)), (review, Some(2100)), (paused, None)] {
+            let mut row = valid.clone();
+            row.session = core.clone();
+            let mut fresh = DraftSessionManager::new();
+            let staged = fresh.stage_restored_fifo(row).unwrap();
+            fresh.install_fifo(staged).unwrap();
+            assert_eq!(fresh.sessions[&code].session, core);
+            assert!(matches!(
+                fresh.sessions[&code].schedule,
+                DraftSchedule::Fifo(_)
+            ));
+            assert_eq!(fresh.fifo_next_due(&code), due);
+            assert_eq!(fresh.current_fifo_wake(&code), None);
+        }
+    }
+
+    #[test]
+    fn restored_winston_pod_keeps_its_shared_stack_turn() {
+        let mut started = DraftSessionManager::new();
+        let code = start_pod(&mut started, winston_test_config());
+        let mut mgr = DraftSessionManager::new();
+        mgr.restore_persisted_session(started.sessions[&code].to_persisted())
+            .unwrap();
+        assert!(matches!(
+            mgr.sessions[&code].schedule,
+            DraftSchedule::Legacy(_)
+        ));
+        let decide = |mgr: &DraftSessionManager, seat: u8| {
+            let state = mgr.sessions[&code].session.shared_stack().unwrap();
+            let decision = draft_core::shared_stack::forced_decision(state, state.active_seat)
+                .expect("the active seat has a legal decision");
+            (
+                mgr.sessions[&code].player_tokens[usize::from(seat)].clone(),
+                DraftAction::SharedStackDecision {
+                    seat,
+                    pile: state.cursor,
+                    decision,
+                },
+            )
+        };
+        let active = mgr.sessions[&code]
+            .session
+            .shared_stack()
+            .unwrap()
+            .active_seat;
+        let other = 1 - active;
+        // A non-active seat's decision is refused, as before.
+        let before = mgr.sessions[&code].session.shared_stack.clone();
+        let (token, action) = decide(&mgr, other);
+        assert!(mgr
+            .handle_draft_action(&code, &token, action, None)
+            .is_err());
+        assert_eq!(mgr.sessions[&code].session.shared_stack, before);
+        // The active seat's decision is accepted.
+        let (token, action) = decide(&mgr, active);
+        mgr.handle_draft_action(&code, &token, action, None)
+            .expect("the restored pod accepts the active seat's decision");
+        assert_ne!(mgr.sessions[&code].session.shared_stack, before);
+        // The timeout path drives the seat now active.
+        let after_decision = mgr.sessions[&code].session.shared_stack.clone();
+        let now_active = mgr.sessions[&code]
+            .session
+            .shared_stack()
+            .unwrap()
+            .active_seat;
+        mgr.pick_random_for_seat(&code, now_active, None).unwrap();
+        assert_ne!(mgr.sessions[&code].session.shared_stack, after_decision);
+    }
+
+    #[test]
+    fn fifo_resident_refuses_public_manager_entries() {
+        let fifo_text = draft_core::types::FIFO_UNSUPPORTED_BY_RUNTIME.to_string();
+        let mut mgr = DraftSessionManager::new();
+        let (legacy, _, _) = mgr.create_draft(test_config(), "Host".to_string());
+        let lobby_pod = install_private_pod(&mut mgr, private_fifo_config());
+        let drafting_pod = install_private_pod(&mut mgr, private_fifo_config());
+        fifo_op(
+            &mut mgr,
+            &drafting_pod,
+            DraftActor::Server,
+            DraftAction::StartDraft,
+            1000,
+        );
+        assert_eq!(mgr.sessions[&lobby_pod].session.status, DraftStatus::Lobby);
+        assert_eq!(
+            mgr.sessions[&drafting_pod].session.status,
+            DraftStatus::Drafting
+        );
+        let now = std::time::Instant::now();
+        for code in [&lobby_pod, &drafting_pod] {
+            let before = serde_json::to_value(mgr.sessions[code].to_persisted()).unwrap();
+            let tokens = mgr.token_to_draft.clone();
+            let host = mgr.sessions[code].player_tokens[0].clone();
+            assert_eq!(
+                mgr.join_draft(code, "Guest".into(), None).err(),
+                Some(fifo_text.clone())
+            );
+            assert_eq!(
+                mgr.handle_reconnect(code, &host, now).err(),
+                Some(fifo_text.clone())
+            );
+            assert_eq!(
+                mgr.handle_draft_action(code, &host, DraftAction::StartDraft, None)
+                    .err(),
+                Some(fifo_text.clone())
+            );
+            assert_eq!(
+                mgr.apply_system_action(code, DraftAction::StartDraft, None)
+                    .err(),
+                Some(fifo_text.clone())
+            );
+            // Disconnect bookkeeping records no lapse.
+            mgr.handle_disconnect(code, 0, now);
+            assert!(!mgr.reconnect.is_disconnected(code, PlayerId(0)));
+            assert!(!mgr.sessions[code].connected[0]);
+            assert_eq!(
+                serde_json::to_value(mgr.sessions[code].to_persisted()).unwrap(),
+                before
+            );
+            assert_eq!(mgr.token_to_draft, tokens);
+        }
+        // The same manager's legacy pod accepts a join and records a lapse.
+        let (guest, seat, _) = mgr.join_draft(&legacy, "Guest".into(), None).unwrap();
+        assert_eq!(mgr.draft_for_token(&guest), Some(legacy.as_str()));
+        mgr.handle_disconnect(&legacy, usize::from(seat), now);
+        assert!(mgr.reconnect.is_disconnected(&legacy, PlayerId(seat)));
+        // A sweep with zero grace changes nothing on either FIFO pod.
+        let rows: Vec<_> = [&lobby_pod, &drafting_pod]
+            .map(|code| serde_json::to_value(mgr.sessions[code].to_persisted()).unwrap())
+            .into();
+        mgr.reconnect.grace_period = std::time::Duration::ZERO;
+        let sweep = mgr.sweep_expired_seats(now + std::time::Duration::from_secs(1));
+        assert!(!sweep.affected.contains(&lobby_pod));
+        assert!(!sweep.affected.contains(&drafting_pod));
+        for (code, row) in [&lobby_pod, &drafting_pod].into_iter().zip(rows) {
+            assert_eq!(
+                serde_json::to_value(mgr.sessions[code].to_persisted()).unwrap(),
+                row
+            );
+        }
     }
 }

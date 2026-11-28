@@ -7722,6 +7722,36 @@ describe("P2P wire-protocol version gate", () => {
     );
   });
 
+  it("requires the current wire version before adopting a Ward Blight prompt", async () => {
+    const state: GameState = {
+      ...bestowState(),
+      waiting_for: {
+        type: "UnlessBlightChoice",
+        data: {
+          player: 1,
+          counters: 2,
+          creatures: [42],
+          cost: { type: "Blight", count: 2 },
+          pending_effect: {},
+          remaining: [],
+        },
+      },
+    };
+    const earlier = makeGuest();
+    await earlier.adapter.initialize();
+    await earlier.conn.simulateData({ ...setupFrameAt(WIRE_PROTOCOL_VERSION - 1), state });
+    await expect(earlier.adapter.initializeGame()).rejects.toMatchObject({ code: "P2P_REJECTED" });
+    await expect(earlier.adapter.getState()).rejects.toThrow("No game state available");
+
+    const current = makeGuest();
+    await current.adapter.initialize();
+    await current.conn.simulateData({ ...setupFrameAt(WIRE_PROTOCOL_VERSION), state });
+    await current.adapter.initializeGame();
+    expect((await current.adapter.getState()).waiting_for).toEqual(state.waiting_for);
+    earlier.adapter.dispose();
+    current.adapter.dispose();
+  });
+
   it.each([132, 133, 134, 135, 136, 137, 138, 139, 140, WIRE_PROTOCOL_VERSION - 1, WIRE_PROTOCOL_VERSION + 1, undefined])("refuses incompatible reconnect acknowledgement %s before adopting populated Bestow state", async (version) => {
     const refusing = makeGuest(new FakeDataConnection(), undefined, "prior-token");
     await refusing.adapter.initialize();

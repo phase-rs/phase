@@ -2409,6 +2409,7 @@ impl GameRunner {
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
             WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
+            WaitingFor::UnlessBlightChoice { .. } => "UnlessBlightChoice",
             WaitingFor::LearnChoice { .. } => "LearnChoice",
             WaitingFor::CrewVehicle { .. } => "CrewVehicle",
             WaitingFor::StationTarget { .. } => "StationTarget",

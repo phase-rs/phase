@@ -19,6 +19,8 @@ interface Fragment {
 interface DeathShatterProps {
   position: { x: number; y: number; width: number; height: number };
   image: HTMLImageElement;
+  /** Compresses the shatter with its step when presentation runs faster than 1. */
+  timeScale?: number;
   onComplete: () => void;
 }
 
@@ -72,7 +74,7 @@ function generateFragments(width: number, height: number): Fragment[] {
   return fragments;
 }
 
-export function DeathShatter({ position, image, onComplete }: DeathShatterProps) {
+export function DeathShatter({ position, image, timeScale = 1, onComplete }: DeathShatterProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
@@ -88,6 +90,13 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
       if (safetyTimer !== null) clearTimeout(safetyTimer);
       onCompleteRef.current();
     };
+
+    // At speed 0 (or a non-positive scale) the effect is over before its first
+    // frame: no division by the scale, no timer left behind.
+    if (timeScale <= 0) {
+      completeOnce();
+      return;
+    }
 
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -125,7 +134,9 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
     const tick = (now: number) => {
       if (completed) return;
 
-      const elapsed = (now - startTime) / 1000;
+      // Presentation time divided by the scale is the effect's own clock: the
+      // same picture as at pace 1, only sooner (or later) in wall time.
+      const elapsed = (now - startTime) / 1000 / timeScale;
       const progress = Math.min(elapsed / DURATION, 1);
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -143,7 +154,7 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
         ctx.translate(currentX + frag.sw / 2, currentY + frag.sh / 2);
         ctx.rotate((currentRotation * Math.PI) / 180);
 
-        // Red tint flash in first 0.1s
+        // Red tint flash in the first 0.1s of effect time (scaled with the rest)
         if (elapsed < RED_FLASH_DURATION) {
           ctx.drawImage(
             offscreen,
@@ -173,7 +184,7 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
       animationFrame = requestAnimationFrame(tick);
     };
 
-    safetyTimer = setTimeout(completeOnce, RAF_SAFETY_TIMEOUT_MS);
+    safetyTimer = setTimeout(completeOnce, RAF_SAFETY_TIMEOUT_MS * timeScale);
     animationFrame = requestAnimationFrame(tick);
 
     return () => {
@@ -181,7 +192,7 @@ export function DeathShatter({ position, image, onComplete }: DeathShatterProps)
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       if (safetyTimer !== null) clearTimeout(safetyTimer);
     };
-  }, [image, position]);
+  }, [image, position, timeScale]);
 
   const padding = 200;
 
