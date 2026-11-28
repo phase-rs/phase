@@ -199,6 +199,34 @@ fn inherited_battlefield_search_declines_a_finalized_put_shell() {
 }
 
 #[test]
+fn inherited_battlefield_search_declines_a_delayed_payload() {
+    // SHAPE: prepend Codie's delayed installer to Magmatic Hellkite's body
+    // to exercise delayed placement with the printed search-delivery shape.
+    let body = format!(
+        "When you next cast a spell this turn, exile cards from the top of your library \
+         until you exile an instant or sorcery card with lesser mana value. {HELLKITE_BODY}"
+    );
+    let ir =
+        parse_effect_chain_ir_ability_root(&body, AbilityKind::Spell, &mut ParseContext::default());
+    let [installer, destroy, search, put, shuffle] = ir.clauses.as_slice() else {
+        panic!(
+            "expected a delayed installer and four clauses: {:?}",
+            ir.clauses
+        );
+    };
+    assert!(matches!(
+        installer.parsed.effect,
+        Effect::CreateDelayedTrigger { .. }
+    ));
+    assert_eq!(put.placement, ClausePlacement::NestedInDelayedPayload);
+    assert_uncommitted_battlefield_search(search, put, shuffle);
+    assert_eq!(
+        search.incoming_link(destroy.boundary),
+        SubAbilityLink::SequentialSibling
+    );
+}
+
+#[test]
 fn inherited_battlefield_search_stays_uncommitted_in_a_reminted_guarded_body() {
     // SHAPE: Magmatic Hellkite is the nearest printed search. Use an outer
     // conditional to exercise the flattening path with its same delivery rider.

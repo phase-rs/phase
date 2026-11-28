@@ -51578,6 +51578,7 @@ fn plain_search_delivery_clause(clause: &ClauseIr) -> bool {
 
 // CR 608.2c + CR 122.6: treat the printed entry rider as part of the search
 // delivery only when both following instructions read the same search actor.
+// CR 603.7a: preserve the relocation of instructions into a delayed payload.
 fn commit_inherited_search_delivery(
     clauses: &mut [ClauseIr],
     evidence: &HashMap<ClauseId, SearchDeliveryEvidence>,
@@ -51609,9 +51610,9 @@ fn commit_inherited_search_delivery(
             || move_read.actor.announced_slot != owner.actor.announced_slot
             || shuffle_read.actor.announced_slot != owner.actor.announced_slot
             || put.boundary != Some(ClauseBoundary::Then)
-            || ![&*search, &*put, &*shuffle]
-                .into_iter()
-                .all(plain_search_delivery_clause)
+            || ![&*search, &*put, &*shuffle].into_iter().all(|clause| {
+                clause.placement == ClausePlacement::Sibling && plain_search_delivery_clause(clause)
+            })
             || !matches!(
                 put.disposition,
                 ClauseDisposition::Emit {
