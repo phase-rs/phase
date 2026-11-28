@@ -15367,6 +15367,12 @@ fn apply_non_priority_pass_action(
             // metadata in SpellMeta and enforced during mana payment.
             pending.ability.set_chosen_x_recursive(value);
             pending.cost.concretize_x(value);
+            if pending.activation_ability_index.is_some() {
+                pending.activation_cost = pending
+                    .activation_cost
+                    .as_ref()
+                    .map(|cost| casting_costs::bind_activation_tap_count(cost, value));
+            }
             let object_id = pending.object_id;
             events.push(GameEvent::XValueChosen {
                 player,
@@ -15746,6 +15752,36 @@ fn apply_non_priority_pass_action(
                     "Only mana abilities can be activated during mana payment".to_string(),
                 ));
             }
+        }
+        // CR 601.2g + CR 605.3a: use the same current semantic capability
+        // during a payment window as during priority, retaining its parent.
+        (
+            window @ (WaitingFor::ManaPayment { .. } | WaitingFor::ManaAbilityManaPayment { .. }),
+            GameAction::ActivateManaSource { selection },
+        ) => {
+            let (player, resume) =
+                payment_window_resume(window).expect("the arm matches only payment windows");
+            if matches!(
+                mana_sources::priority_mana_route(state, &selection),
+                Some(mana_sources::PriorityManaRoute::LandTap)
+            ) {
+                return Err(EngineError::ActionNotAllowed(
+                    "Land mana abilities use TapLandForMana".to_string(),
+                ));
+            }
+            let waiting_for = mana_sources::activate_mana_source_selection(
+                state,
+                player,
+                &selection,
+                &mut events,
+                resume,
+            )?;
+            if let Some(order_wf) =
+                super::triggers::preserve_order_triggers_resume(state, waiting_for.clone())
+            {
+                return Ok(ActionResult::applied(events, order_wf));
+            }
+            waiting_for
         }
         // Allow basic land tapping during mana payment
         (

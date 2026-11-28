@@ -16,6 +16,7 @@ export function PayAmountChoiceUI() {
 
   const isPayAmount = waitingFor?.type === "PayAmountChoice";
   const data = isPayAmount ? waitingFor.data : null;
+  const announcesX = data?.resource.type === "TapCountX";
   const min = data?.min ?? 0;
   const max = data?.max ?? 0;
   // Prompt identity, not just bounds — a successor prompt with the same window would otherwise
@@ -60,6 +61,7 @@ export function PayAmountChoiceUI() {
         return t("mana.resourceCounters");
       case "Speed":
         return t("mana.resourceSpeed");
+      case "TapCountX":
       case "LoopCollapse":
         // Dead arm: LoopCollapse never reaches resourceLabel (the loopCollapseAxis
         // branch owns its title/button). Kept for switch exhaustiveness only.
@@ -99,7 +101,9 @@ export function PayAmountChoiceUI() {
             {t(
               loopCollapseAxis
                 ? `mana.loopCollapseTitle${loopCollapseAxis}`
-                : "mana.chooseAmountTitle",
+                : announcesX
+                  ? "mana.chooseXTitle"
+                  : "mana.chooseAmountTitle",
             )}
             {sourceName && (
               <span className="ml-1 text-gray-400">&mdash; {sourceName}</span>
@@ -113,9 +117,9 @@ export function PayAmountChoiceUI() {
             max={max}
             onSubmit={handleCommit}
             labels={{
-              input: t("mana.chooseAmountAria"),
-              decrease: t("mana.decreaseAmount"),
-              increase: t("mana.increaseAmount"),
+              input: t(announcesX ? "mana.chooseXInputAria" : "mana.chooseAmountAria"),
+              decrease: t(announcesX ? "mana.decreaseX" : "mana.decreaseAmount"),
+              increase: t(announcesX ? "mana.increaseX" : "mana.increaseAmount"),
             }}
           />
 
@@ -141,10 +145,12 @@ export function PayAmountChoiceUI() {
                       value: amount,
                       count: amount,
                     })
-                  : t("mana.payAmount", {
-                      value: amount,
-                      resource: resourceLabel,
-                    })}
+                  : announcesX
+                    ? t("mana.confirmX", { value: amount })
+                    : t("mana.payAmount", {
+                        value: amount,
+                        resource: resourceLabel,
+                      })}
             </button>
           </div>
         </div>

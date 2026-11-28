@@ -431,6 +431,9 @@ fn route_activated_modes(
             pending_x.target_constraints = target_constraints;
             pending_x.distribute = mode_distribute.clone();
             pending_x.deferred_target_selection = true;
+            if casting_costs::activation_has_announced_tap_count(cost) {
+                pending_x.activation_residual = ActivationResidual::XMana;
+            }
             let mut chosen_modes = indices.clone();
             chosen_modes.sort_unstable();
             pending_x.chosen_modes = chosen_modes;

@@ -3972,6 +3972,7 @@ export type PayableResource =
     }
   | { type: "Counters" }
   | { type: "Speed" }
+  | { type: "TapCountX" }
   // CR 732.2a: not a resource payment — the finite count an accepted
   // object-growth loop shortcut collapses into (display-only; the engine mints).
   | { type: "LoopCollapse"; data: { axis: LoopCollapseAxis } };

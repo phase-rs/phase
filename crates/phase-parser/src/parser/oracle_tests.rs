@@ -39057,3 +39057,325 @@ fn fling_damage_equal_to_sacrificed_power() {
     );
     assert_eq!(*target, TargetFilter::Any);
 }
+
+#[test]
+fn printed_activated_tap_x_is_bound_before_payment() {
+    use crate::types::ability::{TapCreaturesRequirement, TypeFilter};
+
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [&'a str],
+        usize,
+        Vec<TypeFilter>,
+        Vec<FilterProp>,
+    );
+    let cases: [Case<'_>; 9] = [
+        (
+            "Vigilance\nWhenever you attack, you create a Food token for each player being attacked. (It's an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\n{W}, {T}, Tap X untapped Foods you control: Create X 1/1 white Human creature tokens.",
+            "Apothecary White",
+            &["Food", "Vigilance"],
+            &["Creature"],
+            &["Human", "Cleric"],
+            0,
+            vec![TypeFilter::Subtype(String::from("Food"))],
+            vec![],
+        ),
+        (
+            "Vigilance\n{2}{W}, {T}: Create a 2/2 white Knight creature token with vigilance.\n{B}, {T}, Tap X untapped Knights you control: Destroy target creature with power X or less.",
+            "Aryel, Knight of Windgrace",
+            &["Vigilance"],
+            &["Creature"],
+            &["Human", "Knight"],
+            1,
+            vec![TypeFilter::Subtype(String::from("Knight"))],
+            vec![],
+        ),
+        (
+            "Ultima Founding — {T}, Tap two untapped artifacts you control: Create a 2/2 white Astartes Warrior creature token with vigilance.\nMaster of Machines — {T}, Tap X untapped creatures you control: Look at the top X cards of your library. You may reveal an artifact card from among them and put it into your hand. Put the rest on the bottom of your library in a random order.",
+            "Belisarius Cawl",
+            &["Master of Machines", "Ultima Founding"],
+            &["Artifact", "Creature"],
+            &["Human"],
+            1,
+            vec![TypeFilter::Creature],
+            vec![],
+        ),
+        (
+            "{T}, Tap X untapped artifacts you control: Look at the top X cards of your library. Put one of those cards into your hand and the rest into your graveyard.\nPartner (You can have two commanders if both have partner.)",
+            "Glacian, Powerstone Engineer",
+            &["Partner"],
+            &["Creature"],
+            &["Human", "Artificer"],
+            0,
+            vec![TypeFilter::Artifact],
+            vec![],
+        ),
+        (
+            "{T}, Pay 2 life, Tap X untapped tokens you control: Add X mana in any combination of colors.\nAt the beginning of your end step, create a token that's a copy of target token you control. If that token is a Squirrel, instead create two tokens that are copies of it.",
+            "Hazel of the Rootbloom",
+            &[],
+            &["Creature"],
+            &["Squirrel", "Druid"],
+            0,
+            vec![],
+            vec![FilterProp::Token],
+        ),
+        (
+            "{3}{U}, {T}, Tap X untapped artifacts you control: Look at the top X cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.",
+            "Merchant's Dockhand",
+            &[],
+            &["Artifact", "Creature"],
+            &["Construct"],
+            0,
+            vec![TypeFilter::Artifact],
+            vec![],
+        ),
+        (
+            "Relentless March — {X}, {T}, Tap X untapped artifacts you control: Target opponent loses X life.",
+            "Necron Overlord",
+            &["Relentless March"],
+            &["Artifact", "Creature"],
+            &["Necron", "Noble"],
+            0,
+            vec![TypeFilter::Artifact],
+            vec![],
+        ),
+        (
+            "Flying\nWhen this creature enters, you may discard a card. If you do, investigate twice.\n{T}, Tap X untapped artifacts you control: Copy target instant or sorcery spell you control with mana value X. You may choose new targets for the copy.",
+            "Resonance Technician",
+            &["Flying", "Investigate"],
+            &["Creature"],
+            &["Weird", "Detective"],
+            0,
+            vec![TypeFilter::Artifact],
+            vec![],
+        ),
+        (
+            "{T}: Add {C}.\n{2}, {T}, Tap X untapped artifacts you control: Target creature gets +X/+0 until end of turn. Activate only as a sorcery.\n{5}, {T}: Create a 2/2 colorless Robot artifact creature token.",
+            "Secluded Starforge",
+            &[],
+            &["Land"],
+            &[],
+            1,
+            vec![TypeFilter::Artifact],
+            vec![],
+        ),
+    ];
+    for (oracle, name, keywords, types, subtypes, index, type_filters, properties) in cases {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &keywords
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+            &types
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+            &subtypes
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+        );
+        let ability = &parsed.abilities[index];
+        let Some(AbilityCost::Composite { costs }) = ability.cost.as_ref() else {
+            panic!("{name}: expected a composite activation cost");
+        };
+        assert_eq!(
+            costs.last(),
+            Some(&AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::AnnouncedX,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }),
+            }),
+            "{name}"
+        );
+        let wire = serde_json::to_value(costs.last().unwrap()).unwrap();
+        assert_eq!(
+            wire["requirement"],
+            serde_json::json!({"requirement": "announced_x"}),
+            "{name}"
+        );
+        if name == "Belisarius Cawl" {
+            let Some(AbilityCost::Composite { costs }) = &parsed.abilities[0].cost else {
+                panic!("Ultima Founding must keep both cost legs");
+            };
+            assert!(matches!(
+                costs.as_slice(),
+                [
+                    AbilityCost::Tap,
+                    AbilityCost::TapCreatures {
+                        requirement: TapCreaturesRequirement::Count { count: 2 },
+                        ..
+                    }
+                ]
+            ));
+        }
+        if name == "Secluded Starforge" {
+            assert_eq!(
+                ability.activation_restrictions,
+                [crate::types::ability::ActivationRestriction::AsSorcery],
+            );
+        }
+    }
+}
+
+#[test]
+fn printed_attack_tap_x_is_bound_by_resolution_payment() {
+    use crate::types::ability::{TapCreaturesRequirement, TypeFilter};
+
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [&'a str],
+        TypeFilter,
+    );
+    let cases: [Case<'_>; 2] = [
+        (
+            "When this creature enters, create four 1/1 colorless Myr artifact creature tokens.\nWhenever this creature attacks, you may tap X untapped Myr you control. If you do, this creature gets +X/+0 until end of turn and deals X damage to the player or planeswalker it's attacking.",
+            "Myr Battlesphere",
+            &[],
+            &["Artifact", "Creature"],
+            &["Myr", "Construct"],
+            TypeFilter::Subtype(String::from("Myr")),
+        ),
+        (
+            "When Battle Myrsphere enters the battlefield, reveal cards from the top of your library until you reveal a battle card. Put it onto the battlefield, and the rest on the bottom of your library in a random order.\nWhenever Battle Myrsphere attacks, you may tap X untapped battles you control (so they're oriented like a regular Magic card). If you do, Battle Myrsphere gets +X/+0 until end of turn and deals X damage to the player or permanent.",
+            "Battle Myrsphere",
+            &[],
+            &["Artifact", "Creature"],
+            &["Phyrexian", "Myr"],
+            TypeFilter::Battle,
+        ),
+    ];
+    for (oracle, name, keywords, types, subtypes, type_filter) in cases {
+        let parsed = parse_oracle_text(
+            oracle,
+            name,
+            &keywords
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+            &types
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+            &subtypes
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>(),
+        );
+        let attack = parsed.triggers[1].execute.as_deref().unwrap();
+        let Effect::PayCost { cost, payer, .. } = &*attack.effect else {
+            panic!("{name}: expected the attack trigger to request payment");
+        };
+        assert_eq!(
+            cost,
+            &AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::ResolutionX,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![type_filter],
+                    controller: Some(ControllerRef::You),
+                    properties: vec![],
+                }),
+            },
+            "{name}"
+        );
+        assert_eq!(payer, &TargetFilter::Controller, "{name}");
+        assert!(attack.optional, "{name}");
+        let pump = attack.sub_ability.as_deref().unwrap();
+        assert_eq!(pump.condition, Some(AbilityCondition::effect_performed()));
+        assert_eq!(pump.duration, Some(Duration::UntilEndOfTurn));
+        assert!(
+            matches!(
+                &*pump.effect,
+                Effect::Pump {
+                    power: PtValue::Variable(value),
+                    toughness: PtValue::Fixed(0),
+                    target: TargetFilter::SelfRef,
+                } if value == "X"
+            ),
+            "{name}"
+        );
+        let damage = pump.sub_ability.as_deref().unwrap();
+        assert!(
+            matches!(
+                &*damage.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref { qty: QuantityRef::Variable { name: variable } },
+                    ..
+                } if variable == "X"
+            ),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn malformed_symbolic_tap_cost_keeps_the_failed_leg_and_parses_its_sibling() {
+    use crate::types::ability::TapCreaturesRequirement;
+
+    // Grammar-only mutations of Secluded Starforge. No printed activation
+    // has these malformed tap clauses. Keep its printed mana ability as the
+    // adjacent reach guard through the full Oracle entry point.
+    for tap_cost in [
+        "Tap X untapped artifacts you control with hypothetically",
+        "Tap X untapped you control",
+        "Tap up to X untapped artifacts you control",
+    ] {
+        let parsed = parse_oracle_text(
+            &format!("{{T}}: Add {{C}}.\n{{2}}, {{T}}, {tap_cost}: Target creature gets +X/+0 until end of turn. Activate only as a sorcery."),
+            "Secluded Starforge",
+            &[],
+            &[String::from("Land")],
+            &[],
+        );
+        assert!(matches!(parsed.abilities[0].cost, Some(AbilityCost::Tap)));
+        assert!(matches!(&*parsed.abilities[0].effect, Effect::Mana { .. }));
+        let Some(AbilityCost::Composite { costs }) = &parsed.abilities[1].cost else {
+            panic!("expected composite activation cost for {tap_cost}");
+        };
+        assert!(
+            matches!(
+                costs.last(),
+                Some(AbilityCost::Unimplemented { description }) if description == tap_cost
+            ),
+            "{tap_cost}: {costs:?}"
+        );
+    }
+
+    assert!(matches!(
+        super::super::oracle_cost::parse_oracle_cost("Tap X untapped artifacts you control"),
+        AbilityCost::Unimplemented { .. }
+    ));
+    let AbilityCost::TapCreatures {
+        requirement: TapCreaturesRequirement::AnnouncedX,
+        filter: TargetFilter::Typed(filter),
+    } = parse_activation_cost("Tap X other untapped artifacts you control")
+    else {
+        panic!("expected source-excluding symbolic tap requirement");
+    };
+    assert!(filter.properties.contains(&FilterProp::Another));
+
+    let gridlock = parse_oracle_text(
+        "Tap X target nonland permanents.",
+        "Gridlock",
+        &[],
+        &[String::from("Instant")],
+        &[],
+    );
+    assert!(matches!(
+        &*gridlock.abilities[0].effect,
+        Effect::SetTapState { .. }
+    ));
+    assert!(gridlock.abilities[0].cost.is_none());
+}

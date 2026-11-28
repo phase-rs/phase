@@ -67,6 +67,19 @@ created card definitions.
 - **Removal trigger:** the tripwire const fails the build once the workspace minor version passes 0.140.
 - **Source:** `crates/phase-ast/src/types/ability.rs` (`_LEGACY_SPELLS_CAST_LAST_TURN_2026Q4`).
 
+### `LEGACY_TAP_COUNT_X_2026Q4`
+
+- **Covers:** numeric and tagged tap counts of `u32::MAX` in activated
+  ability definitions and resolution `PayCost` effects. The owning field
+  determines whether the checkpoint or card definition reads an announced X
+  or a resolution selection. Existing numeric fixed counts still decode as
+  fixed counts through the `count` alias.
+- **Added in:** 0.135.0.
+- **Removal trigger:** the compile-time check fails after 0.149.x.
+- **Source:** `crates/phase-ast/src/types/ability.rs:22096`
+  (`_LEGACY_TAP_COUNT_X_2026Q4`). The checkpoint decoder checks the phase
+  and continuation before accepting a parked variable tap selection.
+
 ## Removed shims
 
 ### `LEGACY_DESER_ETB_CONTROLLER_2026Q2` — REMOVED in v0.1.54

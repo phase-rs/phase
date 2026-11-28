@@ -26946,7 +26946,7 @@ pub(crate) use super::casting_targets::{
 /// Activate an ability from a permanent on the battlefield.
 /// Check whether an ability cost includes a tap component (either directly or
 /// within a composite). Used for pre-validation before presenting modal choices.
-fn requires_untapped(cost: &AbilityCost) -> bool {
+pub(super) fn requires_untapped(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
         AbilityCost::Composite { costs } => costs.iter().any(requires_untapped),
@@ -30840,6 +30840,18 @@ pub(crate) fn can_pay_ability_cost_now(
             can_pay_ability_mana_cost_after_auto_tap(state, player, source_id, ability_index, &mana)
         });
     }
+    if casting_costs::activation_has_announced_tap_count(cost)
+        && !casting_costs::activation_mana_window_is_static(state, player)
+    {
+        let (mana, residual) = split_alt_cost_components(cost);
+        if mana.is_some_and(|cost| !cost.is_without_paying_mana()) {
+            // CR 601.2g: a dynamic mana window can change which objects can
+            // supply mana. Commit the final total only after that window.
+            return residual.is_none_or(|cost| {
+                cost.is_payable_for_activation(state, player, source_id, ability_index)
+            });
+        }
+    }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
         super::costs::can_pay(
@@ -32941,6 +32953,19 @@ fn ensure_x_locked_activation_payable(
     let pending = state.pending_cast.as_deref().ok_or_else(|| {
         EngineError::InvalidAction("an X-locked activation must be pending".to_string())
     })?;
+    if !pending.cost.is_without_paying_mana()
+        && pending
+            .activation_cost
+            .as_ref()
+            .and_then(find_tap_creatures_cost)
+            .is_some()
+        && !casting_costs::activation_mana_window_is_static(state, player)
+    {
+        // CR 601.2g-h: a held tapper can still become available during the mana
+        // window (an untap mana ability such as Pili-Pala's). The concrete
+        // total is checked when payment is attempted.
+        return Ok(());
+    }
     let mana_obligation = selected_mana_obligation(pending, &pending.cost);
     let whole_cost = activation_x_whole_cost(pending);
     // CR 601.2g + CR 119.4: life in the locked total is judged by the life the
@@ -33297,7 +33322,9 @@ fn activate_with_cost_carrier(
             // X counters, pay X energy) changes no mana and locks here.
             let point = if may_gain_target_gated_modifiers(state, &ability_def, player, source_id) {
                 ActivationCostLockPoint::TargetSettlement
-            } else if casting_costs::extract_x_mana_cost(&base_cost).is_some() {
+            } else if casting_costs::extract_x_mana_cost(&base_cost).is_some()
+                || casting_costs::activation_has_announced_tap_count(&base_cost)
+            {
                 ActivationCostLockPoint::XAnnounced
             } else {
                 ActivationCostLockPoint::Announcement
@@ -33444,7 +33471,8 @@ fn activate_with_cost_carrier(
             let base_cost = snapshot.base_cost.clone();
             let announces_alternative = one_of_branch_has_native_phyrexian(&base_cost);
             // A mana `{X}` is announced before the symbols, on the X root.
-            let announces_after_x = casting_costs::extract_x_mana_cost(&base_cost).is_some();
+            let announces_after_x = casting_costs::extract_x_mana_cost(&base_cost).is_some()
+                || casting_costs::activation_has_announced_tap_count(&base_cost);
             if !announces_after_x
                 && (announces_alternative
                     || !manual_native_phyrexian_domain(payment_mode, &base_cost).is_empty())
@@ -33827,7 +33855,9 @@ fn activate_with_cost_carrier(
             // fall-through `pay_ability_cost_for_activation` no-op — the same
             // class of bug the `XMana` residual gate already documents for
             // the mana-{X} case).
-            if pending_x
+            if pending_x.cost.has_x() || casting_costs::activation_has_announced_tap_count(cost) {
+                pending_x.activation_residual = ActivationResidual::XMana;
+            } else if pending_x
                 .activation_cost
                 .as_ref()
                 .is_some_and(|c| find_non_self_battlefield_removal_cost(c).is_some())
@@ -34345,14 +34375,11 @@ fn activate_with_cost_carrier(
             // `Err`) whenever a `TapCreatures` leg exists anywhere in the cost, so
             // every such cost is intercepted there before this branch can run —
             // structurally, for every card, not just for the X-sentinel ones.
-            // Deliberately left behaviorally as-is: its bounds are *not* corrected
-            // for the CR 107.3a X-sentinel, because an unreachable branch cannot
-            // carry a non-vacuous regression test.
             if let Some((requirement, filter)) = find_tap_creatures_cost(cost) {
                 // CR 602.1a: Activated-ability tap costs are fixed-count today
                 // (Convoke-style). The aggregate "total power N" form is reserved for
                 // Crew/Saddle/Teamwork, which are not dispatched through this path.
-                let mode = requirement.selection_mode();
+                let mode = crate::types::ability::TapCreaturesSelectionMode::Fixed;
                 let count = requirement.fixed_count().ok_or_else(|| {
                     EngineError::ActionNotAllowed(
                         "Aggregate-power tap cost is not valid for this activation".into(),
@@ -34386,7 +34413,7 @@ fn activate_with_cost_carrier(
                     kind: PayCostKind::TapCreatures { mode },
                     choices: eligible,
                     count: count as usize,
-                    min_count: 0,
+                    min_count: count as usize,
                     resume: CostResume::Spell {
                         spell: Box::new(pending_tap),
                     },
@@ -37117,14 +37144,19 @@ fn lock_activation_cost_at_settlement(
     // before this lock, so the action boundary's typed reversal restores the
     // state before the action and returns priority.
     let life = ActivationLifeWindow::for_payment_mode(player, source_id, pending.payment_mode);
-    if !can_pay_ability_cost_now(
-        state,
-        player,
-        source_id,
-        &cheapest,
-        Some(ability_index),
-        &life,
-    ) {
+    let mana_window_for_tap_payment = pending.ability.chosen_x.is_some()
+        && find_tap_creatures_cost(&cheapest).is_some()
+        && !activation_mana_component(&cheapest).is_without_paying_mana();
+    if !mana_window_for_tap_payment
+        && !can_pay_ability_cost_now(
+            state,
+            player,
+            source_id,
+            &cheapest,
+            Some(ability_index),
+            &life,
+        )
+    {
         return Err(EngineError::ActivationReversed { player });
     }
     let native = pending

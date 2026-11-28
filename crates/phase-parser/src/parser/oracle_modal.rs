@@ -20,7 +20,7 @@ use crate::types::triggers::TriggerMode;
 
 use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_classifier::has_trigger_prefix;
-use super::oracle_cost::{parse_oracle_cost, parse_oracle_cost_in};
+use super::oracle_cost::{parse_activation_cost, parse_oracle_cost_in};
 #[cfg(test)]
 use super::oracle_effect::lower_ability_ir;
 use super::oracle_effect::{
@@ -1291,7 +1291,7 @@ pub(crate) fn lower_oracle_block_ir(
                 modes: parse_modal_mode_irs(None, &modes, AbilityKind::Activated, ctx),
             };
             let mut ability = modal_marker_ir(&header, AbilityKind::Activated, payload, ctx);
-            ability.shell.cost = Some(parse_oracle_cost(&cost_text));
+            ability.shell.cost = Some(parse_activation_cost(&cost_text));
             ability.shell.activation_restrictions = constraints.restrictions;
             OracleBlockIr::Activated(ability)
         }
@@ -1742,7 +1742,7 @@ pub(crate) fn lower_oracle_block(
         } => {
             let mut def =
                 build_modal_ability(AbilityKind::Activated, &header, &modes, host_self_reference)
-                    .cost(parse_oracle_cost(&cost_text));
+                    .cost(parse_activation_cost(&cost_text));
             def.activation_restrictions = constraints.restrictions;
             result.abilities.push(def);
         }

@@ -122,6 +122,31 @@ describe("PayAmountChoiceUI — sanitized amount entry", () => {
     cleanup();
   });
 
+  it("announces X within the engine's tap count bound", () => {
+    const { dispatch } = renderPrompt(
+      buildPayAmountChoiceWaitingFor({
+        data: {
+          player: 0,
+          resource: { type: "TapCountX" },
+          min: 0,
+          max: 2,
+          source_id: 0,
+        },
+      }),
+    );
+    expect(screen.getByRole("heading", { name: "Choose a value for X" })).toBeInTheDocument();
+    const input = screen.getByLabelText("Enter X value");
+    fireEvent.change(input, { target: { value: "3" } });
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm X = 2" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "SubmitPayAmount",
+      data: { amount: 2 },
+    });
+  });
+
   it("T1/reach: a valid entry enables commit and dispatches exactly what was typed", () => {
     const { dispatch } = renderPrompt(loopCollapseWaitingFor("Tokens"));
 

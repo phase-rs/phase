@@ -499,6 +499,7 @@ mod wrens_run_vanquisher_reveal_cost;
 mod x_announcement_target_constraints;
 mod x_mana_sacrifice_residual;
 mod x_prevention_amount;
+mod x_tap_activation;
 mod xantid_swarm_defending_player_cant_cast;
 mod xathrid_demon_sacrifice_fallback;
 mod xu_ifit_with_entry_ability_removal;
@@ -516,3 +517,5 @@ mod zhulodok_double_cascade;
 mod zilortha_lethal_damage_by_power;
 mod zimone_all_questioning;
 mod zone_change_reflexive_this_way;
+
+mod x_tap_restore;

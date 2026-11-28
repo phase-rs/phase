@@ -9,7 +9,7 @@
 //! - Trigger body (`when`, `whenever`, `at the beginning`) → routed through
 //!   `parse_trigger_lines`.
 //! - Activated ability body (with structural colon) → routed through
-//!   `parse_oracle_cost` + `parse_effect_chain` like LEVEL blocks, and gated
+//!   `parse_activation_cost` + `parse_effect_chain` like LEVEL blocks, and gated
 //!   with a new `ActivationRestriction::CounterThreshold`.
 //!
 //! Mirrors `parse_level_blocks` in `oracle_level.rs` — the two patterns share
@@ -25,7 +25,7 @@ use nom::combinator::value;
 use nom::Parser;
 
 use super::oracle::{find_activated_colon, has_unimplemented, strip_activated_constraints};
-use super::oracle_cost::parse_oracle_cost;
+use super::oracle_cost::parse_activation_cost;
 use super::oracle_effect::parse_effect_chain_with_provenance;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::PrintedTriggerIndex;
@@ -232,7 +232,7 @@ impl ThresholdParser<'_> {
             let effect_text = body[colon_pos + 1..].trim();
             let (effect_text, constraints) = strip_activated_constraints(effect_text);
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, self.card_name);
-            let cost = parse_oracle_cost(&normalized_cost_text);
+            let cost = parse_activation_cost(&normalized_cost_text);
 
             let mut lowered =
                 parse_effect_chain_with_provenance(&effect_text, AbilityKind::Activated);

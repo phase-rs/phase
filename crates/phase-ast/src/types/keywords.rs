@@ -135,7 +135,6 @@ mod replicate_pay_energy {
 #[cfg(test)]
 mod replicate_codec_tests {
     use super::*;
-    use crate::types::ability::TapCreaturesSelectionMode;
     use crate::types::statics::StaticMode;
     use serde_json::json;
 
@@ -243,20 +242,16 @@ mod replicate_codec_tests {
     }
 
     #[test]
-    fn replicate_payload_leaves_legacy_tap_x_and_numeric_blight_decodable() {
-        let tap: AbilityCost = serde_json::from_value(json!({
+    fn replicate_payload_leaves_legacy_tap_x_owner_scoped_and_numeric_blight_decodable() {
+        // CR 107.3a + CR 107.3f: a bare legacy tap-X sentinel can't say whether
+        // X was announced or chosen at resolution, so a standalone cost refuses
+        // it. Its owning ability decodes it (see LEGACY_TAP_COUNT_X_2026Q4).
+        let tap = serde_json::from_value::<AbilityCost>(json!({
             "type": "TapCreatures",
             "count": u32::MAX,
             "filter": { "type": "Typed", "type_filters": ["Creature"], "controller": "You" }
-        }))
-        .unwrap();
-        let AbilityCost::TapCreatures { requirement, .. } = tap else {
-            panic!("Expected the legacy tap cost");
-        };
-        assert_eq!(
-            requirement.selection_mode(),
-            TapCreaturesSelectionMode::VariableX
-        );
+        }));
+        assert!(tap.is_err());
         let blight: AbilityCost =
             serde_json::from_value(json!({"type": "Blight", "count": 2})).unwrap();
         assert_eq!(

@@ -1111,6 +1111,80 @@ pub(crate) fn activation_residual_jointly_payable(
     )
 }
 
+/// CR 118.3 + CR 601.2h: Validate a complete selected tap set against
+/// the other unpaid object legs without staging any mutations.
+pub(super) fn activation_tap_selection_leaves_joint_payment(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    residual: &AbilityCost,
+    selected: &[ObjectId],
+) -> bool {
+    fn collect_tap_legs<'a>(
+        cost: &'a AbilityCost,
+        tap_legs: &mut Vec<(&'a AbilityCost, usize, &'a TargetFilter)>,
+    ) {
+        match cost {
+            AbilityCost::Composite { costs } => {
+                for leg in costs {
+                    collect_tap_legs(leg, tap_legs);
+                }
+            }
+            AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::Count { count },
+                filter,
+            } if *count > 0 => tap_legs.push((cost, *count as usize, filter)),
+            _ => {}
+        }
+    }
+    let mut legs = Vec::new();
+    collect_object_cost_legs(
+        state,
+        player,
+        source,
+        granting_object,
+        residual,
+        CostSourceRole::AbilitySource,
+        ExileCostPopulation::PayerZones,
+        &mut legs,
+    );
+    let mut tap_legs = Vec::new();
+    collect_tap_legs(residual, &mut tap_legs);
+    let source_reserved = super::casting::requires_untapped(residual);
+    if source_reserved
+        && !state.objects.get(&source).is_some_and(|object| {
+            object.zone == Zone::Battlefield
+                && object.controller == player
+                && !object.tapped
+                && !super::restrictions::object_cant_tap(state, source)
+        })
+    {
+        return false;
+    }
+    for (leaf, count, filter) in tap_legs {
+        legs.push(ObjectCostLeg {
+            leaf,
+            demand: ObjectLegDemand::Exactly(count),
+            coverage: ObjectLegCoverage::AssignmentOnly,
+            candidates: tap_creature_candidates(
+                state,
+                player,
+                source,
+                granting_object,
+                filter,
+                source_reserved,
+                ManaActivationPurpose::Planning,
+            )
+            .collect(),
+        });
+    }
+    for leg in &mut legs {
+        leg.candidates.retain(|id| !selected.contains(id));
+    }
+    object_legs_have_joint_assignment(&legs)
+}
+
 /// CR 118.3 + CR 601.2h + CR 602.2b: Narrows a surfaced activation-cost prompt
 /// to the objects that still let every other unpaid object-using leg be paid
 /// with distinct objects. With one Overgrown Tomb and one basic Swamp, "Sacrifice
@@ -2233,17 +2307,10 @@ fn has_enough_tap_creatures(
         purpose,
     );
     match requirement {
-        // CR 107.3a + CR 601.2b: X in a "Tap X untapped [type] you control" cost
-        // is chosen during announcement, and X=0 is always legal (mirrors the
-        // `AbilityCost::Exile` `EXILE_COST_X` early-return above and Sacrifice's
-        // `sacrifice_cost_bounds` floor) — the pre-announcement affordability
-        // gate must not treat the `u32::MAX` X-sentinel as a literal count that
-        // can never be satisfied.
-        TapCreaturesRequirement::Count { count } => {
-            let eligible_count = eligible.count();
-            let (min_count, _) = super::casting::sacrifice_cost_bounds(*count, eligible_count);
-            eligible_count >= min_count
-        }
+        TapCreaturesRequirement::Count { count } => eligible.count() >= *count as usize,
+        // CR 107.3a + CR 601.2b: the offer precedes the announcement.
+        TapCreaturesRequirement::AnnouncedX => true,
+        TapCreaturesRequirement::ResolutionX => false,
         TapCreaturesRequirement::Aggregate {
             stat: TapCreaturesAggregateStat::TotalPower,
             comparator,
@@ -2264,7 +2331,7 @@ fn has_enough_tap_creatures(
 
 /// CR 601.2b: the untapped, filter-matching permanents `player` controls that a
 /// `TapCreatures` cost can tap. "You" in a cost is the cost's payer (CR 109.5).
-fn tap_creature_candidates<'a>(
+pub(super) fn tap_creature_candidates<'a>(
     state: &'a GameState,
     player: PlayerId,
     source: ObjectId,
@@ -2321,22 +2388,20 @@ pub(super) fn reservable_battlefield_legs(
             filter,
         } = leg
         {
-            if *count != u32::MAX {
-                reservable.push(ReservableLeg {
-                    reserved_use: super::casting::ReservedUse::Untapped,
-                    count: *count as usize,
-                    candidates: tap_creature_candidates(
-                        state,
-                        player,
-                        source,
-                        None,
-                        filter,
-                        false,
-                        ManaActivationPurpose::Planning,
-                    )
-                    .collect(),
-                });
-            }
+            reservable.push(ReservableLeg {
+                reserved_use: super::casting::ReservedUse::Untapped,
+                count: *count as usize,
+                candidates: tap_creature_candidates(
+                    state,
+                    player,
+                    source,
+                    None,
+                    filter,
+                    false,
+                    ManaActivationPurpose::Planning,
+                )
+                .collect(),
+            });
             continue;
         }
         let mut object_legs = Vec::new();

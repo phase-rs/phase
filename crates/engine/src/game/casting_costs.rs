@@ -2196,6 +2196,161 @@ pub enum ReservationVerdict {
 /// [`ReservationVerdict::Exhausted`].
 pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
 
+/// CR 118.3 + CR 601.2g-h: limit mana checks made to reserve counted
+/// activation tap legs. An exhausted search leaves the manual route open.
+const ACTIVATION_TAP_PROBE_BUDGET: usize = 32;
+
+/// CR 601.2g + CR 107.6: the mana window can change which permanents are
+/// untapped only when the payer controls a mana ability with the untap symbol
+/// (Pili-Pala's "{2}, {Q}: Add one mana of any color"). Every other board keeps
+/// the ordinary planner-backed bounds: the mana leg's affordability, the
+/// `max_x_value` cap and an untapped-only helper count.
+pub(super) fn activation_mana_window_is_static(state: &GameState, player: PlayerId) -> bool {
+    !state.battlefield.iter().any(|id| {
+        state.objects.get(id).is_some_and(|object| {
+            object.controller == player
+                && object.abilities.iter().any(|ability| {
+                    mana_abilities::is_mana_ability(ability)
+                        && super::mana_sources::has_untap_component(&ability.cost)
+                })
+        })
+    })
+}
+
+fn tighten_activation_tap_x_max(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    exclusions: &HashSet<ObjectId>,
+    min: u32,
+    max: u32,
+) -> u32 {
+    let Some(residual) = pending
+        .activation_cost
+        .as_ref()
+        .filter(|cost| activation_has_announced_tap_count(cost))
+    else {
+        return max;
+    };
+    let mut scratch;
+    let state = if state.layers_dirty.is_dirty() {
+        scratch = state.clone();
+        super::layers::flush_layers(&mut scratch);
+        &scratch
+    } else {
+        state
+    };
+    if pending.cost.is_without_paying_mana()
+        || !activation_mana_window_is_static(state, player)
+        || pending
+            .activation_cost_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                !snapshot.reductions.is_empty()
+                || matches!(snapshot.lock, crate::types::casting_costs::ActivationCostLock::Open {
+                    point: crate::types::casting_costs::ActivationCostLockPoint::TargetSettlement,
+                })
+            })
+    {
+        return max;
+    }
+    let mut explored = 0;
+    let mut quote = pending.clone();
+    for x in (min..=max).rev().take(ACTIVATION_TAP_PROBE_BUDGET) {
+        if explored >= ACTIVATION_TAP_PROBE_BUDGET {
+            break;
+        }
+        let mut mana = pending.cost.clone();
+        mana.concretize_x(x);
+        quote.activation_cost = Some(bind_activation_tap_count(residual, x));
+        if activation_tap_mana_exclusions(state, player, &quote, &mana, exclusions, &mut explored)
+            .is_some()
+        {
+            return x;
+        }
+    }
+    max
+}
+
+/// When an automatic plan is known, reserve a disjoint assignment for the
+/// written taps by excluding its members from automatic mana-source use.
+fn activation_tap_mana_exclusions(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    mana: &ManaCost,
+    source_excluded: &HashSet<ObjectId>,
+    explored: &mut usize,
+) -> Option<HashSet<ObjectId>> {
+    let residual = pending.activation_cost.as_ref()?;
+    let legs = match residual {
+        AbilityCost::Composite { costs } => costs.as_slice(),
+        leaf => std::slice::from_ref(leaf),
+    };
+    let reservable =
+        super::cost_payability::reservable_battlefield_legs(state, player, pending.object_id, legs);
+    if reservable.is_empty() {
+        return Some(source_excluded.clone());
+    }
+    let mana_sources: HashSet<_> =
+        super::mana_sources::activatable_mana_source_selections(state, player)
+            .iter()
+            .map(|selection| selection.source.object_id)
+            .collect();
+    let reach = super::mana_sources::player_mana_ability_reach(state, player);
+    let all_interact = reach.other_objects != super::mana_sources::OtherObjectUse::None
+        || reach.production == super::mana_sources::ProductionAmount::BoardDependent;
+    let activation_context = super::casting::activation_payment_context(
+        state,
+        pending.object_id,
+        pending.activation_ability_index,
+    );
+    let pool_can_pay = mana_payment::select_mana_payment(
+        &state.players[player.0 as usize].mana_pool,
+        mana,
+        None,
+        Some(&activation_context.as_payment_context()),
+        None,
+        None,
+        crate::types::mana::LifePaymentColors::EMPTY,
+        &[],
+    )
+    .is_ok_and(|(_, life)| life.is_empty());
+    if all_interact && !pool_can_pay {
+        return None;
+    }
+    let mut held: Vec<_> = source_excluded
+        .iter()
+        .map(|id| (*id, super::casting::ReservedUse::Untapped))
+        .collect();
+    let witness = std::cell::RefCell::new(None);
+    assign_reserved_legs(
+        &reservable,
+        &|id| !all_interact && !mana_sources.contains(&id),
+        &mut held,
+        explored,
+        ACTIVATION_TAP_PROBE_BUDGET,
+        &|held| {
+            let excluded: HashSet<_> = held.iter().map(|(id, _)| *id).collect();
+            if !pool_can_pay
+                && !super::casting::can_pay_ability_mana_cost_after_auto_tap_excluding(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.activation_ability_index,
+                    mana,
+                    &excluded,
+                )
+            {
+                return false;
+            }
+            witness.replace(Some(excluded));
+            true
+        },
+    );
+    witness.into_inner()
+}
+
 /// The most assignments a search over an additional cost's hand and graveyard
 /// cards explores. Each one runs the mana feasibility authority, which copies
 /// the state, and the search runs for every contended spell whenever the legal
@@ -5884,15 +6039,17 @@ fn validate_deferred_spell_tap_reservations(
                     filter,
                 );
                 let n = tap.object_ids.len();
-                let mode = requirement.selection_mode();
+                let Some(mode) = requirement.selection_mode() else {
+                    // CR 107.3a: an unannounced tap X can't hold a reservation.
+                    return false;
+                };
                 let count = match requirement {
-                    crate::types::ability::TapCreaturesRequirement::Count { count }
-                        if mode == TapCreaturesSelectionMode::Fixed =>
-                    {
+                    crate::types::ability::TapCreaturesRequirement::Count { count } => {
                         *count as usize
                     }
-                    crate::types::ability::TapCreaturesRequirement::Count { .. }
+                    crate::types::ability::TapCreaturesRequirement::ResolutionX
                     | crate::types::ability::TapCreaturesRequirement::Aggregate { .. } => n,
+                    crate::types::ability::TapCreaturesRequirement::AnnouncedX => return false,
                 };
                 validate_tap_creatures_selection(
                     state,
@@ -5918,14 +6075,15 @@ fn validate_deferred_spell_tap_structure(pending: &PendingCast) -> Result<(), En
     let mut seen = std::collections::BTreeSet::new();
     for tap in &pending.deferred_tapped_permanents {
         let valid_count = match super::casting::find_tap_creatures_cost(&tap.cost) {
-            Some((TapCreaturesRequirement::Count { count }, _)) if *count != u32::MAX => {
+            Some((TapCreaturesRequirement::Count { count }, _)) => {
                 tap.object_ids.len() == *count as usize
             }
             Some((
-                TapCreaturesRequirement::Count { .. } | TapCreaturesRequirement::Aggregate { .. },
+                TapCreaturesRequirement::ResolutionX | TapCreaturesRequirement::Aggregate { .. },
                 _,
             )) => true,
-            None => false,
+            // CR 107.3a: an unannounced tap X never holds a reservation.
+            Some((TapCreaturesRequirement::AnnouncedX, _)) | None => false,
         };
         if !valid_count || tap.object_ids.iter().any(|id| !seen.insert(*id)) {
             return Err(invalid_deferred_spell_tap());
@@ -8192,7 +8350,7 @@ pub(crate) fn pay_tap_creatures_selection(
 
 /// CR 601.2b + CR 118.3: Validate a tap-creatures selection against the cost's
 /// requirement shape and the offered creatures, without tapping anything.
-fn validate_tap_creatures_selection(
+pub(super) fn validate_tap_creatures_selection(
     state: &GameState,
     min_count: usize,
     count: usize,
@@ -8200,34 +8358,22 @@ fn validate_tap_creatures_selection(
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
 ) -> Result<(), EngineError> {
-    // CR 601.2b: Validate the chosen set against the cost's requirement shape.
-    // `Fixed`/`VariableX` are the count-bounded forms (tap a count within
-    // [min_count, count]); `Aggregate(a)` is the Crew/Saddle/Teamwork form (tap
-    // any number whose total signed power, CR 107.1b + CR 208.1, satisfies the
-    // advertised comparator vs `a.value`). Bounds/aggregate-satisfaction is checked first,
-    // mirroring `handle_sacrifice_for_cost` and
-    // `handle_tap_creatures_for_mana_ability` — the same-mechanism sibling that
-    // validates this exact `TapCreaturesSelectionMode` type for the mana-ability
-    // leg of the same cost.
     match mode {
-        // CR 107.3a: `min_count < count` only for the X-sentinel shape ("Tap X
-        // untapped [type] you control"), where X is chosen freely by the
-        // controller within [min_count, count]. A fixed (non-X) requirement
-        // still has min_count == count, so this subsumes the prior
-        // exact-match behavior unchanged for every existing card.
-        TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX => {
-            if chosen.len() < min_count || chosen.len() > count {
-                let requirement = if min_count == count {
-                    format!("exactly {count} creature(s)")
-                } else {
-                    format!("between {min_count} and {count} creature(s)")
-                };
-                return Err(EngineError::InvalidAction(format!(
-                    "Must tap {requirement}, got {}",
-                    chosen.len()
-                )));
-            }
+        TapCreaturesSelectionMode::Fixed if chosen.len() != count => {
+            return Err(EngineError::InvalidAction(format!(
+                "Must tap exactly {count} creature(s), got {}",
+                chosen.len()
+            )));
         }
+        TapCreaturesSelectionMode::VariableX
+            if chosen.len() < min_count || chosen.len() > count =>
+        {
+            return Err(EngineError::InvalidAction(format!(
+                "Must tap between {min_count} and {count} creature(s), got {}",
+                chosen.len()
+            )));
+        }
+        TapCreaturesSelectionMode::Fixed | TapCreaturesSelectionMode::VariableX => {}
         TapCreaturesSelectionMode::Aggregate(aggregate) => {
             let total_power = tap_creatures_signed_total_power(state, chosen);
             if !aggregate.satisfied_by(total_power) {
@@ -8293,6 +8439,39 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
     paid_cost: Option<SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    if pending.activation_ability_index.is_some() && mode == TapCreaturesSelectionMode::VariableX {
+        return Err(EngineError::InvalidAction(
+            "Activation tap count must be announced first".into(),
+        ));
+    }
+    if pending.activation_ability_index.is_some()
+        && !chosen.iter().all(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.zone == Zone::Battlefield && object.controller == player && !object.tapped
+            })
+        })
+    {
+        return Err(EngineError::InvalidAction(
+            "A selected permanent can no longer tap for this cost".into(),
+        ));
+    }
+    if pending.activation_ability_index.is_some()
+        && pending.ability.chosen_x.is_some()
+        && pending.activation_cost.as_ref().is_some_and(|residual| {
+            !super::cost_payability::activation_tap_selection_leaves_joint_payment(
+                state,
+                player,
+                pending.object_id,
+                pending.ability.context.granting_object,
+                residual,
+                chosen,
+            )
+        })
+    {
+        return Err(EngineError::InvalidAction(
+            "Selection leaves no way to pay the remaining cost".into(),
+        ));
+    }
     if defers_spell_tap_cost(&pending) {
         let cost = paid_cost
             .map(|payment| payment.cost.clone())
@@ -8332,16 +8511,6 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
             chosen,
             events,
         )?;
-    }
-    // CR 107.3a: the selected payment count defines X for this activation while
-    // its ability is on the stack — but *only* for the X-sentinel shape. The
-    // mode is the single authority here: `min_count == 0` is not a usable X
-    // signal, because an aggregate (Crew/Saddle/Teamwork, CR 208.1) selection
-    // also has a zero floor and must never redefine the ability's X.
-    if matches!(mode, TapCreaturesSelectionMode::VariableX) {
-        pending
-            .ability
-            .set_chosen_x_recursive(chosen.len().try_into().unwrap_or(u32::MAX));
     }
     finish_pending_cost_or_cast(state, player, pending, events)
 }
@@ -9748,14 +9917,20 @@ fn surface_next_interactive_activation_cost_leg(
     }
 
     if let Some((requirement, filter)) = super::casting::find_tap_creatures_cost(cost) {
-        // CR 107.3a: compute the selection semantics once from the
-        // requirement and carry them verbatim to the completion handler.
-        let mode = requirement.selection_mode();
+        let mode = TapCreaturesSelectionMode::Fixed;
         let count = requirement.fixed_count().ok_or_else(|| {
-            EngineError::ActionNotAllowed(
-                "Aggregate-power tap cost is not valid for this activation".into(),
-            )
-        })?;
+            EngineError::ActionNotAllowed("Activation tap cost must have a bound count".into())
+        })? as usize;
+        if count == 0 {
+            pending.activation_cost = remove_first_activation_cost_matching(
+                pending
+                    .activation_cost
+                    .take()
+                    .expect("checked activation cost is present"),
+                |cost| matches!(cost, AbilityCost::TapCreatures { .. }),
+            );
+            return surface_next_unpaid_interactive_activation_cost(state, player, pending, events);
+        }
         let eligible = super::casting::find_eligible_tap_creatures_for_cost(
             state,
             player,
@@ -9764,12 +9939,7 @@ fn surface_next_interactive_activation_cost_leg(
             cost,
             filter,
         );
-        // CR 107.3a + CR 601.2b: mirror the adjacent Sacrifice arm above —
-        // a "Tap X untapped [type] you control" cost uses the u32::MAX
-        // sentinel for X, bounding the choice to [0, eligible.len()], not a
-        // literal exact/minimum match on u32::MAX.
-        let (min_count, max_count) = super::casting::sacrifice_cost_bounds(count, eligible.len());
-        if eligible.len() < min_count {
+        if eligible.len() < count {
             return Err(EngineError::ActionNotAllowed(
                 "Not enough eligible creatures to tap".into(),
             ));
@@ -9786,8 +9956,8 @@ fn surface_next_interactive_activation_cost_leg(
             player,
             kind: PayCostKind::TapCreatures { mode },
             choices: eligible,
-            count: max_count,
-            min_count,
+            count,
+            min_count: count,
             resume: CostResume::Spell {
                 spell: Box::new(pending),
             },
@@ -10573,6 +10743,36 @@ pub(super) fn push_activated_ability_to_stack(
         crime_candidate,
         events,
     )
+}
+
+pub(super) fn activation_has_announced_tap_count(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::TapCreatures {
+            requirement: crate::types::ability::TapCreaturesRequirement::AnnouncedX,
+            ..
+        } => true,
+        AbilityCost::Composite { costs } => costs.iter().any(activation_has_announced_tap_count),
+        _ => false,
+    }
+}
+
+pub(super) fn bind_activation_tap_count(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
+    match cost {
+        AbilityCost::TapCreatures {
+            requirement,
+            filter,
+        } => AbilityCost::TapCreatures {
+            requirement: requirement.bind_announced_x(chosen_x),
+            filter: filter.clone(),
+        },
+        AbilityCost::Composite { costs } => AbilityCost::Composite {
+            costs: costs
+                .iter()
+                .map(|cost| bind_activation_tap_count(cost, chosen_x))
+                .collect(),
+        },
+        _ => cost.clone(),
+    }
 }
 
 fn concretize_chosen_x_cost(cost: &AbilityCost, chosen_x: u32) -> AbilityCost {
@@ -14152,21 +14352,27 @@ fn pay_additional_cost_with_source(
             //
             // CR 107.3a: compute the selection semantics once from the
             // requirement and carry them verbatim to the completion handler.
-            let mode = requirement.selection_mode();
             let (kind, count, min_count) = match requirement {
                 crate::types::ability::TapCreaturesRequirement::Count { count } => {
-                    // CR 601.2h: partial payments are not allowed — a fixed-count
-                    // additional cost has `min_count == count`, so an under-count
-                    // selection is refused by the shared validator. Only the
-                    // X-sentinel shape gets a zero floor (CR 107.3a).
-                    let (min_count, max_count) =
-                        super::casting::sacrifice_cost_bounds(*count, eligible.len());
-                    if eligible.len() < min_count {
+                    let count = *count as usize;
+                    if eligible.len() < count {
                         return Err(EngineError::ActionNotAllowed(
                             "Not enough eligible creatures to tap".into(),
                         ));
                     }
-                    (PayCostKind::TapCreatures { mode }, max_count, min_count)
+                    (
+                        PayCostKind::TapCreatures {
+                            mode: TapCreaturesSelectionMode::Fixed,
+                        },
+                        count,
+                        count,
+                    )
+                }
+                crate::types::ability::TapCreaturesRequirement::AnnouncedX
+                | crate::types::ability::TapCreaturesRequirement::ResolutionX => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Unbound tap count in spell payment".into(),
+                    ));
                 }
                 crate::types::ability::TapCreaturesRequirement::Aggregate {
                     stat,
@@ -14195,7 +14401,13 @@ fn pay_additional_cost_with_source(
                     // — any subset satisfying the power threshold is a complete
                     // payment — which is precisely why `min_count == 0` is not a
                     // usable X signal downstream; `mode` carries that distinction.
-                    (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
+                    (
+                        PayCostKind::TapCreatures {
+                            mode: TapCreaturesSelectionMode::Aggregate(aggregate),
+                        },
+                        eligible.len(),
+                        0,
+                    )
                 }
             };
             // CR 601.2h: a deferred selection keeps the cost it pays, so the
@@ -14554,6 +14766,62 @@ pub(super) fn can_pay_emerge_cost(
     })
 }
 
+/// CR 107.3a + CR 601.2b: the coarse bound from the written tap legs.
+/// A separate source tap is reserved even when the source matches a leg.
+pub(super) fn activation_tap_x_max(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    cost: &AbilityCost,
+    eligibility: TapCountEligibility<'_>,
+) -> Option<u32> {
+    fn bound(cost: &AbilityCost, count: &impl Fn(&TargetFilter) -> u32) -> Option<u32> {
+        match cost {
+            AbilityCost::TapCreatures {
+                requirement: crate::types::ability::TapCreaturesRequirement::AnnouncedX,
+                filter,
+            } => Some(count(filter)),
+            AbilityCost::Composite { costs } => {
+                costs.iter().filter_map(|leg| bound(leg, count)).min()
+            }
+            _ => None,
+        }
+    }
+    let exclude_source = super::casting::requires_untapped(cost);
+    let filter_context = super::filter::FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
+    bound(cost, &|filter| {
+        state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| {
+                (!exclude_source || *id != source)
+                    && !eligibility.excluded.contains(id)
+                    && !super::restrictions::payment_tap_reserved(state, *id)
+                    && state.objects.get(id).is_some_and(|object| {
+                        object.controller == player
+                            && (!object.tapped || eligibility.mana_can_change_taps)
+                            && super::filter::matches_target_filter(
+                                state,
+                                *id,
+                                filter,
+                                &filter_context,
+                            )
+                    })
+            })
+            .count()
+            .min(i32::MAX as usize) as u32
+    })
+}
+
+#[derive(Default)]
+pub(super) struct TapCountEligibility<'a> {
+    pub(super) excluded: &'a [ObjectId],
+    pub(super) mana_can_change_taps: bool,
+}
+
 fn additional_cost_x_max(
     state: &GameState,
     player: PlayerId,
@@ -14891,6 +15159,10 @@ pub(super) fn activation_cost_needs_x_choice(
 /// here.
 fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
     match cost {
+        AbilityCost::TapCreatures {
+            requirement: crate::types::ability::TapCreaturesRequirement::AnnouncedX,
+            ..
+        } => true,
         AbilityCost::RemoveCounter { count, .. } => is_chosen_remove_counter_cost_count(*count),
         AbilityCost::PayEnergy { amount } => amount.contains_x(),
         AbilityCost::Discard { count, filter, .. } => {
@@ -21246,8 +21518,29 @@ pub fn enter_payment_step(
         let activation_counter_x_max = pending.activation_cost.as_ref().and_then(|cost| {
             activation_counter_cost_x_max(state, player, pending.object_id, &pending.ability, cost)
         });
+        let tap_count_uses_mana_window = pending.activation_cost.as_ref().is_some_and(|cost| {
+            activation_has_announced_tap_count(cost)
+                && (!pending.cost.is_without_paying_mana() || pending.cost.has_x())
+        });
+        let mana_can_change_taps =
+            tap_count_uses_mana_window && !activation_mana_window_is_static(state, player);
+        let tap_x_max = pending.activation_cost.as_ref().and_then(|cost| {
+            activation_tap_x_max(
+                state,
+                player,
+                pending.object_id,
+                pending.ability.context.granting_object,
+                cost,
+                TapCountEligibility {
+                    mana_can_change_taps,
+                    ..Default::default()
+                },
+            )
+        });
         if pending.ability.chosen_x.is_none()
-            && (cost_has_x(&pending.cost) || activation_counter_x_max.is_some())
+            && (cost_has_x(&pending.cost)
+                || activation_counter_x_max.is_some()
+                || tap_x_max.is_some())
         {
             // CR 601.2f: Every spell-cast path that reaches X announcement must
             // carry the captured tax-inclusive base so the X cap and the locked-in
@@ -21266,7 +21559,16 @@ pub fn enter_payment_step(
                     super::casting::ability_mana_payment_excluded_sources(cost, pending.object_id)
                 })
                 .unwrap_or_default();
-            let mana_max = if cost_has_x(&pending.cost) {
+            let target_dependent_mana = pending.activation_cost_snapshot.as_ref().is_some_and(
+                |snapshot| {
+                    matches!(snapshot.lock, crate::types::casting_costs::ActivationCostLock::Open {
+                    point: crate::types::casting_costs::ActivationCostLockPoint::TargetSettlement,
+                })
+                },
+            );
+            let mana_max = if cost_has_x(&pending.cost)
+                && !(tap_x_max.is_some() && (mana_can_change_taps || target_dependent_mana))
+            {
                 // CR 601.2b + CR 118.13a: X is announced before an
                 // activation's printed Phyrexian symbols, so the cap must admit
                 // every symbol the player may still pay with 2 life: an upper
@@ -21304,6 +21606,9 @@ pub fn enter_payment_step(
                 })
                 .or(activation_counter_x_max)
                 .map_or(mana_max, |cost_max| mana_max.min(cost_max));
+            let max = tap_x_max.map_or(max, |tap_max| max.min(tap_max));
+            let max =
+                tighten_activation_tap_x_max(state, player, pending, &excluded_sources, min, max);
             if min > max {
                 let pending_for_cancel = pending.clone();
                 state.pending_cast = None;
@@ -21765,6 +22070,56 @@ fn finalize_mana_payment_with_resume(
                 let (pay_cost, pay_choices) = match manual_payment.as_ref() {
                     Some(payment) => (&payment.view, Some(payment.choices.as_slice())),
                     None => (&pending.cost, None),
+                };
+                let has_locked_taps = pending.ability.chosen_x.is_some()
+                    && pending
+                        .activation_cost
+                        .as_ref()
+                        .and_then(super::casting::find_tap_creatures_cost)
+                        .is_some();
+                if has_locked_taps
+                    && manual_payment.is_some()
+                    && pending.activation_cost.as_ref().is_some_and(|residual| {
+                        !super::cost_payability::activation_tap_selection_leaves_joint_payment(
+                            state,
+                            player,
+                            pending.object_id,
+                            pending.ability.context.granting_object,
+                            residual,
+                            &[],
+                        )
+                    })
+                {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay the written taps after the mana window".into(),
+                    ));
+                }
+                let excluded_sources = if has_locked_taps && manual_payment.is_none() {
+                    let Some(plan) = activation_tap_mana_exclusions(
+                        state,
+                        player,
+                        &pending,
+                        pay_cost,
+                        &excluded_sources,
+                        &mut 0,
+                    ) else {
+                        // CR 601.2g: the automatic planner need not understand every
+                        // legal sequence of mana abilities. Keep the mana window open.
+                        if mana_payment::native_phyrexian_shards(pay_cost).is_empty() {
+                            pending.payment_mode = CastPaymentMode::Manual;
+                            state.pending_cast = Some(pending);
+                            return Ok(WaitingFor::ManaPayment {
+                                player,
+                                convoke_mode: None,
+                            });
+                        }
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot automatically pay mana and reserve the written taps".into(),
+                        ));
+                    };
+                    plan
+                } else {
+                    excluded_sources
                 };
                 match super::casting::pay_ability_mana_cost_with_choices_excluding_and_resume(
                     state,
@@ -24539,7 +24894,7 @@ mod tests {
                 u32::MAX,
             )),
             AbilityCost::TapCreatures {
-                requirement: TapCreaturesRequirement::Count { count: u32::MAX },
+                requirement: TapCreaturesRequirement::ResolutionX,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
             },
             AbilityCost::PayLife {
@@ -39275,7 +39630,10 @@ its replicate cost was paid.)\nDraw a card.";
 
 #[cfg(test)]
 mod card_hold_probe_budget_tests {
-    use super::{assign_reserved_legs, bounded_replicate_tap_choices, CARD_HOLD_PROBE_BUDGET};
+    use super::{
+        assign_reserved_legs, bounded_replicate_tap_choices, ACTIVATION_TAP_PROBE_BUDGET,
+        CARD_HOLD_PROBE_BUDGET,
+    };
     use crate::game::casting::ReservedUse;
     use crate::game::cost_payability::ReservableLeg;
     use crate::types::identifiers::ObjectId;
@@ -39291,20 +39649,22 @@ mod card_hold_probe_budget_tests {
             count: 6,
             candidates: (0..20).map(ObjectId).collect(),
         };
-        let probes = Cell::new(0usize);
-        let verdict = assign_reserved_legs(
-            &[leg],
-            &|_| false,
-            &mut Vec::new(),
-            &mut 0,
-            CARD_HOLD_PROBE_BUDGET,
-            &|_| {
-                probes.set(probes.get() + 1);
-                false
-            },
-        );
-        assert_eq!(verdict, None);
-        assert_eq!(probes.get(), CARD_HOLD_PROBE_BUDGET);
+        for budget in [CARD_HOLD_PROBE_BUDGET, ACTIVATION_TAP_PROBE_BUDGET] {
+            let probes = Cell::new(0usize);
+            let verdict = assign_reserved_legs(
+                std::slice::from_ref(&leg),
+                &|_| false,
+                &mut Vec::new(),
+                &mut 0,
+                budget,
+                &|_| {
+                    probes.set(probes.get() + 1);
+                    false
+                },
+            );
+            assert_eq!(verdict, None);
+            assert_eq!(probes.get(), budget);
+        }
     }
 
     #[test]
