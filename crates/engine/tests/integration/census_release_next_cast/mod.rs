@@ -1528,6 +1528,138 @@ fn kumano_counter_rider_is_spent_by_a_mutate_merge() {
     assert_idle(&r);
 }
 
+/// A merge spends ONLY the merging spell's own rider: another creature spell waiting below it on
+/// the stack keeps its row and enters with its counter (CR 730.2b, CR 400.7, CR 614.1c).
+///
+/// The lower spell (Kumano II's one-counter rider) is cast first; Vedalken Orrery's "as though
+/// they had flash" then lets Gemrazer's mutate cast be announced in response, where Yuna's
+/// activated ability arms a two-counter rider for it. Gemrazer is above the lower spell, so the
+/// merge resolves first: its row must go and the lower spell's row must stay. A witness with one
+/// row cannot tell `retain` from a plain clear, which is why both rows are held at once here.
+#[test]
+fn mutate_merge_spends_only_the_merging_spells_counter_rider() {
+    let (mut s, saga) = saga_board("Kumano Faces Kakkazan");
+    let host = card(&mut s, "Grizzly Bears", Zone::Battlefield);
+    let yuna = card(&mut s, "Yuna, Grand Summoner", Zone::Battlefield);
+    let orrery = card(&mut s, "Vedalken Orrery", Zone::Battlefield);
+    let bears = card(&mut s, "Grizzly Bears", Zone::Hand);
+    let gemrazer = card(&mut s, "Gemrazer", Zone::Hand);
+    let mut r = s.build();
+    engine::game::rehydrate_game_from_card_db(r.state_mut(), db());
+    run_chapter(&mut r, saga, 2, vec![]);
+    assert_eq!(delayed(&r), 1, "the chapter's next-cast trigger waits");
+    assert_eq!(
+        zone(&r, orrery),
+        Zone::Battlefield,
+        "reach-guard: the flash permission source is on the battlefield"
+    );
+
+    // Plain green pays for the lower spell, so only the Kumano rider is registered for it, and it
+    // waits on the stack (its spell, not the battlefield host, is the eventual entrant).
+    fund(&mut r, P0, ManaType::Green, 1);
+    fund(&mut r, P0, ManaType::Colorless, 1);
+    cast_action(&mut r, bears);
+    drive(
+        &mut r,
+        |state| !state.pending_etb_counters.is_empty(),
+        vec![],
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack);
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(delayed(&r), 0, "the next-cast trigger is spent");
+
+    // Yuna's mana ability arms a second next-cast rider for the spell cast in response. It is a
+    // mana ability, so it resolves without draining the lower spell off the stack.
+    r.act(GameAction::ActivateAbility {
+        source_id: yuna,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .expect("Yuna's mana ability is activated");
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::ChooseManaColor { .. }),
+        "any-color mana ability prompts, got {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::ChooseManaColor {
+        choice: ManaChoice::SingleColor(ManaType::Green),
+        count: 1,
+    })
+    .expect("Yuna adds one green mana");
+    assert_eq!(delayed(&r), 1, "Yuna's next-cast trigger waits");
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "arming the second rider left the lower spell's rider alone"
+    );
+
+    // Orrery supplies flash, so the mutate cast is offered in response; the pool holds three mana,
+    // so the printed {3}{G} is unaffordable and the unannounced cast is the mutate route
+    // ({1}{G}{G}) — the same sole-affordable-route shape as the witness above.
+    fund(&mut r, P0, ManaType::Green, 2);
+    let offered = engine::ai_support::legal_actions(r.state())
+        .into_iter()
+        .find(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == gemrazer))
+        .expect("the mutate cast is offered in response");
+    r.act(offered).expect("the mutate cast is accepted");
+    drive(
+        &mut r,
+        |state| state.stack.len() == 2 && state.pending_etb_counters.len() == 2,
+        vec![],
+    );
+    assert_eq!(zone(&r, bears), Zone::Stack, "the lower spell still waits");
+    assert_eq!(zone(&r, gemrazer), Zone::Stack);
+    assert_eq!(
+        r.state().stack.iter().filter(|e| e.id == gemrazer).count(),
+        1
+    );
+    // Reach-guard: the one-counter Kumano row belongs to the lower spell, the two-counter Yuna row
+    // to the merging spell; both are live before anything resolves.
+    assert_eq!(pending(&r, bears), vec![(CounterType::Plus1Plus1, 1u32)]);
+    assert_eq!(pending(&r, gemrazer), vec![(CounterType::Plus1Plus1, 2u32)]);
+
+    // Gemrazer is above the lower spell, so the merge resolves first (the host is the only legal
+    // mutate target: Yuna is a Human, so the engine announces it itself).
+    r.advance_until_stack_empty();
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::MutateMergeChoice { player, .. } if player == P0)
+    );
+    r.act(GameAction::ChooseMutateMergeSide {
+        side: engine::game::merge::MergeSide::Top,
+    })
+    .expect("the merge placement is accepted");
+    assert_eq!(
+        r.state().objects[&host].merged_components.len(),
+        2,
+        "host and Gemrazer are one merged permanent"
+    );
+    assert_eq!(
+        pending(&r, gemrazer),
+        vec![],
+        "the merging spell's own rider is spent"
+    );
+    assert_eq!(
+        pending(&r, bears),
+        vec![(CounterType::Plus1Plus1, 1u32)],
+        "the lower spell's rider survives the merge"
+    );
+    assert_eq!(
+        r.state().pending_etb_counters.len(),
+        1,
+        "only the merging spell's row was removed"
+    );
+
+    // The lower creature spell then resolves and enters with exactly its own rider's counter.
+    play(&mut r, vec![]);
+    assert_eq!(zone(&r, bears), Zone::Battlefield);
+    assert_eq!(counters(&r, bears, CounterType::Plus1Plus1), 1);
+    assert!(
+        r.state().pending_etb_counters.is_empty(),
+        "the entry consumed the surviving row"
+    );
+    assert_idle(&r);
+}
+
 /// The rider is scoped to the next CREATURE spell: a noncreature spell cast while it waits
 /// registers no rider and leaves the trigger armed for the next creature spell.
 #[test]
