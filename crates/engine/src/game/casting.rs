@@ -32808,9 +32808,11 @@ fn ensure_x_locked_activation_payable(
             .as_ref()
             .and_then(find_tap_creatures_cost)
             .is_some()
+        && !casting_costs::activation_mana_window_is_static(state, player)
     {
         // CR 601.2g-h: a held tapper can still become available during the mana
-        // window. The concrete total is checked when payment is attempted.
+        // window (an untap mana ability such as Pili-Pala's). The concrete
+        // total is checked when payment is attempted.
         return Ok(());
     }
     let mana_obligation = selected_mana_obligation(pending, &pending.cost);

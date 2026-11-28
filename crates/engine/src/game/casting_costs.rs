@@ -2163,30 +2163,21 @@ pub const RESERVATION_PROBE_BUDGET: usize = 4_096;
 /// activation tap legs. An exhausted search leaves the manual route open.
 const ACTIVATION_TAP_PROBE_BUDGET: usize = 32;
 
-/// CR 601.2g: only a board where mana abilities are source taps with
-/// mana-only output has a static roster. A failed capacity estimate on any
-/// other board says nothing about what the payer can do in the mana window.
+/// CR 601.2g + CR 107.6: the mana window can change which permanents are
+/// untapped only when the payer controls a mana ability with the untap symbol
+/// (Pili-Pala's "{2}, {Q}: Add one mana of any color"). Every other board keeps
+/// the ordinary planner-backed bounds: the mana leg's affordability, the
+/// `max_x_value` cap and an untapped-only helper count.
 pub(super) fn activation_mana_window_is_static(state: &GameState, player: PlayerId) -> bool {
-    state.transient_continuous_effects.is_empty()
-        && state.delayed_triggers.is_empty()
-        && state.objects.values().all(|object| {
-            if object.zone == Zone::Battlefield && !object.trigger_definitions.is_empty() {
-                return false;
-            }
-            object.controller != player
-                || !matches!(
-                    object.zone,
-                    Zone::Battlefield | Zone::Hand | Zone::Graveyard | Zone::Exile
-                )
-                || object.abilities.iter().all(|ability| {
-                    !mana_abilities::is_mana_ability(ability)
-                        || (object.zone == Zone::Battlefield
-                            && matches!(ability.cost, Some(AbilityCost::Tap))
-                            && matches!(*ability.effect, Effect::Mana { .. })
-                            && ability.sub_ability.is_none()
-                            && ability.else_ability.is_none())
+    !state.battlefield.iter().any(|id| {
+        state.objects.get(id).is_some_and(|object| {
+            object.controller == player
+                && object.abilities.iter().any(|ability| {
+                    mana_abilities::is_mana_ability(ability)
+                        && super::mana_sources::has_untap_component(&ability.cost)
                 })
         })
+    })
 }
 
 fn tighten_activation_tap_x_max(

@@ -1286,3 +1286,83 @@ fn hazel_cannot_offer_an_amount_without_source_tap_and_life() {
         finished(&r);
     }
 }
+
+fn offers_activation(r: &GameRunner, source: ObjectId, index: usize) -> bool {
+    engine::ai_support::legal_actions(r.state())
+        .iter()
+        .any(|action| {
+            matches!(
+                action,
+                GameAction::ActivateAbility { source_id, ability_index, .. }
+                    if *source_id == source && *ability_index == index
+            )
+        })
+}
+
+#[test]
+fn aryel_without_a_black_source_is_not_offered_even_with_a_land_in_hand() {
+    for land_in_hand in [false, true] {
+        let mut s = table();
+        let source = board(&mut s, P0, "Aryel, Knight of Windgrace");
+        board(&mut s, P0, "Forest");
+        board(&mut s, P0, "Silver Knight");
+        board(&mut s, P1, "Ornithopter");
+        if land_in_hand {
+            real(&mut s, P0, "Forest", Zone::Hand);
+        }
+        let r = s.build();
+        // CR 601.2h + CR 118.3: "{B}, {T}, Tap X untapped Knights you
+        // control" can't be paid without black mana, whatever X is.
+        assert!(!offers_activation(&r, source, 1));
+    }
+}
+
+#[test]
+fn necron_overlord_cap_stays_mana_bounded_with_a_land_in_hand() {
+    let mut s = table();
+    let source = board(&mut s, P0, "Necron Overlord");
+    for name in ["Ornithopter", "Ornithopter", "Memnite", "Memnite"] {
+        board(&mut s, P0, name);
+    }
+    board(&mut s, P0, "Plains");
+    real(&mut s, P0, "Forest", Zone::Hand);
+    let mut r = s.build();
+    activate(&mut r, source, 0, CastPaymentMode::Auto);
+    // CR 107.3a + CR 601.2h: one Plains pays {X} only for X = 1, even though
+    // four artifacts could be tapped and a land card sits in hand.
+    assert_x(&r, source, 0, 1);
+    fail(&mut r, GameAction::ChooseX { value: 2 });
+}
+
+#[test]
+fn apothecary_white_cap_counts_only_untapped_foods() {
+    let mut s = table();
+    let source = board(&mut s, P0, "Apothecary White");
+    let untapped = board(&mut s, P0, "Gingerbrute");
+    let tapped = board(&mut s, P0, "Gingerbrute");
+    board(&mut s, P0, "Plains");
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&tapped).unwrap().tapped = true;
+    activate(&mut r, source, 0, CastPaymentMode::Auto);
+    // CR 118.3: a tapped Food can't pay "Tap X untapped Foods", and nothing on
+    // this board can untap it during the mana window.
+    assert_x(&r, source, 0, 1);
+    fail(&mut r, GameAction::ChooseX { value: 2 });
+    announce(&mut r, 1);
+    exact(&r, 1, &[untapped]);
+}
+
+#[test]
+fn secluded_starforge_cap_counts_a_tapped_pili_pala_that_can_untap_for_mana() {
+    let mut s = table();
+    let source = board(&mut s, P0, "Secluded Starforge");
+    let pili_pala = board(&mut s, P0, "Pili-Pala");
+    board(&mut s, P0, "Grizzly Bears");
+    fund(&mut s, P0, &[(ManaType::Colorless, source); 4]);
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&pili_pala).unwrap().tapped = true;
+    activate(&mut r, source, 1, CastPaymentMode::Auto);
+    // CR 601.2g + CR 107.6: Pili-Pala's "{2}, {Q}: Add one mana of any color"
+    // can untap it during the mana window, so it can still pay for X = 1.
+    assert_x(&r, source, 1, 1);
+}
