@@ -1168,7 +1168,12 @@ pub(super) fn restore_alternative_spell_face_before_zone_delivery(
     object_id: ObjectId,
     casting_variant: CastingVariant,
 ) {
-    super::zones::capture_exit_lki(state, object_id, Vec::new());
+    super::zones::capture_exit_lki(
+        state,
+        object_id,
+        Vec::new(),
+        super::zones::ExitLkiScope::Latest,
+    );
     restore_alternative_spell_normal_face(state, object_id, casting_variant);
 }
 

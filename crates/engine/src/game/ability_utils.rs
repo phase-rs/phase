@@ -4740,7 +4740,8 @@ fn validate_targets_in_chain_inner(
     // (declared domain); storage is the projection effect handlers read
     // (stored domain, `declared_to_stored`).
     let verdicts = match node_validation {
-        NodeValidation::Verdicts(verdicts) => {
+        NodeValidation::Verdicts(mut verdicts) => {
+            drop_targets_of_unsatisfied_shared_quality(state, &validated, &mut verdicts);
             let stored_by_declared = validated.retain_target_occurrences(&verdicts);
             // The storage projection crosses domains only through the mapping
             // `retain_target_occurrences` returns: each stored occurrence is its
@@ -10704,6 +10705,37 @@ fn is_shared_quality_declaration(ability: &ResolvedAbility, filter: &TargetFilte
     ability.multi_target.is_some()
         && !super::effects::extract_shares_quality_props(filter).is_empty()
         && matches!(node_slot_filters(ability), NodeSlotFilters::UniformRun(declared) if declared == *filter)
+}
+
+/// CR 608.2b + CR 601.2c: a declaration's group restriction ("two target
+/// creatures that share no creature types") is part of its targets' legality on
+/// resolution. A target that has left is compared as it last existed
+/// (CR 608.2h). If the announced group no longer satisfies the restriction,
+/// none of that declaration's targets is legal.
+fn drop_targets_of_unsatisfied_shared_quality(
+    state: &GameState,
+    node: &ResolvedAbility,
+    verdicts: &mut [OccurrenceVerdict],
+) {
+    let NodeSlotFilters::UniformRun(filter) = node_slot_filters(node) else {
+        return;
+    };
+    if !is_shared_quality_declaration(node, &filter) {
+        return;
+    }
+    let pins = (0..verdicts.len()).map(|position| node.target_pin_at(position));
+    if matches_declared_shared_qualities(
+        state,
+        super::effects::extract_shares_quality_props(&filter),
+        pins,
+    ) {
+        return;
+    }
+    for verdict in verdicts.iter_mut() {
+        if *verdict == OccurrenceVerdict::Legal {
+            *verdict = OccurrenceVerdict::Dropped;
+        }
+    }
 }
 
 pub(super) fn per_object_target_filter<'a>(

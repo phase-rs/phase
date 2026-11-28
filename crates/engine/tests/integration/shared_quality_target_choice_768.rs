@@ -354,7 +354,7 @@ fn prismatic_wardrobe_rejects_a_target_with_no_clothing_reference() {
     )));
 
     // A single target has no group to compare, so the unresolved relation
-    // admits nothing: the spell isn't offered, and naming the Goblin fails.
+    // admits nothing: the spell isn't offered, and a direct cast is rejected.
     assert!(!legal_actions(runner.state()).iter().any(|action| matches!(
         action,
         GameAction::CastSpell { object_id, .. } if *object_id == spell
@@ -556,4 +556,188 @@ fn deflecting_swat_checks_secret_tunnel_against_departed_token() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+const PURIFY_THE_GRAVE: &str = "Exile target card from a graveyard.\nFlashback {W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+const AMOEBOID_CHANGELING: &str = "Changeling (This card is every creature type.)\n{T}: Target creature gains all creature types until end of turn.\n{T}: Target creature loses all creature types until end of turn.";
+
+/// CR 115.7d + CR 608.2h: a kept target that left the graveyard is compared as
+/// it last existed there, and on resolution the survivor is still legal when it
+/// shares a creature type with that departed card (CR 608.2b).
+#[test]
+fn deflecting_swat_keeps_an_exiled_unbury_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let unbury = scenario
+        .add_spell_to_hand_from_oracle(P0, "Unbury", true, UNBURY)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let purify = scenario
+        .add_spell_to_hand_from_oracle(P0, "Purify the Grave", true, PURIFY_THE_GRAVE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let swat = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deflecting Swat", true, DEFLECTING_SWAT)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let [exiled, kept_out, replacement] =
+        ["Goblin Piker", "Raging Goblin", "Goblin Guide"].map(|name| {
+            scenario
+                .add_creature_to_graveyard(P0, name, 1, 1)
+                .with_subtypes(vec!["Goblin"])
+                .id()
+        });
+    let elf = scenario
+        .add_creature_to_graveyard(P0, "Llanowar Elves", 1, 1)
+        .with_subtypes(vec!["Elf", "Druid"])
+        .id();
+    let mut runner = build(
+        scenario,
+        &[
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::White,
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Red,
+        ],
+    );
+    cast(&mut runner, unbury);
+    select_mode(&mut runner, 1);
+    choose(&mut runner, exiled);
+    choose(&mut runner, kept_out);
+    let unbury_entry = runner.state().stack[0].id;
+    let announced = runner.state().stack[0]
+        .ability()
+        .unwrap()
+        .target_pin_at(0)
+        .expect("the first target is pinned");
+
+    runner.cast(purify).target_object(exiled).commit();
+    runner.pass_both_players();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+
+    runner.cast(swat).target_object(unbury_entry).commit();
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::RetargetChoice { player: P0, .. }
+    ));
+    let retarget = |candidate| GameAction::RetargetSpell {
+        new_targets: vec![None, Some(TargetRef::Object(candidate))],
+    };
+    assert!(runner.act(retarget(elf)).is_err(), "Elf replacement");
+    runner
+        .act(retarget(replacement))
+        .expect("Goblin replacement against the exiled Goblin");
+    let ability = runner.state().stack[0].ability().unwrap();
+    assert_eq!(
+        ability.targets,
+        [TargetRef::Object(exiled), TargetRef::Object(replacement)]
+    );
+    assert_eq!(ability.target_pin_at(0), Some(announced));
+
+    runner.pass_both_players();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&replacement].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&kept_out].zone, Zone::Graveyard);
+}
+
+/// CR 608.2b: Rivals' Duel's pair must still share no creature types when it
+/// resolves. If an effect gives them a shared type, it has no legal targets and
+/// doesn't resolve, so nothing fights. Without that effect they fight.
+fn rivals_duel_resolution(give_shared_type: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rivals' Duel", false, RIVALS_DUEL)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let [goblin, _, elf, _] = battlefield(&mut scenario);
+    let amoeboid = scenario
+        .add_creature(P0, "Amoeboid Changeling", 1, 1)
+        .with_subtypes(vec!["Shapeshifter"])
+        .from_oracle_text_with_keywords(&["Changeling"], AMOEBOID_CHANGELING)
+        .id();
+    let mut runner = build(scenario, &[ManaType::Red; 4]);
+    cast(&mut runner, spell);
+    choose(&mut runner, goblin);
+    choose(&mut runner, elf);
+    assert_eq!(runner.state().stack.len(), 1);
+
+    if give_shared_type {
+        let gains = runner.state().objects[&amoeboid]
+            .abilities
+            .iter()
+            .position(|ability| {
+                ability
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| text.contains("gains all creature types"))
+            })
+            .expect("Amoeboid Changeling's type-granting ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: amoeboid,
+                ability_index: gains,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            choose(&mut runner, elf);
+        }
+        runner.pass_both_players();
+        assert_eq!(runner.state().stack.len(), 1, "only the Duel is left");
+        assert!(
+            runner.state().objects[&elf]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Goblin"),
+            "reach guard: the Elves now share Goblin with the Piker"
+        );
+    }
+
+    runner.pass_both_players();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    let fought = [goblin, elf].map(|id| runner.state().objects[&id].zone == Zone::Graveyard);
+    if give_shared_type {
+        assert_eq!(fought, [false, false], "the Duel didn't resolve");
+        for id in [goblin, elf] {
+            assert_eq!(runner.state().objects[&id].damage_marked, 0);
+        }
+    } else {
+        assert_eq!(fought, [true, true], "the Piker and the Elves fought");
+    }
+}
+
+#[test]
+fn rivals_duel_does_not_resolve_once_its_pair_shares_a_type() {
+    rivals_duel_resolution(true);
+}
+
+#[test]
+fn rivals_duel_fights_when_its_pair_still_shares_nothing() {
+    rivals_duel_resolution(false);
 }
