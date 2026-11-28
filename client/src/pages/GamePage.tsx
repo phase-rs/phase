@@ -548,7 +548,7 @@ export function GamePage() {
         markGameOver();
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -556,7 +556,7 @@ export function GamePage() {
         break;
       case "terminalDelivery":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
@@ -789,7 +789,7 @@ export function GamePage() {
         break;
       case "gameOver":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -797,7 +797,7 @@ export function GamePage() {
         break;
       case "terminalResult":
         markGameOver();
-        clearPromptOverlayState();
+        clearPromptOverlayState({ keepPresentation: true });
         // Display is independent of native guest convergence. The provider /
         // adapter owns deletion after durable cleanup ownership is established.
         setTerminalReason(event.result.display.reason);

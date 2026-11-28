@@ -302,7 +302,7 @@ class AudioManager {
    * Play SFX for an animation step, consolidating same-type effects
    * into a single slightly louder sound.
    */
-  playSfxForStep(effects: StepEffect[]): void {
+  playSfxForStep(effects: readonly StepEffect[]): void {
     const typeCounts = new Map<string, number>();
     for (const effect of effects) {
       if (effect.displayOnly) continue;

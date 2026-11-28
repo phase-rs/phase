@@ -9,9 +9,9 @@ import {
   lifeTierClass,
   useDisplayedLife,
 } from "../../hooks/useDisplayedLife.ts";
+import { usePresentationPace } from "../../hooks/usePresentationPace.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { damageCauseState } from "../animation/cardVfx/cardVfxSpecs.ts";
 
 interface LifeTotalProps {
@@ -36,7 +36,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const pace = usePresentationPace();
   const impactTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Engine-supplied totals are the sole authority for the displayed number —
@@ -63,7 +63,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       // number it is flashing about land together.
       const impactDelay = lifeChangeImpactDelayMs(effect, activeStep.effects, playerId, damageCauseState());
       if (impactDelay > 0) {
-        impactTimerRef.current = setTimeout(flashLifeChange, impactDelay * speedMultiplier);
+        impactTimerRef.current = setTimeout(flashLifeChange, impactDelay * pace);
       } else {
         flashLifeChange();
       }
@@ -76,7 +76,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
         impactTimerRef.current = null;
       }
     };
-  }, [activeStep, playerId, speedMultiplier]);
+  }, [activeStep, playerId, pace]);
 
   const colorClass = lifeTierClass(readout);
   const title = lifeReadoutTitle(t, readout);

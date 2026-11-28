@@ -8,9 +8,9 @@ import { actionRejectionError, AdapterError, AdapterErrorCode } from "../adapter
 import { reportStructuredActionRejection } from "./actionRejectionReporter";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
+import { director } from "../animation/director";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { getPlayerId } from "../hooks/usePlayerId";
-import type { AnimationStep } from "../animation/types";
 import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
@@ -31,15 +31,8 @@ import {
 import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
-import { pressureMultiplier } from "../utils/stackPressure";
-import { effectiveStackPressure, recordStackResolutions } from "../utils/stackThroughput";
+import { recordStackResolutions } from "../utils/stackThroughput";
 import { applySpellPaymentPreference } from "./castPaymentMode";
-
-/**
- * Event types whose SFX is deferred to the card slam onImpact callback
- * in AnimationOverlay, so sound aligns with the visual impact moment.
- */
-const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "GroupedDamageFlurry"]);
 
 /** Localized, upper-cased turn-banner headline. The whole template goes
  *  through i18n so a translated player name never lands inside an English
@@ -49,31 +42,6 @@ export function turnBannerText(turnPlayerId: number, isYourTurn: boolean): strin
     ? i18n.t("turnBanner.yourTurn")
     : i18n.t("turnBanner.opponentTurn", { name: getOpponentDisplayName(turnPlayerId) });
   return text.toLocaleUpperCase(i18n.language);
-}
-
-/** Step-synced SFX not yet played; cancelled when the tab is hidden mid-animation. */
-const scheduledSfxTimers = new Set<ReturnType<typeof setTimeout>>();
-
-/** Schedule SFX for each animation step, offset to sync with visual timing. */
-function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
-  let offset = 0;
-  for (const step of steps) {
-    // Filter out slam-deferred events — their SFX fires at impact time instead
-    const immediate = step.effects.filter((e) => !e.displayOnly && !SLAM_DEFERRED_SFX.has(e.event.type));
-    if (immediate.length > 0) {
-      if (offset === 0) {
-        audioManager.playSfxForStep(immediate);
-      } else {
-        const delay = offset;
-        const timer = setTimeout(() => {
-          scheduledSfxTimers.delete(timer);
-          audioManager.playSfxForStep(immediate);
-        }, delay);
-        scheduledSfxTimers.add(timer);
-      }
-    }
-    offset += step.duration * multiplier;
-  }
 }
 
 /**
@@ -177,35 +145,6 @@ function isDocumentHidden(): boolean {
 }
 
 /**
- * Waits out an animation, but never on a hidden tab: it returns at once if the
- * tab is already hidden and ends early if it becomes hidden mid-wait. Hidden
- * timers are throttled (down to about once a minute), which would otherwise
- * stall every queued update, including a P2P host's AI actions, behind one wait.
- */
-function waitForAnimation(ms: number): Promise<void> {
-  if (isDocumentHidden()) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const finish = () => {
-      clearTimeout(timer);
-      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
-      resolve();
-    };
-    const onVisibility = () => {
-      if (!isDocumentHidden()) return;
-      // Nobody is watching: drop the presentation still in flight (queued
-      // animation steps and pending step SFX) so it cannot replay stale on
-      // return, then let the update commit straight to its final state.
-      for (const timer of scheduledSfxTimers) clearTimeout(timer);
-      scheduledSfxTimers.clear();
-      useAnimationStore.getState().clearQueue();
-      finish();
-    };
-    const timer = setTimeout(finish, ms);
-    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
-  });
-}
-
-/**
  * Identifies the game state for which the current dispatch pipeline is valid.
  * Restoring a saved game replaces the engine state wholesale, and a game-session
  * boundary abandons it outright, so work queued for the old state must neither
@@ -281,8 +220,12 @@ function sameBoundGameSession(
  * awaiting an action in an abandoned game has nothing to recover from and
  * must not see a spurious rejection.
  */
-export function abandonPendingDispatches(): void {
+export function abandonPendingDispatches({ keepPresentation = false } = {}): void {
   dispatchGeneration += 1;
+  // After the bump: settling the presentation resumes any in-flight `play()`,
+  // whose continuation must see the new generation and decline to commit. A game
+  // that just ended keeps its presentation, so the lethal hit still plays.
+  if (!keepPresentation) director.abandon();
   inFlightLocalAction = null;
   isAnimating = false;
   while (pendingQueue.length > 0) {
@@ -712,32 +655,12 @@ async function processAction(
     ? []
     : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(newState) });
 
-  // 7. Play animations (unless instant — multiplier === 0). Fold in stack
-  //    pressure so per-resolution timing collapses under depth OR recent churn —
-  //    without this the single-dispatch path animated every oscillation cycle at
-  //    full speed (it previously read only the user speed preference).
-  const multiplier =
-    usePreferencesStore.getState().animationSpeedMultiplier *
-    pressureMultiplier(effectiveStackPressure(newState.stack.length));
-
-  if (steps.length > 0 && multiplier > 0) {
-    useAnimationStore.getState().setAnimationNewState(newState);
-    useAnimationStore.getState().enqueueSteps(steps, snapshotResult.seq);
-
-    // Schedule SFX synced with each step's visual timing
-    scheduleSfxForSteps(steps, multiplier);
-
-    // Wait for total animation duration
-    const totalDuration = steps.reduce(
-      (sum, step) => sum + step.duration * multiplier,
-      0,
-    );
-    await waitForAnimation(totalDuration);
-  } else if (steps.length > 0) {
-    // Instant speed: fire all SFX immediately
-    for (const step of steps) {
-      audioManager.playSfxForStep(step.effects);
-    }
+  // 7. Play animations through the Director, which owns the one clock. It
+  //    applies speed × stack pressure once (so the snapshot cannot commit
+  //    before the last beat of this action), plays each beat's SFX when that
+  //    beat starts, and handles speed 0 and a hidden tab by queueing nothing.
+  if (steps.length > 0) {
+    await director.play({ steps, snapshotSeq: snapshotResult.seq, state: newState });
   }
 
   // 8. Commit the snapshot captured in step 3b — the pair, together.
@@ -1124,23 +1047,10 @@ async function processRemoteUpdateInner(
     ? []
     : normalizeEvents(events, { pacingMultipliers, announcementState: announcementStateFor(state) });
 
-  // 4. Play animations (unless instant — multiplier === 0)
-  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
-
-  if (steps.length > 0 && multiplier > 0) {
-    useAnimationStore.getState().setAnimationNewState(state);
-    useAnimationStore.getState().enqueueSteps(steps, snapshot.seq);
-    scheduleSfxForSteps(steps, multiplier);
-
-    const totalDuration = steps.reduce(
-      (sum, step) => sum + step.duration * multiplier,
-      0,
-    );
-    await waitForAnimation(totalDuration);
-  } else if (steps.length > 0) {
-    for (const step of steps) {
-      audioManager.playSfxForStep(step.effects);
-    }
+  // 4. Play animations through the Director (the one clock, paced by speed ×
+  //    stack pressure on this remote path too).
+  if (steps.length > 0) {
+    await director.play({ steps, snapshotSeq: snapshot.seq, state });
   }
 
   // 5. Commit the pair after animations complete — revision-gated, so a remote

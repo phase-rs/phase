@@ -2,6 +2,9 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import type { TargetRef } from "../../adapter/types.ts";
+// The Director owns the one step clock that advances animationStore's active
+// step; the overlay only reports when it has presented a step.
+import { director } from "../../animation/director.ts";
 import {
   CARD_SLAM_FLIGHT_MS,
   DAMAGE_FLURRY_SOURCE_SAMPLE_LIMIT,
@@ -13,6 +16,7 @@ import {
 } from "../../animation/types.ts";
 import { getCardColors } from "../../animation/wubrgColors.ts";
 import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
+import { usePresentationPace } from "../../hooks/usePresentationPace.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -205,7 +209,6 @@ function findCardElement(objectId: number): HTMLElement | null {
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeStep = useAnimationStore((s) => s.activeStep);
   const activeGeneration = useAnimationStore((s) => s.activeGeneration);
-  const advanceStep = useAnimationStore((s) => s.advanceStep);
   const getPosition = useAnimationStore((s) => s.getPosition);
   const particleRef = useRef<ParticleCanvasHandle>(null);
   const cardVfxRef = useRef<CardVfxLayerHandle>(null);
@@ -225,7 +228,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeMeldForges, setActiveMeldForges] = useState<ActiveMeldForge[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  // One clock, one pace: the Director's speed × stack pressure while its run
+  // plays, else the speed preference. The overlay schedules no step timer.
+  const speedMultiplier = usePresentationPace();
   const reduceMotion = useReducedMotion();
   const cardAnimationStyle = usePreferencesStore((s) => s.cardAnimationStyle);
   // Style Classic, tier minimal, reduced motion and no WebGL 2 mount no layer,
@@ -954,7 +959,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     [damageTargetPosition, landDamageHit, processClassicEffect, speedMultiplier],
   );
 
-  // Process effects when activeStep changes, then advance after its duration
+  useEffect(() => director.attachPresenter(), []);
+
+  // Present the active step's effects, then start the Director's clock for it.
+  // The cleanup only drops this step's own sub-step timers (impacts, flashes)
+  // so they cannot outlive it.
   useEffect(() => {
     if (!activeStep) return;
 
@@ -966,15 +975,14 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
         activeStep.snapshotSeq,
       );
     }
+    director.presented(activeStep);
 
-    const timer = setTimeout(advanceStep, activeStep.duration * speedMultiplier);
     return () => {
-      clearTimeout(timer);
       for (const stepTimeout of stepTimeoutsRef.current) clearTimeout(stepTimeout);
       stepTimeoutsRef.current = [];
       setActiveVignette(null);
     };
-  }, [activeStep, advanceStep, processEffect, speedMultiplier]);
+  }, [activeStep, processEffect, speedMultiplier]);
 
   const handleFloatComplete = useCallback((id: number) => {
     setActiveFloats((prev) => prev.filter((f) => f.id !== id));
