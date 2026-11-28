@@ -1,7 +1,9 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolve_tracked_set_sentinel;
-use crate::types::ability::{ChosenAttribute, Effect, EffectError, ResolvedAbility};
+use crate::types::ability::{
+    ChosenAttribute, Effect, EffectError, RememberRetention, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -18,9 +20,12 @@ use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 /// passes `TrackedSet { id: TrackedSetId(0) }`, the sentinel for "the most recent
 /// tracked set", bound here via [`resolve_tracked_set_sentinel`].
 ///
-/// "The last chosen card" is singular: exactly one `ChosenAttribute::Card` is
-/// stored, replacing any prior one (replace-on-rechoose), so the grant always
-/// tracks the single latest choice. Storing it in `chosen_attributes` means it is
+/// "The last chosen card" is singular: with `RememberRetention::Replace`
+/// exactly one `ChosenAttribute::Card` is stored, replacing any prior one
+/// (replace-on-rechoose), so the grant always tracks the single latest choice.
+/// `RememberRetention::Accumulate` keeps every record instead, for a linked
+/// reader that names each object its paired ability affected (CR 607.1 — "the
+/// Borg assimilated with this Saga"). Storing it in `chosen_attributes` means it is
 /// cleared automatically when the source changes zones (CR 400.7), which is
 /// exactly the lifetime Koh's grant requires.
 pub fn resolve(
@@ -28,20 +33,32 @@ pub fn resolve(
     ability: &ResolvedAbility,
     _events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let Effect::RememberCard { target } = &ability.effect else {
+    let Effect::RememberCard { target, retention } = &ability.effect else {
         return Ok(());
     };
+    // CR 400.7: a source that left and returned is a new object, so an ability
+    // from its earlier existence must not write onto the new object's record.
+    if !ability.source_is_current(state) {
+        return Ok(());
+    }
 
     // CR 608.2c: bind the `TrackedSetId(0)` sentinel to the resolution chain's
     // published pick (the cards chosen by the preceding `ChooseFromZone`).
     let resolved = resolve_tracked_set_sentinel(state, target.clone());
-    let ctx = FilterContext::from_source(state, ability.source_id);
-    let mut chosen: Vec<ObjectId> = state
-        .objects
-        .keys()
-        .copied()
-        .filter(|&id| matches_target_filter(state, id, &resolved, &ctx))
-        .collect();
+    let mut chosen: Vec<ObjectId> = if matches!(resolved, TargetFilter::ParentTarget) {
+        // CR 608.2c + CR 607.1: "it" — the object the preceding instruction of
+        // this ability affected (an `assimilate`d permanent), carried as the
+        // resolving ability's object target.
+        super::effect_object_targets(&resolved, &ability.targets)
+    } else {
+        let ctx = FilterContext::from_source(state, ability.source_id);
+        state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| matches_target_filter(state, id, &resolved, &ctx))
+            .collect()
+    };
     // Deterministic order so a (degenerate) multi-pick records the most recent.
     chosen.sort_unstable_by_key(|id| id.0);
 
@@ -57,11 +74,22 @@ pub fn resolve(
     let pin = ObjectIncarnationRef::from_object(&state.objects[&card_id]);
 
     if let Some(src) = state.objects.get_mut(&ability.source_id) {
-        // Replace-on-rechoose (CR 608.2c "the last chosen card"): a fresh choice
-        // supersedes the prior one. `chosen_attributes` is cleared on zone change.
-        src.chosen_attributes
-            .retain(|a| !matches!(a, ChosenAttribute::Card(_)));
-        src.chosen_attributes.push(ChosenAttribute::Card(pin));
+        match retention {
+            // Replace-on-rechoose (CR 608.2c "the last chosen card"): a fresh
+            // choice supersedes the prior one.
+            RememberRetention::Replace => src
+                .chosen_attributes
+                .retain(|a| !matches!(a, ChosenAttribute::Card(_))),
+            // CR 607.1: the linked reader names every object recorded this way
+            // (a copied chapter I assimilates two creatures; chapter III returns
+            // both), so the record joins the earlier ones.
+            RememberRetention::Accumulate => {}
+        }
+        // `chosen_attributes` is cleared on zone change.
+        let record = ChosenAttribute::Card(pin);
+        if !src.chosen_attributes.contains(&record) {
+            src.chosen_attributes.push(record);
+        }
     }
 
     // CR 613.1f: the companion static grant reads `ChosenAttribute::Card` at layer

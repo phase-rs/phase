@@ -22289,6 +22289,28 @@ impl LibraryPosition {
     }
 }
 
+/// How [`Effect::RememberCard`] combines a new record with the source's earlier
+/// `ChosenAttribute::Card` records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum RememberRetention {
+    /// CR 608.2c: "the last chosen card" (Koh, the Face Stealer) — the new
+    /// record supersedes any earlier one.
+    #[default]
+    Replace,
+    /// CR 607.1: a linked ability refers to every object its paired ability
+    /// affected, so each record joins the earlier ones ("the Borg assimilated
+    /// with this Saga" after a copied chapter I — The Best of Both Worlds).
+    Accumulate,
+}
+
+impl RememberRetention {
+    /// Serde skip-helper: `Replace` is the default and is omitted from JSON.
+    pub fn is_replace(&self) -> bool {
+        matches!(self, Self::Replace)
+    }
+}
+
 /// CR 701.24a + CR 701.24d: Whether a move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
 /// Ordinary moves retain the zone pipeline's per-object library behavior;
@@ -26902,14 +26924,21 @@ pub enum Effect {
     /// `target` reads the chosen object(s) — Koh passes
     /// `TrackedSet { id: TrackedSetId(0) }` (the resolution chain's published
     /// pick, resolved via `resolve_tracked_set_sentinel`); the single recorded
-    /// card replaces any prior `ChosenAttribute::Card` (replace-on-rechoose).
+    /// card replaces any prior `ChosenAttribute::Card` (replace-on-rechoose)
+    /// unless `retention` says to accumulate.
     /// CR 400.7: the stored value is the chosen object's
     /// `ObjectIncarnationRef` pin (id + incarnation at choice time), so an
     /// object that left and returned at the same storage id is a new object and
     /// no longer matches; a reader that needs the object in a specific zone
     /// composes `FilterProp::InZone` at its emission site.
+    /// `retention` decides whether the record replaces the source's earlier
+    /// record (Koh's "the last chosen card") or joins it (CR 607.1: every
+    /// object a linked ability affected — "the Borg assimilated with this
+    /// Saga").
     RememberCard {
         target: TargetFilter,
+        #[serde(default, skip_serializing_if = "RememberRetention::is_replace")]
+        retention: RememberRetention,
     },
     /// CR 106.1b + CR 602.2b + CR 608.2c: Record the mana type(s) spent to pay
     /// this resolving ability's OWN activation cost onto its source as
@@ -31607,6 +31636,24 @@ impl TargetFilter {
         }
     }
 
+    /// Whether this filter reads the source's remembered-object record
+    /// (`TargetFilter::ChosenCard`) — the companion of
+    /// [`Self::references_exiled_by_source`] for a record written by
+    /// `Effect::RememberCard` instead of the linked exile ledger.
+    pub fn references_chosen_card(&self) -> bool {
+        match self {
+            TargetFilter::ChosenCard => true,
+            TargetFilter::And { filters } => {
+                filters.iter().any(TargetFilter::references_chosen_card)
+            }
+            TargetFilter::Or { filters } => {
+                filters.iter().all(TargetFilter::references_chosen_card)
+            }
+            TargetFilter::TrackedSetFiltered { filter, .. } => filter.references_chosen_card(),
+            _ => false,
+        }
+    }
+
     /// CR 601.3: This filter with the exile-set anaphor
     /// (`TargetFilter::ExiledBySource`) removed — i.e. the clause's OWN
     /// restrictions, expressed against a set of objects whose membership in the
@@ -33141,7 +33188,7 @@ impl Effect {
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
-            | Effect::RememberCard { target }
+            | Effect::RememberCard { target, .. }
             | Effect::PairWith { target }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
@@ -33819,7 +33866,7 @@ impl Effect {
             | Effect::Scry { target, .. }
             | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
-            | Effect::RememberCard { target }
+            | Effect::RememberCard { target, .. }
             | Effect::PairWith { target }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }

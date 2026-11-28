@@ -2427,7 +2427,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         // veto is RELOCATED to obligation (ii): a grown object bearing a
         // RememberCard-carrying ability is non-inert (`object_is_inert` rejects
         // Activated/triggered defs), so a relax can never mint a false certificate.
-        Effect::RememberCard { target } => {
+        Effect::RememberCard { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(
                 target,

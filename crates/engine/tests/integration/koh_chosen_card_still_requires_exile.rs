@@ -144,6 +144,7 @@ fn resolve_remember_card(state: &mut GameState, koh: ObjectId, card: ObjectId) {
         AbilityKind::Spell,
         Effect::RememberCard {
             target: TargetFilter::SpecificObject { id: card },
+            retention: engine::types::ability::RememberRetention::Replace,
         },
     );
     let ability = build_resolved_from_def(&definition, koh, P0);

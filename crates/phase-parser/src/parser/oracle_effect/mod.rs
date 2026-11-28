@@ -24128,11 +24128,14 @@ fn refine_put_at_library_position(
                 .parse(lower.as_str())
                 .ok()?;
             // Isolate the noun phrase before the first positional terminator;
-            // the remainder is the placement tail.
+            // the remainder is the placement tail. The bare " on the bottom"
+            // (no "of <library>") is the abbreviated placement, tried last so
+            // the full " on the bottom of" form keeps its own tail.
             let (placement_tail, before) = alt((
                 take_until::<_, _, OracleError<'_>>(" on top of"),
                 take_until(" on the bottom of"),
                 take_until(" into "),
+                take_until(" on the bottom"),
             ))
             .parse(after_put)
             .ok()?;
@@ -58962,6 +58965,13 @@ fn try_parse_put_zone_change_parts(
                 },
                 None => target,
             };
+            // CR 401.4 + CR 608.2c: a "this way" set placed on top of or on the
+            // bottom of a library ("the other cards they revealed this way" —
+            // Gift of Perfection) moves as one batch, exactly like the "all"
+            // form, so it takes the mass branch, which keeps the library
+            // position and the ordering instruction.
+            let is_mass = is_mass
+                || (is_tracked_anaphor && matches!(needle, " on the bottom of" | " on top of"));
             // CR 406.6 + CR 607.1/607.2a (#5577): a singular "the exiled card"
             // anaphor in a `ChangeZoneAll` "put" clause whose exile was made in a
             // SEPARATE, earlier resolution must bind durably to `ExiledBySource`,

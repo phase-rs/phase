@@ -1079,7 +1079,7 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
             {
                 super::lower::normalize_linked_exile_cast_bottom_cleanup(&mut next.effect);
                 cursor.else_ability = Some(Box::new(next.clone()));
-            } else if super::lower::is_exile_until_cast_bottom_cleanup(
+            } else if super::lower::is_exile_until_hit_bottom_cleanup(
                 &head_effect,
                 &cursor.effect,
                 &next.effect,
@@ -1088,7 +1088,7 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
                 // the hit whether the cast is a resolution-time offer or a standing
                 // permission — the rewrite is a property of the WORDING, not of the
                 // cast's optionality, so it runs either way.
-                super::lower::normalize_exile_until_cast_bottom_cleanup(&mut next.effect);
+                super::lower::normalize_exile_until_hit_bottom_cleanup(&mut next.effect);
                 // CR 608.2d: the decline branch exists only where there is a
                 // decline — a resolution-time optional cast. A lingering permission
                 // (The Day of the Doctor: "for as long as this Saga remains on the

@@ -4242,7 +4242,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("count".into(), count.to_string()));
             d.push(("zone".into(), fmt_zone(zone)));
         }
-        Effect::RememberCard { target } => {
+        Effect::RememberCard { target, .. } => {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::ForEachCategory { category, action, .. } => {

@@ -480,7 +480,7 @@ fn cast_from_zone_nodes(a: &AbilityDefinition, out: &mut Vec<AbilityDefinition>)
 ///
 /// This pins the second half of the fix. Removing the spurious `optional` (the
 /// first half) would otherwise have silently disarmed the Jodah bottom-cleanup
-/// rewrite, because `is_exile_until_cast_bottom_cleanup` was consulted only for
+/// rewrite, because `is_exile_until_hit_bottom_cleanup` was consulted only for
 /// an `optional` cast — the cleanup would fall back to the parser-default
 /// `TrackedSet` selector with `count: 1`, which no longer denotes "the rest".
 ///

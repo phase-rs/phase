@@ -56,10 +56,10 @@ use super::lower::{
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
     gate_reflexive_rider_on_declined_optional_target, inherit_this_way_cause_from_antecedent,
-    is_exile_until_cast_bottom_cleanup, is_land_enters_tapped_rider,
+    is_exile_until_hit_bottom_cleanup, is_land_enters_tapped_rider,
     is_linked_exile_cast_bottom_cleanup, is_stable_branch_amount,
     nest_whenever_this_turn_token_cleanup_delayed_trigger,
-    normalize_exile_until_cast_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
+    normalize_exile_until_hit_bottom_cleanup, normalize_linked_exile_cast_bottom_cleanup,
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
@@ -5054,6 +5054,16 @@ pub(crate) fn assemble_effect_chain_with_provenance(
 
     mark_independent_mana_spent_gates(&mut defs);
 
+    // CR 608.2c: an anaphor after a mass zone move names every object
+    // that move affected.
+    for index in 1..defs.len() {
+        let (before, after) = defs.split_at_mut(index);
+        super::lower::widen_sentinel_move_after_mass_move(
+            &before[index - 1].effect,
+            &mut after[0].effect,
+        );
+    }
+
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
     // append to the deepest sub rather than overwriting.
@@ -5677,29 +5687,70 @@ fn normalize_linked_exile_cast_pair(
         prev.else_ability = Some(Box::new(chain.clone()));
         return true;
     }
-    // CR 608.2c + CR 701.13a: Jodah, the Unifier — the head-aware companion
-    // gate. `prev` is `ExileFromTopUntil { NextMatches }`; `chain` is its
-    // `CastFromZone { ParentTarget }` with the bottom cleanup already nested
-    // beneath it. Rewrite that cleanup to the linked exile set, preserving the
-    // hit in exile.
-    if let Some(cleanup) = chain.sub_ability.as_deref().cloned() {
-        if is_exile_until_cast_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect) {
-            if let Some(cleanup_mut) = chain.sub_ability.as_deref_mut() {
-                // The "the rest of those exiled cards" rewrite is a property of
-                // the WORDING, so it runs for a standing permission too.
-                normalize_exile_until_cast_bottom_cleanup(&mut cleanup_mut.effect);
-                // CR 608.2d: only a resolution-time offer has a decline branch. A
-                // lingering permission (The Day of the Doctor) is never declined as
-                // the ability resolves, so an else branch there would publish a
-                // second, unreachable copy of the cleanup to the chain scanners.
-                if chain.optional {
-                    chain.else_ability = Some(Box::new(cleanup_mut.clone()));
-                }
-                return true;
+    // CR 608.2c + CR 701.13a: Jodah, the Unifier / The Borg Queen — the
+    // head-aware companion gate. `prev` is `ExileFromTopUntil { NextMatches }`;
+    // `chain` is the instruction acting on its hit through `ParentTarget`, with
+    // the bottom cleanup already nested beneath it. Rewrite that cleanup to the
+    // linked exile set, preserving the hit in exile.
+    //
+    // CR 608.2c: the hit instruction's own resolution steps (`ContinuationStep`
+    // subs — assimilate's retype after its move) are part of that instruction,
+    // so the cleanup is the node after the instruction's LAST step.
+    let cleanup_is_rest = instruction_last_step(chain)
+        .sub_ability
+        .as_deref()
+        .is_some_and(|cleanup| {
+            is_exile_until_hit_bottom_cleanup(&prev.effect, &chain.effect, &cleanup.effect)
+        });
+    if cleanup_is_rest {
+        let chain_optional = chain.optional;
+        if let Some(cleanup) = instruction_last_step_mut(chain).sub_ability.as_deref_mut() {
+            // The "the rest of those exiled cards" rewrite is a property of
+            // the WORDING, so it runs for a standing permission too.
+            normalize_exile_until_hit_bottom_cleanup(&mut cleanup.effect);
+            let cleanup = cleanup.clone();
+            // CR 608.2d: only a resolution-time offer has a decline branch. A
+            // lingering permission (The Day of the Doctor) is never declined as
+            // the ability resolves, so an else branch there would publish a
+            // second, unreachable copy of the cleanup to the chain scanners.
+            if chain_optional {
+                chain.else_ability = Some(Box::new(cleanup));
             }
+            return true;
         }
     }
     false
+}
+
+/// CR 608.2c: the last resolution step of the instruction `def` heads — `def`
+/// itself, or the deepest node reached through `ContinuationStep` subs. The
+/// first `SequentialSibling` sub below it is the next printed instruction.
+fn instruction_last_step(def: &AbilityDefinition) -> &AbilityDefinition {
+    let mut cursor = def;
+    while let Some(sub) = cursor
+        .sub_ability
+        .as_deref()
+        .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+    {
+        cursor = sub;
+    }
+    cursor
+}
+
+/// Mutable companion of [`instruction_last_step`].
+fn instruction_last_step_mut(def: &mut AbilityDefinition) -> &mut AbilityDefinition {
+    let mut cursor = def;
+    while cursor
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+    {
+        cursor = cursor
+            .sub_ability
+            .as_deref_mut()
+            .expect("sub_ability checked above");
+    }
+    cursor
 }
 
 /// R3 — CR 120.1 + CR 208.1 + CR 608.2c: a "Then it deals damage equal to
