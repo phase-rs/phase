@@ -6,7 +6,7 @@
  * `launchCommanderGame` produces — the game it hosts, the decks it assembles
  * and the URL it lands on — so a mocked store would leave the whole subject
  * untested. Only the HOST ADAPTER and the TRANSPORT are mocked; `hostDraft` is
- * driven for real so the store's module-private `activeHostAdapter` is
+ * driven for real so the store's module-private installed host is
  * installed the way production installs it.
  *
  * PORTED from the `?mode=ai` design. Step 3a-ii replaced the local-AI
@@ -641,7 +641,7 @@ describe("DraftPodPage Commander launch", () => {
     expect(navigateSpy).not.toHaveBeenCalled();
   });
 
-  // Hostile fixture — role authority. A guest has no `activeHostAdapter` and
+  // Hostile fixture — role authority. A guest has no installed host and
   // therefore no session to read the decks from.
   it("renders no launch button for a guest", async () => {
     await installCompletedPod(4);

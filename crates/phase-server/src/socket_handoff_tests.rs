@@ -3,7 +3,9 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::draft_socket_authority_tests::start_draft_match_with_deck;
+use crate::draft_socket_authority_tests::{
+    accepted_result, draft_request_id, start_draft_match_with_deck,
+};
 use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
 use crate::issue_4548_full_create_tests::{
     recv_server_message, send_test_message, spawn_full_mode_server_with_db,
@@ -11,7 +13,9 @@ use crate::issue_4548_full_create_tests::{
 use crate::socket_test_hooks::{room_request, run_async_test};
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::player::PlayerId;
-use server_core::protocol::{ClientMessage, DeckChoice, DeckData, ServerMessage};
+use server_core::protocol::{
+    ClientMessage, DeckChoice, DeckData, DraftCommandRefusal, DraftCommandResult, ServerMessage,
+};
 
 #[derive(Clone, Copy)]
 enum HandoffScenario {
@@ -101,22 +105,37 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                 draft.active_matches.remove(&id);
                 id
             };
-            let reconnect = ClientMessage::ReconnectDraft {
+            // Each send of the seat's reconnect is its own command: 301 before
+            // the target is published, 302 the handoff, 303 the retry after a
+            // restored backend.
+            let reconnect = |id: u64| ClientMessage::ReconnectDraft {
                 draft_code: draft_code.clone(),
-                player_token: draft_token,
+                player_token: draft_token.clone(),
+                request_id: draft_request_id(id),
             };
             let mut moving = connect_and_hello(url.clone()).await;
-            send_test_message(&mut moving, &reconnect, false).await;
-            loop {
-                match recv_server_message(&mut moving).await {
-                    ServerMessage::DraftStateUpdate { .. } => break,
-                    ServerMessage::DraftMatchStart { .. } => {
-                        panic!("the target is not published yet")
+            send_test_message(&mut moving, &reconnect(301), false).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match recv_server_message(&mut moving).await {
+                        ServerMessage::DraftCommandAccepted {
+                            request_id,
+                            result: DraftCommandResult::Reconnected { .. },
+                        } if request_id == draft_request_id(301) => break,
+                        ServerMessage::DraftMatchStart { .. } => {
+                            panic!("the target is not published yet")
+                        }
+                        reply @ (ServerMessage::DraftCommandAccepted { .. }
+                        | ServerMessage::DraftCommandRefused { .. }) => {
+                            panic!("draft: {reply:?}")
+                        }
+                        _ => {}
                     }
-                    ServerMessage::DraftActionRejected { reason } => panic!("draft: {reason}"),
-                    _ => {}
                 }
-            }
+            })
+            .await
+            .expect("the unpublished target's reconnect was never answered");
+            let mut handoff_id = 302;
             let mut prior_host = connect_and_hello(url.clone()).await;
             send_test_message(
                 &mut prior_host,
@@ -217,7 +236,7 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                 .await
                 .unwrap();
             let gate = app.context.socket_hooks.arm_cutover();
-            send_test_message(&mut moving, &reconnect, false).await;
+            send_test_message(&mut moving, &reconnect(handoff_id), false).await;
             gate.entered.notified().await;
             if let Some(stale) = stale_target.as_mut() {
                 let connected = app.player_count.load(Ordering::Acquire);
@@ -349,7 +368,14 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                     let mut refused = false;
                     loop {
                         match recv_server_message(&mut moving).await {
-                            ServerMessage::DraftActionRejected { .. } => refused = true,
+                            ServerMessage::DraftCommandRefused {
+                                request_id,
+                                refusal: DraftCommandRefusal::Rejected { .. },
+                            } if request_id == draft_request_id(302) => refused = true,
+                            reply @ (ServerMessage::DraftCommandAccepted { .. }
+                            | ServerMessage::DraftCommandRefused { .. }) => {
+                                panic!("terminal handoff answered {reply:?}")
+                            }
                             ServerMessage::DraftStateUpdate { .. } => {
                                 assert!(refused, "terminal handoff must report its refusal");
                                 break;
@@ -438,7 +464,15 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
             ) {
                 loop {
                     match recv_server_message(&mut moving).await {
-                        ServerMessage::DraftActionRejected { .. } => break,
+                        ServerMessage::DraftCommandRefused { request_id, .. }
+                            if request_id == draft_request_id(302) =>
+                        {
+                            break
+                        }
+                        reply @ (ServerMessage::DraftCommandAccepted { .. }
+                        | ServerMessage::DraftCommandRefused { .. }) => {
+                            panic!("a failed or superseded handoff answered {reply:?}")
+                        }
                         ServerMessage::DraftMatchStart { .. }
                         | ServerMessage::GameStarted { .. }
                         | ServerMessage::StateUpdate { .. } => {
@@ -486,7 +520,8 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                         .unwrap();
                     // A restored backend must let this same healthy draft
                     // connection reclaim the coherently disconnected seat.
-                    send_test_message(&mut moving, &reconnect, false).await;
+                    handoff_id = 303;
+                    send_test_message(&mut moving, &reconnect(handoff_id), false).await;
                 } else {
                     if let Some(database) = validation_database.take() {
                         database
@@ -567,6 +602,10 @@ fn assert_draft_handoff(scenario: HandoffScenario) {
                     _ => {}
                 }
             }
+            assert!(matches!(
+                accepted_result(recv_server_message(&mut moving).await, handoff_id),
+                DraftCommandResult::Reconnected { .. }
+            ));
             if matches!(
                 scenario,
                 HandoffScenario::ClosesDuringRetirement

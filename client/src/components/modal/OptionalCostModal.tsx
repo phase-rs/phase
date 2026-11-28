@@ -66,7 +66,7 @@ export function OptionalCostModalContent({
             },
           ],
         }
-      : additionalCostChoices(cost, times_kicked);
+      : additionalCostChoices(cost, times_kicked, origin);
   // Mandatory Choice costs (e.g. "discard a card or pay 3 life") require
   // picking one — no abort allowed. All other costs allow aborting the cast.
   const isMandatoryChoice = cost.type === "Choice";

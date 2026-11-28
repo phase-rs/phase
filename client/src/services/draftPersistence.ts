@@ -10,7 +10,7 @@
  * draft sessions can be large (8 players x 42 cards each = significant JSON).
  */
 
-import { createStore, del, get, set } from "idb-keyval";
+import { createStore, del, get, promisifyRequest, set } from "idb-keyval";
 
 import { DRAFT_KINDS } from "../adapter/draft-adapter";
 import type { DraftKind, DraftStatus, PoolInput } from "../adapter/draft-adapter";
@@ -21,7 +21,15 @@ import {
 } from "../components/draft/workspace/types";
 import type { DraftMatchBinding, DraftMatchLaunch, DraftMatchSettlement } from "../network/draftProtocol";
 import { parseRoomCode } from "../network/connection";
+import { parseWebSocketUrl } from "../config/multiplayerServer";
 import { ACTIVE_DRAFT_GUEST_KEY, ACTIVE_DRAFT_POD_KEY } from "../constants/storage";
+import {
+  runCrossTabTransaction,
+  type CrossTabResource,
+  type CrossTabTxnFailure,
+  type CrossTabTxnOutcome,
+  type RestoreRecordedRule,
+} from "./crossTabTransaction";
 import type { DraftIntergameCommand } from "./intergameCommandLedger";
 
 export type { PoolInput } from "../adapter/draft-adapter";
@@ -116,6 +124,11 @@ export interface PersistedDraftGuestSession {
   roomCode: string;
   displayName: string;
   timestamp: number;
+  /**
+   * Non-secret name this private record shares with its public pointer.
+   * Absent on a record written before records carried one; never written empty.
+   */
+  capabilityId?: string;
 }
 
 /** A participant-owned deck submission retained until the host acknowledges it. */
@@ -147,6 +160,11 @@ export interface ActiveDraftGuestMeta {
   displayName: string;
   hostPeerId: string;
   timestamp: number;
+  /**
+   * Non-secret name of the private record this pointer leads to. Absent on a
+   * pointer written before records carried one; never written empty.
+   */
+  capabilityId?: string;
 }
 
 /** Stable identity of a guest recovery locator read from local storage. */
@@ -155,13 +173,94 @@ export interface ActiveDraftGuestMetaCapture {
   displayName: string;
   hostPeerId: string;
   timestamp: number;
+  /** Null for a pointer without a name. */
+  capabilityId: string | null;
 }
+
+/**
+ * One guest's durable recovery capability: the secret host-issued token and
+ * the non-secret name its private record and public pointer share. The name is
+ * null only for records written before records carried one.
+ */
+export interface DraftGuestCapability {
+  readonly hostPeerId: string;
+  readonly draftToken: string;
+  readonly roomCode: string;
+  readonly displayName: string;
+  readonly capabilityId: string | null;
+}
+
+/** The fields that decide which stored private record a token owns. */
+export type DraftGuestCapabilityOwner = Omit<DraftGuestCapability, "capabilityId">;
+
+/** The fields that decide which stored deck outbox a token owns. */
+export type DraftDeckSubmissionOwner = Pick<DraftGuestCapability, "hostPeerId" | "roomCode" | "draftToken">;
 
 /** Non-mutating classification for guest recovery callers. */
 export type ActiveDraftGuestLoadResult =
   | { type: "absent" }
   | { type: "invalid"; capture: ActiveDraftGuestMetaCapture | null }
   | { type: "present"; meta: ActiveDraftGuestMeta; capture: ActiveDraftGuestMetaCapture };
+
+/** Which side of a server-hosted draft a native seat took when it was opened. */
+export type NativeDraftParticipant = "host" | "guest";
+
+/**
+ * The secret half of a native draft seat's recovery capability, kept in
+ * IndexedDB under its own name so no other seat's write can replace it.
+ */
+export interface NativeDraftCapabilityRecord {
+  capabilityId: string;
+  /** Canonical, as `canonicalNativeDraftEndpoint` returns it. */
+  endpoint: string;
+  draftCode: string;
+  playerToken: string;
+  seatIndex: number;
+  participant: NativeDraftParticipant;
+  timestamp: number;
+}
+
+/**
+ * The non-secret route back to a native seat's private record. It shares the
+ * guest pointer's key, told apart by its `transport` tag, and never carries
+ * the seat token.
+ */
+export interface ActiveNativeDraftPointer {
+  transport: "native";
+  capabilityId: string;
+  endpoint: string;
+  draftCode: string;
+  seatIndex: number;
+  participant: NativeDraftParticipant;
+  timestamp: number;
+}
+
+/** The exact stored text of a native pointer, as a reader saw it. */
+export interface NativeDraftPointerCapture {
+  raw: string;
+}
+
+/** Non-mutating classification of the native pointer. */
+export type ActiveNativeDraftLoadResult =
+  | { type: "absent" }
+  | { type: "invalid"; capture: NativeDraftPointerCapture }
+  | { type: "present"; pointer: ActiveNativeDraftPointer; capture: NativeDraftPointerCapture };
+
+/** Non-mutating classification of the private record a native pointer names. */
+export type NativeDraftCapabilityLoadResult =
+  | { type: "absent" }
+  | { type: "invalid" }
+  | { type: "mismatch" }
+  | { type: "present"; record: NativeDraftCapabilityRecord }
+  | { type: "readFailure"; error: unknown };
+
+/** What an exact clear of one native capability matches on. */
+export interface NativeDraftCapabilityHold {
+  readonly capabilityId: string;
+  readonly endpoint: string;
+  readonly draftCode: string;
+  readonly playerToken: string;
+}
 
 export type ActiveDraftPodPhase =
   | "lobby"
@@ -234,6 +333,7 @@ const DRAFT_GUEST_PREFIX = "phase-draft-guest:";
 const DRAFT_SETTLEMENT_PREFIX = "phase-draft-settlement:";
 const DRAFT_INTERGAME_PREFIX = "phase-draft-intergame:";
 const DRAFT_DECK_SUBMISSION_PREFIX = "phase-draft-deck-submission:";
+const NATIVE_DRAFT_CAPABILITY_PREFIX = "phase-native-draft-capability:";
 const HOST_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Guest token TTL — 4 hours matches the game session TTL. */
 const GUEST_SESSION_TTL_MS = 4 * 60 * 60 * 1000;
@@ -349,20 +449,108 @@ export function clearActiveDraftPod(): void {
 
 // ── Active Guest Meta ─────────────────────────────────────────────────
 
-/**
- * The room code and display name are enough to reconnect, but never confer a
- * seat. The opaque draft token stays in IndexedDB under the expected host id.
- */
-export function saveActiveDraftGuest(meta: Omit<ActiveDraftGuestMeta, "timestamp">): void {
+/** What a guest seat publishes as its pointer; the write stamps the time. */
+export type ActiveDraftGuestPublication = Omit<ActiveDraftGuestMeta, "timestamp" | "capabilityId"> & {
+  capabilityId: string;
+};
+
+/** The pointer a publication writes, stamped now; null for one that does not validate. */
+function activeDraftGuestPointer(meta: ActiveDraftGuestPublication): ActiveDraftGuestMeta | null {
   const roomCode = parseRoomCode(meta.roomCode);
   const displayName = meta.displayName.trim();
-  if (!roomCode || !displayName || !meta.hostPeerId.trim()) return;
-  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, JSON.stringify({
+  if (!roomCode || !displayName || !meta.hostPeerId.trim() || !isNonEmptyString(meta.capabilityId)) {
+    return null;
+  }
+  return {
     roomCode,
     displayName,
     hostPeerId: meta.hostPeerId,
     timestamp: Date.now(),
-  }));
+    capabilityId: meta.capabilityId,
+  };
+}
+
+/**
+ * The room code and display name are enough to reconnect, but never confer a
+ * seat. The opaque draft token stays in IndexedDB under the expected host id.
+ * Writes over whatever is stored. Settles once a native seat's record this
+ * pointer replaces is dealt with.
+ */
+function publishGuestBody(step: PointerStep, meta: ActiveDraftGuestPublication): Promise<void> {
+  const written = activeDraftGuestPointer(meta);
+  return written === null ? Promise.resolve() : replaceActiveDraftPointer(step, JSON.stringify(written));
+}
+
+/**
+ * A guest seat's publication written over whatever is stored, inside the
+ * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.publishGuest`.
+ * Settles once a native record the pointer replaces is dealt with, after the
+ * transaction ends. Rejects with `ActiveDraftPointerUnavailableError`, writing
+ * nothing, when the transaction cannot run or its result cannot be recorded
+ * (a write it cannot undo stays until a later step restores the recorded
+ * pointer), and as the write does.
+ */
+export async function saveActiveDraftGuest(meta: ActiveDraftGuestPublication): Promise<void> {
+  const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishGuest(meta)));
+  await removal;
+}
+
+/**
+ * Writes a guest seat's pointer only while the stored pointer is still
+ * `standsOn`, read and written in one synchronous step, and returns the
+ * capture of what it wrote; null when it wrote nothing. The text it replaces
+ * is a guest pointer, which names no native record. Throws as the write does.
+ */
+function republishGuestBody(
+  step: PointerStep,
+  standsOn: ActiveDraftGuestMetaCapture,
+  meta: ActiveDraftGuestPublication,
+): ActiveDraftGuestMetaCapture | null {
+  const written = activeDraftGuestPointer(meta);
+  if (written === null) return null;
+  const settled = replaceActiveDraftPointerIfCurrent(step, JSON.stringify(written), (stored) => {
+    const current = storedGuestCapture(stored);
+    return current !== null && sameActiveDraftGuestCapture(current, standsOn);
+  });
+  return settled === null ? null : activeDraftGuestCapture(written);
+}
+
+/**
+ * A guest seat's republication compared and written inside the
+ * recovery-pointer transaction; otherwise as `ActiveDraftPointerTxn.republishGuest`.
+ * Resolves to the capture of what it wrote, or null when it wrote nothing.
+ * Rejects with `ActiveDraftPointerUnavailableError`, writing nothing, when the
+ * transaction cannot run or its result cannot be recorded (a write it cannot
+ * undo stays until a later step restores the recorded pointer), and as the
+ * write does.
+ */
+export async function republishActiveDraftGuest(
+  standsOn: ActiveDraftGuestMetaCapture,
+  meta: ActiveDraftGuestPublication,
+): Promise<ActiveDraftGuestMetaCapture | null> {
+  return committedPointerStep(await withActiveDraftPointer((txn) => txn.republishGuest(standsOn, meta)));
+}
+
+/** Whether two guest captures are the same stored pointer, capability included. */
+export function sameActiveDraftGuestCapture(
+  left: ActiveDraftGuestMetaCapture,
+  right: ActiveDraftGuestMetaCapture,
+): boolean {
+  return left.roomCode === right.roomCode
+    && left.displayName === right.displayName
+    && left.hostPeerId === right.hostPeerId
+    && left.timestamp === right.timestamp
+    && left.capabilityId === right.capabilityId;
+}
+
+/** The guest capture of a stored pointer's text: null for none, unparseable or tagged text. */
+function storedGuestCapture(raw: string | null): ActiveDraftGuestMetaCapture | null {
+  if (raw === null) return null;
+  try {
+    return activeDraftGuestCapture(JSON.parse(raw));
+  } catch {
+    return null;
+  }
 }
 
 function activeDraftGuestCapture(value: unknown): ActiveDraftGuestMetaCapture | null {
@@ -372,6 +560,7 @@ function activeDraftGuestCapture(value: unknown): ActiveDraftGuestMetaCapture | 
     displayName: value.displayName,
     hostPeerId: value.hostPeerId,
     timestamp: value.timestamp,
+    capabilityId: value.capabilityId ?? null,
   };
 }
 
@@ -381,6 +570,8 @@ export function inspectActiveDraftGuest(): ActiveDraftGuestLoadResult {
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
     if (!raw) return { type: "absent" };
     const value: unknown = JSON.parse(raw);
+    // A tagged record belongs to its transport's reader, never to this one.
+    if (isRecord(value) && hasTransportTag(value)) return { type: "absent" };
     if (!isActiveDraftGuestMeta(value)) return { type: "invalid", capture: null };
     const capture = activeDraftGuestCapture(value);
     if (!capture || Date.now() - capture.timestamp > GUEST_SESSION_TTL_MS) {
@@ -392,40 +583,58 @@ export function inspectActiveDraftGuest(): ActiveDraftGuestLoadResult {
   }
 }
 
+/** Reads the guest recovery locator; malformed or expired storage is left as it is. */
 export function loadActiveDraftGuest(): ActiveDraftGuestMeta | null {
   const active = inspectActiveDraftGuest();
-  if (active.type === "present") return active.meta;
-  if (active.type === "invalid") clearActiveDraftGuest();
-  return null;
+  return active.type === "present" ? active.meta : null;
 }
 
 /** Clears guest metadata only when it still matches a previously inspected locator. */
-export function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void {
+function clearGuestIfCurrentBody(capture: ActiveDraftGuestMetaCapture): void {
   try {
     const raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
     if (!raw) return;
     const currentCapture = activeDraftGuestCapture(JSON.parse(raw));
-    if (
-      currentCapture?.roomCode === capture.roomCode
-      && currentCapture.displayName === capture.displayName
-      && currentCapture.hostPeerId === capture.hostPeerId
-      && currentCapture.timestamp === capture.timestamp
-    ) {
-      clearActiveDraftGuest();
+    if (currentCapture !== null && sameActiveDraftGuestCapture(currentCapture, capture)) {
+      localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
     }
   } catch {
     // A malformed replacement is not evidence that this caller owns it.
   }
 }
 
-export function clearActiveDraftGuest(): void {
-  localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+/**
+ * Clears guest metadata only when it still matches a previously inspected
+ * locator, compared and removed inside the recovery-pointer transaction. A
+ * transaction that cannot run leaves the pointer.
+ */
+export async function clearActiveDraftGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): Promise<void> {
+  await withActiveDraftPointer((pointer) => pointer.clearGuestIfCurrent(capture));
 }
 
-/** Do not erase a newer guest locator when an older adapter is disposed. */
-export function clearActiveDraftGuestForHost(hostPeerId: string): void {
-  const current = loadActiveDraftGuest();
-  if (current?.hostPeerId === hostPeerId) clearActiveDraftGuest();
+/**
+ * Removes a stored pointer that reads as no guest pointer at all (no capture
+ * can name it), and nothing else: a pointer any reader can use stays.
+ */
+function clearUnreadableGuestBody(): void {
+  const active = inspectActiveDraftGuest();
+  if (active.type !== "invalid" || active.capture !== null) return;
+  try {
+    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) === null) return;
+    localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    // Unavailable storage is not evidence that the stored text is unreadable.
+  }
+}
+
+/**
+ * Clears a stored guest pointer that cannot be read as one, inspected and
+ * removed inside the recovery-pointer transaction, so a pointer another writer
+ * stored after the caller's own inspection stays. A transaction that cannot
+ * run leaves the pointer.
+ */
+export async function clearActiveDraftGuest(): Promise<void> {
+  await withActiveDraftPointer((pointer) => pointer.clearUnreadableGuest());
 }
 
 /** Do not erase a newer pod's host locator when an older pod is ended. */
@@ -495,11 +704,16 @@ function isActiveDraftPodMeta(value: unknown): value is ActiveDraftPodMeta {
 }
 
 function isActiveDraftGuestMeta(value: unknown): value is ActiveDraftGuestMeta {
-  if (!isRecord(value)) return false;
+  if (!isRecord(value) || hasTransportTag(value)) return false;
   return isCanonicalRoomCode(value.roomCode)
     && isNonEmptyString(value.displayName)
     && isNonEmptyString(value.hostPeerId)
-    && isPositiveFiniteNumber(value.timestamp);
+    && isPositiveFiniteNumber(value.timestamp)
+    && isOptionalCapabilityId(value.capabilityId);
+}
+
+function isOptionalCapabilityId(value: unknown): value is string | undefined {
+  return value === undefined || isNonEmptyString(value);
 }
 
 /**
@@ -683,16 +897,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/** An untagged pointer is a P2P guest's; any own `transport` key names another reader. */
+function hasTransportTag(value: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(value, "transport");
+}
+
 // ── Guest Persistence ──────────────────────────────────────────────────
 
 export async function saveDraftGuestSession(
   hostPeerId: string,
-  data: { draftToken: string; seatIndex: number; draftCode: string; roomCode: string; displayName: string },
+  data: {
+    draftToken: string;
+    seatIndex: number;
+    draftCode: string;
+    roomCode: string;
+    displayName: string;
+    capabilityId: string;
+  },
 ): Promise<void> {
   const roomCode = parseRoomCode(data.roomCode);
   const displayName = data.displayName.trim();
   if (!roomCode) throw new Error("Invalid draft room code");
   if (!displayName) throw new Error("Draft display name is required");
+  if (!isNonEmptyString(data.capabilityId)) throw new Error("Draft recovery capability is required");
   const session: PersistedDraftGuestSession = {
     hostPeerId,
     draftToken: data.draftToken,
@@ -701,6 +928,7 @@ export async function saveDraftGuestSession(
     roomCode,
     displayName,
     timestamp: Date.now(),
+    capabilityId: data.capabilityId,
   };
   try {
     await set(DRAFT_GUEST_PREFIX + hostPeerId, session, getDraftStore());
@@ -712,7 +940,7 @@ export async function saveDraftGuestSession(
 
 export async function loadDraftGuestSession(
   hostPeerId: string,
-  identity?: Pick<ActiveDraftGuestMeta, "roomCode" | "displayName">,
+  identity?: Pick<ActiveDraftGuestMeta, "roomCode" | "displayName" | "capabilityId">,
 ): Promise<PersistedDraftGuestSession | null> {
   try {
     const session = await get<PersistedDraftGuestSession>(
@@ -720,29 +948,646 @@ export async function loadDraftGuestSession(
       getDraftStore(),
     );
     if (!session || !isPersistedDraftGuestSession(session) || session.hostPeerId !== hostPeerId) return null;
-    if (Date.now() - session.timestamp > GUEST_SESSION_TTL_MS) {
-      await clearDraftGuestSession(hostPeerId);
-      return null;
-    }
+    // An expired record stays; the next admission at this key replaces it.
+    if (Date.now() - session.timestamp > GUEST_SESSION_TTL_MS) return null;
     if (identity && (session.roomCode !== identity.roomCode || session.displayName !== identity.displayName)) {
       return null;
     }
+    // A pointer that names a capability binds only the record carrying that name.
+    if (identity?.capabilityId !== undefined && session.capabilityId !== identity.capabilityId) return null;
     return session;
   } catch {
     return null;
   }
 }
 
-export async function clearDraftGuestSession(hostPeerId: string): Promise<void> {
-  try {
-    await del(DRAFT_GUEST_PREFIX + hostPeerId, getDraftStore());
-  } catch { /* best-effort */ }
+/**
+ * Whether a stored private record is a live record of this owner's token,
+ * room and display name. Expired and malformed records are owned by nobody.
+ */
+function ownsDraftGuestRecord(value: unknown, owner: DraftGuestCapabilityOwner): value is PersistedDraftGuestSession {
+  return isPersistedDraftGuestSession(value)
+    && Date.now() - value.timestamp <= GUEST_SESSION_TTL_MS
+    && value.hostPeerId === owner.hostPeerId
+    && value.draftToken === owner.draftToken
+    && value.roomCode === parseRoomCode(owner.roomCode)
+    && value.displayName === owner.displayName.trim();
 }
 
-/** Clears both halves of one guest's recovery identity. */
-export async function clearDraftGuestRecovery(hostPeerId: string): Promise<void> {
-  await clearDraftGuestSession(hostPeerId);
-  clearActiveDraftGuestForHost(hostPeerId);
+/**
+ * Reads the capability name the stored private record gives this token, or
+ * null when no live record at the owner's key belongs to it. Read only.
+ */
+export async function loadDraftGuestCapability(
+  owner: DraftGuestCapabilityOwner,
+): Promise<DraftGuestCapability | null> {
+  try {
+    const record = await get<unknown>(DRAFT_GUEST_PREFIX + owner.hostPeerId, getDraftStore());
+    if (!ownsDraftGuestRecord(record, owner)) return null;
+    return {
+      hostPeerId: owner.hostPeerId,
+      draftToken: owner.draftToken,
+      roomCode: owner.roomCode,
+      displayName: owner.displayName,
+      capabilityId: record.capabilityId ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deletes the record at `key` only if `owns` holds for the value read in the
+ * same read-write transaction, so a record written in between is never erased.
+ * Any failure, including IndexedDB being unavailable, keeps the record.
+ */
+async function removeDraftRecordIf(
+  key: string,
+  owns: (value: unknown) => boolean,
+): Promise<"removed" | "kept"> {
+  try {
+    return await getDraftStore()("readwrite", (store) => new Promise<"removed" | "kept">((resolve, reject) => {
+      const read = store.get(key);
+      read.onerror = () => reject(read.error);
+      read.onsuccess = () => {
+        let owned: boolean;
+        try {
+          owned = owns(read.result);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        if (!owned) {
+          resolve("kept");
+          return;
+        }
+        store.delete(key);
+        promisifyRequest(store.transaction).then(() => resolve("removed"), reject);
+      };
+    }));
+  } catch {
+    return "kept";
+  }
+}
+
+/**
+ * Removes a guest's private record and public pointer only where each
+ * provably belongs to this capability; malformed, expired and ambiguous
+ * storage stays.
+ */
+export async function clearDraftGuestRecovery(capability: DraftGuestCapability): Promise<void> {
+  const removal = await removeDraftRecordIf(
+    DRAFT_GUEST_PREFIX + capability.hostPeerId,
+    (value) => ownsDraftGuestRecord(value, capability)
+      && (value.capabilityId ?? null) === capability.capabilityId,
+  );
+  // The pointer is read and removed inside one recovery-pointer transaction.
+  await withActiveDraftPointer((pointer) => {
+    const active = inspectActiveDraftGuest();
+    if (active.type !== "present") return;
+    const { capture } = active;
+    if (
+      capture.hostPeerId !== capability.hostPeerId
+      || capture.roomCode !== parseRoomCode(capability.roomCode)
+      || capture.displayName !== capability.displayName.trim()
+    ) return;
+    const namesThisCapability = capture.capabilityId !== null
+      ? capture.capabilityId === capability.capabilityId
+      // An unnamed pointer leads to whatever record sits at its key, so it is
+      // this capability's only when this clear has just removed its unnamed record.
+      : capability.capabilityId === null && removal === "removed";
+    if (namesThisCapability) pointer.clearGuestIfCurrent(capture);
+  });
+}
+
+// ── Recovery-Pointer Transaction ──────────────────────────────────────
+
+/**
+ * The recovery pointer's generation counter, and the record of the generation
+ * each step committed with the pointer text it left. Both are non-secret and
+ * kept in the draft store beside the records the pointer leads to, so clearing
+ * that store resets them; the counter is also kept in `localStorage`.
+ */
+const ACTIVE_DRAFT_POINTER_GENERATION_KEY = "phase-active-draft-pointer-generation";
+const ACTIVE_DRAFT_POINTER_RECORD_KEY = "phase-active-draft-pointer-record";
+
+const ACTIVE_DRAFT_POINTER_RESOURCE: CrossTabResource<RestoreRecordedRule> = {
+  lockName: "phase-active-draft-pointer",
+  localGenerationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
+  generationStore: getDraftStore,
+  generationKey: ACTIVE_DRAFT_POINTER_GENERATION_KEY,
+  staleView: {
+    kind: "restore-recorded",
+    view: {
+      recordKey: ACTIVE_DRAFT_POINTER_RECORD_KEY,
+      read: () => localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY),
+      // A plain write, removing no private record: rolling forward, the step
+      // that left the recorded pointer removes the record its own write
+      // displaced once its result is recorded; rolling back, the record an
+      // unrecorded step's pointer named is left unreachable, as when a tab
+      // closes before publishing.
+      write: (value) => {
+        if (value === null) localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+        else localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, value);
+      },
+    },
+  },
+};
+
+/**
+ * The recovery pointer's operations, valid only inside the one body they were
+ * handed to: each throws, and acts on nothing, once that body has returned.
+ * Each compares and writes exactly as its exported counterpart describes.
+ */
+export interface ActiveDraftPointerTxn {
+  publishNative(pointer: ActiveNativeDraftPointer): Promise<void>;
+  republishNative(capture: NativeDraftPointerCapture, pointer: ActiveNativeDraftPointer): NativeDraftRepublication;
+  publishGuest(meta: ActiveDraftGuestPublication): Promise<void>;
+  republishGuest(
+    standsOn: ActiveDraftGuestMetaCapture,
+    meta: ActiveDraftGuestPublication,
+  ): ActiveDraftGuestMetaCapture | null;
+  clearGuestIfCurrent(capture: ActiveDraftGuestMetaCapture): void;
+  clearNativeIfCurrent(capture: NativeDraftPointerCapture): boolean;
+  clearUnreadableGuest(): void;
+  /** Runs `undo` if this step's write is reverted because its result could not be recorded. */
+  onReverted(undo: () => void): void;
+}
+
+export type ActiveDraftPointerTxnResult<T> = CrossTabTxnOutcome<RestoreRecordedRule, T, CrossTabTxnFailure>;
+
+/** Why a recovery-pointer step did not take effect. */
+export type ActiveDraftPointerFailure = CrossTabTxnFailure | "result-unrecorded";
+
+/**
+ * The step a pointer write belongs to. An effect registered with
+ * `afterRecorded` starts only once the step's result is recorded; the returned
+ * promise settles when it has run, or at once, unrun, when the step is reverted.
+ */
+interface PointerStep {
+  afterRecorded(effect: () => Promise<void>): Promise<void>;
+}
+
+/** A recovery-pointer step was refused before it ran, or reverted after it. */
+export class ActiveDraftPointerUnavailableError extends Error {
+  readonly reason: ActiveDraftPointerFailure;
+  constructor(reason: ActiveDraftPointerFailure) {
+    super(`Recovery pointer unavailable: ${reason}`);
+    this.name = "ActiveDraftPointerUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Runs `body` inside the cross-tab recovery-pointer transaction: under its
+ * exclusive lock, once this tab's storage shows every earlier step any tab
+ * committed, or, when it does not within its bound, once this tab has written
+ * into its storage the pointer the last step recorded, so another tab's step
+ * lands wholly before `body` or wholly after it. `body` is synchronous, and it
+ * reaches the pointer only through the capability it is handed; it never calls
+ * an exported pointer function, whose own lock request would wait on this one.
+ * A promise `body` returns is not awaited under the lock. A transaction whose
+ * view can be neither confirmed nor restored skips `body`, and a throw from
+ * `body` rejects. A step whose body changed the pointer but whose result
+ * cannot be recorded is reverted: its pointer write is undone (or, when the
+ * undo throws, left until a later step restores the recorded pointer), the record
+ * removals its write would start never run, the undos its body registered
+ * run, and it ends as `reverted`; a removal a kept step's write started runs
+ * once its result is recorded. With no lock manager `body`
+ * runs unguarded at the call, and nothing orders it against another tab.
+ */
+export async function withActiveDraftPointer<T>(
+  body: (pointer: ActiveDraftPointerTxn) => T,
+): Promise<ActiveDraftPointerTxnResult<T>> {
+  const deferred: Array<(kept: boolean) => void> = [];
+  const undos: Array<() => void> = [];
+  const step: PointerStep = {
+    afterRecorded: (effect) => new Promise<void>((resolve, reject) => {
+      deferred.push((kept) => {
+        if (kept) effect().then(resolve, reject);
+        else resolve();
+      });
+    }),
+  };
+  const result = await runCrossTabTransaction(ACTIVE_DRAFT_POINTER_RESOURCE, () => {
+    let open = true;
+    const scoped = <A extends unknown[], R>(operation: (...args: A) => R) => (...args: A): R => {
+      if (!open) throw new Error("Recovery-pointer transaction already ended");
+      return operation(...args);
+    };
+    const inStep = <A extends unknown[], R>(operation: (step: PointerStep, ...args: A) => R) =>
+      scoped((...args: A): R => operation(step, ...args));
+    const pointer: ActiveDraftPointerTxn = {
+      publishNative: inStep(publishNativeBody),
+      republishNative: inStep(republishNativeBody),
+      publishGuest: inStep(publishGuestBody),
+      republishGuest: inStep(republishGuestBody),
+      clearGuestIfCurrent: scoped(clearGuestIfCurrentBody),
+      clearNativeIfCurrent: scoped(clearNativeIfCurrentBody),
+      clearUnreadableGuest: scoped(clearUnreadableGuestBody),
+      onReverted: scoped((undo: () => void) => {
+        undos.push(undo);
+      }),
+    };
+    try {
+      // Boxed, so a removal the body started settles outside the lock, and a
+      // throw rejects only once the step's result is recorded or reverted.
+      return { ok: true, value: body(pointer) } as const;
+    } catch (error) {
+      return { ok: false, error } as const;
+    } finally {
+      open = false;
+    }
+  }, "run-unguarded");
+  if (result.status === "skipped") return result;
+  const kept = result.status === "committed";
+  for (const settle of deferred) settle(kept);
+  if (!kept) for (const undo of undos) undo();
+  const boxed = result.value;
+  if (!boxed.ok) throw boxed.error;
+  return result.status === "committed"
+    ? { status: "committed", value: boxed.value }
+    : { status: "reverted", value: boxed.value };
+}
+
+/** The value of a step that ran and was kept; any other step rejects. */
+function committedPointerStep<T>(result: ActiveDraftPointerTxnResult<T>): T {
+  if (result.status === "skipped") throw new ActiveDraftPointerUnavailableError(result.reason);
+  if (result.status === "reverted") throw new ActiveDraftPointerUnavailableError("result-unrecorded");
+  return result.value;
+}
+
+// ── Native Draft Capability ───────────────────────────────────────────
+
+/**
+ * The one form a native draft endpoint is stored and compared in: a ws/wss
+ * address `parseWebSocketUrl` accepts, with no userinfo and no query, as its
+ * serialized `href`. Null for anything else. Each output maps to itself.
+ */
+export function canonicalNativeDraftEndpoint(value: string): string | null {
+  const url = parseWebSocketUrl(value.trim());
+  // The query is tested on `href` rather than `search`, which is "" for a bare
+  // trailing "?" that still serializes. With any fragment already refused, a
+  // literal "?" in the serialized form can only be the query delimiter, since
+  // a "?" in the path or userinfo percent-encodes to %3F.
+  if (!url || url.username !== "" || url.password !== "" || url.href.includes("?")) return null;
+  return url.href;
+}
+
+function isCanonicalNativeEndpoint(value: unknown): value is string {
+  return typeof value === "string" && canonicalNativeDraftEndpoint(value) === value;
+}
+
+function isNativeDraftParticipant(value: unknown): value is NativeDraftParticipant {
+  return value === "host" || value === "guest";
+}
+
+function isNativeDraftCapabilityRecord(value: unknown): value is NativeDraftCapabilityRecord {
+  return isRecord(value)
+    && isNonEmptyString(value.capabilityId)
+    && isCanonicalNativeEndpoint(value.endpoint)
+    && isNonEmptyString(value.draftCode)
+    && isNonEmptyString(value.playerToken)
+    && isNonnegativeInteger(value.seatIndex)
+    && isNativeDraftParticipant(value.participant)
+    && isPositiveFiniteNumber(value.timestamp);
+}
+
+function isActiveNativeDraftPointer(value: unknown): value is ActiveNativeDraftPointer {
+  return isRecord(value)
+    && value.transport === "native"
+    && isNonEmptyString(value.capabilityId)
+    && isCanonicalNativeEndpoint(value.endpoint)
+    && isNonEmptyString(value.draftCode)
+    && isNonnegativeInteger(value.seatIndex)
+    && isNativeDraftParticipant(value.participant)
+    && isPositiveFiniteNumber(value.timestamp);
+}
+
+/**
+ * Commits a native seat's secret half and returns the pointer that leads to
+ * it, without writing that pointer: only the installed owner publishes it.
+ * Throws on invalid input or a failed write.
+ */
+export async function saveNativeDraftCapability(
+  input: Omit<NativeDraftCapabilityRecord, "timestamp">,
+): Promise<ActiveNativeDraftPointer> {
+  const record: NativeDraftCapabilityRecord = {
+    capabilityId: input.capabilityId,
+    endpoint: input.endpoint,
+    draftCode: input.draftCode,
+    playerToken: input.playerToken,
+    seatIndex: input.seatIndex,
+    participant: input.participant,
+    timestamp: Date.now(),
+  };
+  if (!isNativeDraftCapabilityRecord(record)) throw new Error("Invalid native draft recovery capability");
+  await set(NATIVE_DRAFT_CAPABILITY_PREFIX + record.capabilityId, record, getDraftStore());
+  return {
+    transport: "native",
+    capabilityId: record.capabilityId,
+    endpoint: record.endpoint,
+    draftCode: record.draftCode,
+    seatIndex: record.seatIndex,
+    participant: record.participant,
+    timestamp: record.timestamp,
+  };
+}
+
+/**
+ * The capability a stored pointer's text names, read as a native pointer:
+ * null for any text that is not one or names none. A malformed or expired
+ * native pointer still names its capability.
+ */
+function nativePointerCapabilityId(raw: string | null): string | null {
+  if (raw === null) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  return isRecord(value) && value.transport === "native" && isNonEmptyString(value.capabilityId)
+    ? value.capabilityId
+    : null;
+}
+
+/**
+ * Removes a native seat's private record once no pointer leads to it. The
+ * stored pointer is read in the same step as the delete, so a pointer that
+ * names this capability again by then, its own resume's, keeps the record.
+ * Unavailable storage keeps it.
+ */
+async function removeUnnamedNativeDraftCapability(capabilityId: string): Promise<void> {
+  await removeDraftRecordIf(
+    NATIVE_DRAFT_CAPABILITY_PREFIX + capabilityId,
+    (value) => value !== undefined
+      && nativePointerCapabilityId(localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY)) !== capabilityId,
+  );
+}
+
+/**
+ * The one write of the tab's recovery pointer, over `stored`, the text it
+ * replaces; throws as the write does. A native pointer it replaces leaves its
+ * seat's private record with no route back, so the returned promise settles
+ * once that record is removed or kept, which waits for the step's result to
+ * be recorded, and settles at once, keeping it, when the step is reverted.
+ */
+function writeActiveDraftPointerOver(step: PointerStep, stored: string | null, text: string): Promise<void> {
+  const replaced = nativePointerCapabilityId(stored);
+  localStorage.setItem(ACTIVE_DRAFT_GUEST_KEY, text);
+  return replaced === null
+    ? Promise.resolve()
+    : step.afterRecorded(() => removeUnnamedNativeDraftCapability(replaced));
+}
+
+/** Writes the tab's one recovery pointer over whatever is stored. */
+function replaceActiveDraftPointer(step: PointerStep, text: string): Promise<void> {
+  let stored: string | null;
+  try {
+    stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    stored = null;
+  }
+  return writeActiveDraftPointerOver(step, stored, text);
+}
+
+/**
+ * Writes the tab's one recovery pointer only when `isCurrent` holds for the
+ * stored text, reading, deciding and writing in one synchronous step; null
+ * when it wrote nothing. A read it cannot make throws, as the write does: it
+ * is no evidence that the stored pointer is current.
+ */
+function replaceActiveDraftPointerIfCurrent(
+  step: PointerStep,
+  text: string,
+  isCurrent: (stored: string | null) => boolean,
+): Promise<void> | null {
+  const stored = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  if (!isCurrent(stored)) return null;
+  return writeActiveDraftPointerOver(step, stored, text);
+}
+
+/** A native pointer's stored text, its fields in their stored order. */
+function nativePointerText(pointer: ActiveNativeDraftPointer): string {
+  return JSON.stringify({
+    transport: "native",
+    capabilityId: pointer.capabilityId,
+    endpoint: pointer.endpoint,
+    draftCode: pointer.draftCode,
+    seatIndex: pointer.seatIndex,
+    participant: pointer.participant,
+    timestamp: pointer.timestamp,
+  });
+}
+
+/**
+ * Writes a native pointer over whatever is stored; one that does not validate
+ * is not written. Settles once a native record the pointer replaces is dealt with.
+ */
+function publishNativeBody(step: PointerStep, pointer: ActiveNativeDraftPointer): Promise<void> {
+  if (!isActiveNativeDraftPointer(pointer)) return Promise.resolve();
+  return replaceActiveDraftPointer(step, nativePointerText(pointer));
+}
+
+/**
+ * Writes a native pointer over whatever is stored, inside the recovery-pointer
+ * transaction; one that does not validate is not written. Settles once a
+ * native record the pointer replaces is dealt with, after the transaction
+ * ends. Rejects with `ActiveDraftPointerUnavailableError`, writing nothing,
+ * when the transaction cannot run or its result cannot be recorded (a write it
+ * cannot undo stays until a later step restores the recorded pointer), and as
+ * the write does.
+ */
+export async function publishActiveNativeDraft(pointer: ActiveNativeDraftPointer): Promise<void> {
+  const removal = committedPointerStep(await withActiveDraftPointer((txn) => txn.publishNative(pointer)));
+  await removal;
+}
+
+/**
+ * Inspects the native pointer without mutating it. Anything not tagged
+ * `native` is absent to this reader; a tagged record that is malformed or
+ * expired is invalid.
+ */
+export function inspectActiveNativeDraft(): ActiveNativeDraftLoadResult {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY);
+  } catch {
+    return { type: "absent" };
+  }
+  if (raw === null) return { type: "absent" };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { type: "absent" };
+  }
+  if (!isRecord(value) || !hasTransportTag(value) || value.transport !== "native") return { type: "absent" };
+  const capture: NativeDraftPointerCapture = { raw };
+  if (!isActiveNativeDraftPointer(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
+    return { type: "invalid", capture };
+  }
+  return {
+    type: "present",
+    pointer: {
+      transport: "native",
+      capabilityId: value.capabilityId,
+      endpoint: value.endpoint,
+      draftCode: value.draftCode,
+      seatIndex: value.seatIndex,
+      participant: value.participant,
+      timestamp: value.timestamp,
+    },
+    capture,
+  };
+}
+
+/** Reads the private record a native pointer names. Never mutates. */
+export async function loadNativeDraftCapability(
+  pointer: ActiveNativeDraftPointer,
+): Promise<NativeDraftCapabilityLoadResult> {
+  let value: unknown;
+  try {
+    value = await get<unknown>(NATIVE_DRAFT_CAPABILITY_PREFIX + pointer.capabilityId, getDraftStore());
+  } catch (error) {
+    return { type: "readFailure", error };
+  }
+  if (value === undefined) return { type: "absent" };
+  if (!isNativeDraftCapabilityRecord(value) || Date.now() - value.timestamp > GUEST_SESSION_TTL_MS) {
+    return { type: "invalid" };
+  }
+  if (
+    value.capabilityId !== pointer.capabilityId
+    || value.endpoint !== pointer.endpoint
+    || value.draftCode !== pointer.draftCode
+    || value.seatIndex !== pointer.seatIndex
+    || value.participant !== pointer.participant
+  ) {
+    return { type: "mismatch" };
+  }
+  return { type: "present", record: value };
+}
+
+/**
+ * What a native republication did. Either way `settled` settles once the
+ * private records it may remove are dealt with.
+ */
+export type NativeDraftRepublication =
+  | { readonly status: "published"; readonly settled: Promise<void> }
+  | { readonly status: "superseded"; readonly settled: Promise<void> };
+
+/**
+ * Writes `pointer` only while the stored text is still `capture`, read and
+ * written in one synchronous step. Otherwise it writes and removes nothing of
+ * the stored pointer's, and removes this capability's record only once no
+ * pointer names it. Throws on a pointer that does not validate or names
+ * another capability than the capture, and as the read or the write does.
+ */
+function republishNativeBody(
+  step: PointerStep,
+  capture: NativeDraftPointerCapture,
+  pointer: ActiveNativeDraftPointer,
+): NativeDraftRepublication {
+  if (!isActiveNativeDraftPointer(pointer) || nativePointerCapabilityId(capture.raw) !== pointer.capabilityId) {
+    throw new Error("Invalid native draft recovery pointer");
+  }
+  const settled = replaceActiveDraftPointerIfCurrent(
+    step,
+    nativePointerText(pointer),
+    (stored) => stored === capture.raw,
+  );
+  return settled === null
+    ? {
+        status: "superseded",
+        settled: step.afterRecorded(() => removeUnnamedNativeDraftCapability(pointer.capabilityId)),
+      }
+    : { status: "published", settled };
+}
+
+/**
+ * A native republication compared and written inside the recovery-pointer
+ * transaction; otherwise as `ActiveDraftPointerTxn.republishNative`. Rejects
+ * with `ActiveDraftPointerUnavailableError`, writing nothing, when the
+ * transaction cannot run or its result cannot be recorded (a write it cannot
+ * undo stays until a later step restores the recorded pointer), and on what
+ * the republication throws.
+ */
+export async function republishActiveNativeDraft(
+  capture: NativeDraftPointerCapture,
+  pointer: ActiveNativeDraftPointer,
+): Promise<NativeDraftRepublication> {
+  return committedPointerStep(await withActiveDraftPointer((txn) => txn.republishNative(capture, pointer)));
+}
+
+/**
+ * Removes the native pointer only when its stored text is still the captured
+ * text, and says whether it did.
+ */
+function clearNativeIfCurrentBody(capture: NativeDraftPointerCapture): boolean {
+  try {
+    if (localStorage.getItem(ACTIVE_DRAFT_GUEST_KEY) !== capture.raw) return false;
+    localStorage.removeItem(ACTIVE_DRAFT_GUEST_KEY);
+    return true;
+  } catch {
+    // Unavailable storage is not evidence that this caller owns the pointer.
+    return false;
+  }
+}
+
+/**
+ * Removes the native pointer only when its stored text is still the captured
+ * text, compared and removed inside the recovery-pointer transaction, and
+ * says whether it did. A transaction that cannot run, or whose result cannot
+ * be recorded, removes nothing (a removal it cannot undo stays until a later
+ * step restores the recorded pointer).
+ */
+export async function clearActiveNativeDraftIfCurrent(capture: NativeDraftPointerCapture): Promise<boolean> {
+  const cleared = await withActiveDraftPointer((pointer) => pointer.clearNativeIfCurrent(capture));
+  return cleared.status === "committed" && cleared.value;
+}
+
+/**
+ * Clears a native pointer a resume cannot use (expired, malformed, or leading
+ * to an absent, invalid or mismatched record) when its stored text is still
+ * the captured text, and then the private record it names, which no pointer
+ * leads to any more.
+ */
+export async function clearUnusableNativeDraft(capture: NativeDraftPointerCapture): Promise<void> {
+  if (!(await clearActiveNativeDraftIfCurrent(capture))) return;
+  const capabilityId = nativePointerCapabilityId(capture.raw);
+  if (capabilityId !== null) await removeUnnamedNativeDraftCapability(capabilityId);
+}
+
+/**
+ * The guest's exact-clear rule for a native capability: its private record
+ * goes only when it is a live record of this token and name, and a pointer
+ * naming this capability goes whatever record sits behind it. Malformed,
+ * expired and another token's records stay.
+ */
+export async function clearNativeDraftCapability(hold: NativeDraftCapabilityHold): Promise<void> {
+  await removeDraftRecordIf(
+    NATIVE_DRAFT_CAPABILITY_PREFIX + hold.capabilityId,
+    (value) => isNativeDraftCapabilityRecord(value)
+      && Date.now() - value.timestamp <= GUEST_SESSION_TTL_MS
+      && value.capabilityId === hold.capabilityId
+      && value.playerToken === hold.playerToken
+      && value.endpoint === hold.endpoint
+      && value.draftCode === hold.draftCode,
+  );
+  // The pointer is read and removed inside one recovery-pointer transaction.
+  await withActiveDraftPointer((txn) => {
+    const active = inspectActiveNativeDraft();
+    if (active.type !== "present") return;
+    const { pointer, capture } = active;
+    if (
+      pointer.capabilityId === hold.capabilityId
+      && pointer.endpoint === hold.endpoint
+      && pointer.draftCode === hold.draftCode
+    ) {
+      txn.clearNativeIfCurrent(capture);
+    }
+  });
 }
 
 /**
@@ -777,21 +1622,11 @@ export async function loadDraftDeckSubmission(
   try {
     const roomCode = identity && parseRoomCode(identity.roomCode);
     if (identity && !roomCode) return null;
-    const value = await get<PersistedDraftDeckSubmission>(
+    const value = await get<unknown>(
       `${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`,
       getDraftStore(),
     );
-    if (!value || value.hostPeerId !== hostPeerId || !isNonEmptyString(value.draftCode)
-      || !isCanonicalRoomCode(value.roomCode)
-      || !isNonEmptyString(value.draftToken) || !isNonEmptyString(value.submissionId)
-      || !Array.isArray(value.mainDeck) || !value.mainDeck.every((card) => typeof card === "string")
-      // A record written before the designation existed cannot be replayed:
-      // the host would refuse it. Discarding it is the fail-safe answer — the
-      // guest simply builds a fresh submission.
-      || !Array.isArray(value.commanders)
-      || !value.commanders.every((card) => typeof card === "string")) {
-      return null;
-    }
+    if (!isPersistedDraftDeckSubmission(value) || value.hostPeerId !== hostPeerId) return null;
     if (identity && (value.roomCode !== roomCode || value.draftToken !== identity.draftToken)) {
       return null;
     }
@@ -801,16 +1636,37 @@ export async function loadDraftDeckSubmission(
   }
 }
 
-export async function clearDraftDeckSubmission(hostPeerId: string, submissionId?: string): Promise<void> {
-  try {
-    if (submissionId) {
-      const current = await loadDraftDeckSubmission(hostPeerId);
-      if (current?.submissionId !== submissionId) return;
-    }
-    await del(`${DRAFT_DECK_SUBMISSION_PREFIX}${hostPeerId}`, getDraftStore());
-  } catch {
-    /* Retain safely when IndexedDB is unavailable. */
-  }
+/**
+ * Removes the outbox only when it is this owner's and, given a submission id,
+ * only that submission; anything else at the key, malformed storage included,
+ * stays, and so does everything when IndexedDB is unavailable.
+ */
+export async function clearDraftDeckSubmission(
+  owner: DraftDeckSubmissionOwner,
+  submissionId?: string,
+): Promise<void> {
+  await removeDraftRecordIf(
+    `${DRAFT_DECK_SUBMISSION_PREFIX}${owner.hostPeerId}`,
+    (value) => isPersistedDraftDeckSubmission(value)
+      && value.hostPeerId === owner.hostPeerId
+      && value.roomCode === parseRoomCode(owner.roomCode)
+      && value.draftToken === owner.draftToken
+      && (submissionId === undefined || value.submissionId === submissionId),
+  );
+}
+
+function isPersistedDraftDeckSubmission(value: unknown): value is PersistedDraftDeckSubmission {
+  return isRecord(value)
+    && typeof value.hostPeerId === "string"
+    && isNonEmptyString(value.draftCode)
+    && isCanonicalRoomCode(value.roomCode)
+    && isNonEmptyString(value.draftToken) && isNonEmptyString(value.submissionId)
+    && Array.isArray(value.mainDeck) && value.mainDeck.every((card) => typeof card === "string")
+    // A record written before the designation existed cannot be replayed:
+    // the host would refuse it. Discarding it is the fail-safe answer — the
+    // guest simply builds a fresh submission.
+    && Array.isArray(value.commanders)
+    && value.commanders.every((card) => typeof card === "string");
 }
 
 function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGuestSession {
@@ -821,7 +1677,8 @@ function isPersistedDraftGuestSession(value: unknown): value is PersistedDraftGu
     && typeof value.draftCode === "string"
     && isCanonicalRoomCode(value.roomCode)
     && isNonEmptyString(value.displayName)
-    && isPositiveFiniteNumber(value.timestamp);
+    && isPositiveFiniteNumber(value.timestamp)
+    && isOptionalCapabilityId(value.capabilityId);
 }
 
 /** A participant-owned outbox survives a reload until the pod host acks it. */

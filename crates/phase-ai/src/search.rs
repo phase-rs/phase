@@ -1938,6 +1938,8 @@ pub fn fallback_action(
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::WardSacrificeChoice { .. }
         | WaitingFor::UnlessBounceChoice { .. } => issued_selection(contract),
+        WaitingFor::UnlessBlightChoice { .. } => issued_selection(contract)
+            .or(Some(GameAction::PayUnlessCost { pay: false })),
         // CR 701.4a + CR 608.2d: Behold requires EXACTLY one beholdable object —
         // an empty selection is illegal. Take the first candidate (any legal pick
         // resolves the prompt; the evaluated candidate enumerator picks properly).

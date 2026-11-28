@@ -190,6 +190,7 @@ mod tests {
                     companion: None,
                     printings: vec![row.clone(); count],
                 },
+                request_id: crate::protocol::DraftRequestId::try_from(1).unwrap(),
             };
             assert_eq!(
                 crate::client_message_wire_guard::guard_client_message_before_dispatch(
@@ -208,11 +209,11 @@ mod tests {
             format!(r#"{{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":{sidecar}}}"#);
         if data_first {
             format!(
-                r#"{{"data":{{"action":{{"data":{data},"type":"SubmitDeck"}},"draft_code":"ABCD12"}},"type":"DraftAction"}}"#
+                r#"{{"data":{{"action":{{"data":{data},"type":"SubmitDeck"}},"draft_code":"ABCD12","request_id":1}},"type":"DraftAction"}}"#
             )
         } else {
             format!(
-                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}}}}}}"#
+                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}},"request_id":1}}}}"#
             )
         }
     }

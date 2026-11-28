@@ -683,6 +683,7 @@
     "connection": "Connection Error",
     "incompatible": "This draft is incompatible with your protocol version.",
     "unreadable": "This saved draft cannot be read, so it cannot be resumed.",
+    "recoverySave": "Could not save draft recovery details",
     "retry": "Try Reconnecting"
   },
   "spectator": {

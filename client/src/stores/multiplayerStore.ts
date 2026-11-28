@@ -122,12 +122,6 @@ import {
   nativeEngineKeyForCurrentOrigin,
 } from "../services/nativeEngine";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
-import {
-  ServerDraftAdapter,
-  type CreateDraftSettings,
-  type DraftPhase,
-} from "../adapter/server-draft-adapter";
-import type { DraftPlayerView } from "../adapter/draft-adapter";
 import type {
   DeckChoice,
   DeckListData,
@@ -1674,10 +1668,6 @@ interface MultiplayerState {
   // null before the first hello; updated when the hosting WS or the game WS
   // completes its handshake.
   serverInfo: ServerInfo | null;
-  // Server-hosted draft session (ephemeral — not persisted)
-  draftAdapter: ServerDraftAdapter | null;
-  draftView: DraftPlayerView | null;
-  draftPhase: DraftPhase | null;
 }
 
 interface MultiplayerActions {
@@ -1894,24 +1884,6 @@ interface MultiplayerActions {
   subscribeAmbientLobby: (
     onFrame: (frame: AmbientLobbyFrame, source: LobbySource) => void,
   ) => () => void;
-  /**
-   * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
-   * its joinDraft method, then stores the adapter and initial view.
-   */
-  joinServerDraft: (
-    serverUrl: string,
-    draftCode: string,
-    displayName: string,
-    password?: string,
-  ) => Promise<void>;
-  /**
-   * Create a new server-hosted draft pod. Opens a ServerDraftAdapter and
-   * calls createDraft with the given settings.
-   */
-  createServerDraft: (
-    serverUrl: string,
-    settings: CreateDraftSettings,
-  ) => Promise<void>;
 }
 
 function disposeActiveP2PHost(): void {
@@ -2994,9 +2966,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       hostSession: null,
       pendingGameRoute: null,
       serverInfo: null,
-      draftAdapter: null,
-      draftView: null,
-      draftPhase: null,
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
@@ -3899,22 +3868,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             releaseReservationToken: opts?.releaseReservationToken,
           }),
         ),
-
-      joinServerDraft: async (serverUrl, draftCode, displayName, password) => {
-        // Dispose any previous draft adapter before creating a new one.
-        get().draftAdapter?.dispose();
-        const adapter = new ServerDraftAdapter(serverUrl);
-        const view = await adapter.joinDraft(draftCode, displayName, password);
-        set({ draftAdapter: adapter, draftView: view, draftPhase: adapter.currentPhase });
-      },
-
-      createServerDraft: async (serverUrl, settings) => {
-        // Dispose any previous draft adapter before creating a new one.
-        get().draftAdapter?.dispose();
-        const adapter = new ServerDraftAdapter(serverUrl);
-        await adapter.createDraft(settings);
-        set({ draftAdapter: adapter, draftView: null, draftPhase: "lobby" });
-      },
 
       subscribeAmbientLobby: (onFrame) => {
         ambientSubscribers.add(onFrame);

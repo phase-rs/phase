@@ -3760,6 +3760,7 @@ impl GameObject {
         AttackDeclarationRecord {
             object_id,
             incarnation: Some(self.incarnation),
+            ordinal_this_turn: None,
             lki: self.snapshot_public_characteristics(),
             is_token: self.is_token,
             is_commander: self.is_commander,

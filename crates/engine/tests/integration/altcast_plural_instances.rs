@@ -762,7 +762,7 @@ fn replicate_pause_keeps_the_elected_flashback() {
         .from_oracle_text(DJINN);
     let da = deep_analysis(&mut s);
     library(&mut s, 3);
-    pool(&mut s, P0, "UUUU");
+    pool(&mut s, P0, "UUUUUUUU");
     let mut r = s.build();
     let deferred = |w: &WaitingFor| {
         matches!(w, WaitingFor::OptionalCostChoice { pending_cast, .. }
@@ -770,7 +770,7 @@ fn replicate_pause_keeps_the_elected_flashback() {
     };
     cast_row(&mut r, da, &lier_flashback(), deferred, aim(&[player(P0)]));
     assert_eq!(r.life(P0), 20, "Lier's instance charges no life");
-    assert_paid(&r, da, 1, None);
+    assert_paid(&r, da, 5, None);
 }
 
 /// CR 702.47a: splice is offered before targets.

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{Effect, EventOutcomes};
+use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{
     ActiveSearchDecisionAuthority, CostResume, EventLosses, GameEnd, GameState,
@@ -11,6 +12,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::resolution::{OptionalEffectFrame, ZoneChangeOwnerMut};
 use crate::types::resolved_commands::{
     ResolvedPlayerLeaveCommand, ResolvedPlayerLeaveReplayInvariantError, RulesExecutionNodeRef,
@@ -60,6 +62,31 @@ fn abandon_pending_casts(
             continue;
         }
         let object_id = pending.object_id;
+        // CR 800.4a + CR 701.68a: retire this cast's parked Blight placement
+        // with the cast, even if the borrowed recipient survives the caster.
+        let boundary = state
+            .pending_replacement
+            .as_ref()
+            .map(|replacement| replacement.delivery_boundary_event());
+        if matches!(
+            (pending.blight_in_flight, boundary),
+            (
+                Some(recipient),
+                Some(ProposedEvent::AddCounter {
+                    placement: CounterPlacement::Object {
+                        actor,
+                        object_id,
+                        counter_type: CounterType::Minus1Minus1,
+                        cause: CounterCause::Other,
+                    },
+                    ..
+                }),
+            ) if *actor == departing_player && *object_id == recipient.object_id
+        ) {
+            state.pending_replacement = None;
+            state.replacement_may_cost_paused = false;
+            super::engine_payment_choices::set_active_priority(state);
+        }
         super::announcement_triggers::publish_abandoned_announcement(state, owner);
         state.retire_pending_cast_owner(owner, departing_player);
         if state

@@ -1678,8 +1678,8 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
 /// (`spells from your hand` -> `CannotCastSpellFromZone(Hand)`, Karolina Dean).
 /// An already-negative "from anywhere other than" clause is rejected rather
 /// than double-negated.
-/// The existing `non<TYPE>` form lowers to `SpellTypeOrAbilityActivation`, leaving
-/// ability payments unrestricted (Karn, Legacy Reforged; Hydraulic Helper).
+/// The `non<TYPE>` form lowers to `SpellTypeOrAbilityActivation` with all
+/// non-spell payments permitted (Karn, Legacy Reforged; Hydraulic Helper).
 fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestriction> {
     let (_, rest) = nom_on_lower(lower, lower, |i| {
         // MTGJSON Oracle text is not apostrophe-normalized, so accept both the
@@ -1708,7 +1708,7 @@ fn parse_negative_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestric
     let spell_type = parse_restricted_spell_type_phrase(rest)?;
     Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
         spell_type,
-        ability: AbilityActivationScope::Any,
+        ability: AbilityActivationScope::AnyNonSpellPayment,
     })
 }
 
@@ -4829,9 +4829,7 @@ mod tests {
     fn negated_nonartifact_spend_maps_to_artifact_spell_or_ability() {
         // CR 106.6: Hydraulic Helper — "This mana can't be spent to cast a
         // nonartifact spell" restricts spell-casting to artifact spells while
-        // leaving ability activation unrestricted, so it lowers to the OR variant
-        // with `ability: Any` (NOT a spells-only `SpellType`, which would wrongly
-        // forbid paying for abilities). ASCII apostrophe form.
+        // leaving all non-spell payments eligible. ASCII apostrophe form.
         let (restriction, grants) =
             parse_mana_spend_restriction("this mana can't be spent to cast a nonartifact spell")
                 .expect("negated nonartifact restriction must parse");
@@ -4839,7 +4837,7 @@ mod tests {
             restriction,
             vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }]
         );
         assert!(grants.is_empty());
@@ -4857,7 +4855,7 @@ mod tests {
             restriction,
             vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }]
         );
     }
@@ -4873,7 +4871,7 @@ mod tests {
             restriction,
             vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Creature".to_string(),
-                ability: AbilityActivationScope::Any,
+                ability: AbilityActivationScope::AnyNonSpellPayment,
             }]
         );
     }

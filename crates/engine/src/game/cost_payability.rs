@@ -26,7 +26,6 @@ use crate::types::ability::{
     PlayerRecipientCost, QuantityExpr, QuantityRef, SacrificeCost, SharedQuality,
     TapCreaturesAggregateStat, TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X,
 };
-use crate::types::card_type::CoreType;
 use crate::types::game_state::{CostResume, PayCostKind, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1846,10 +1845,7 @@ impl AbilityCostLegPayability for AbilityCost {
             AbilityCost::PayEnergy { amount } => {
                 let resolved =
                     super::quantity::resolve_quantity(state, amount, player, source).max(0);
-                state
-                    .players
-                    .get(player.0 as usize)
-                    .is_some_and(|p| (p.energy as i64) >= resolved as i64)
+                super::restrictions::energy_available_for_payment(state, player) >= resolved as u32
             }
             // CR 702.179f: Pay-speed resolves the quantity, then checks against
             // current speed. `QuantityExpr::Ref(Variable)` resolves to 0, which
@@ -1922,14 +1918,22 @@ impl AbilityCostLegPayability for AbilityCost {
             // or has already been exerted; the cost itself is always payable.
             // CR 701.43c (off-battlefield) is enforced at payment time.
             AbilityCost::Exert => true,
-            // CR 701.68b: Blight is payable iff the player controls >=1 creature.
-            // N (the number of -1/-1 counters) is irrelevant to eligibility — the
-            // counters all go on the one chosen creature.
-            AbilityCost::Blight { .. } => state.battlefield.iter().copied().any(|id| {
-                state.objects.get(&id).is_some_and(|o| {
-                    o.controller == player && o.card_types.core_types.contains(&CoreType::Creature)
-                })
-            }),
+            // CR 701.68b: Blight requires one creature that can receive the
+            // total placement. Before X is announced only the zero minimum
+            // is necessary for this proposal check.
+            AbilityCost::Blight { count } => {
+                if matches!(count, crate::types::ability::BlightCount::AnnouncedX { .. })
+                    && role != CostSourceRole::SpellBeingCast
+                {
+                    return false;
+                }
+                !super::effects::blight::eligible_blight_creatures(
+                    state,
+                    player,
+                    count.with_announced_x(0),
+                )
+                .is_empty()
+            }
             // CR 601.2b: Reveal N matching cards requires them to exist in hand.
             // Filter-less reveal (self-reveal) is always payable — you can always
             // reveal the source spell you're casting.
@@ -3122,30 +3126,26 @@ mod tests {
     fn blight_requires_creatures() {
         let mut scenario = GameScenario::new();
         // No creatures on battlefield yet.
-        assert!(!AbilityCost::Blight { count: 1 }.is_payable_for_spell(
-            &scenario.state,
-            P0,
-            ObjectId(0)
-        ));
+        assert!(!AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(1)
+        }
+        .is_payable_for_spell(&scenario.state, P0, ObjectId(0)));
 
         let _id = scenario.add_creature(P0, "Bear", 2, 2).id();
-        assert!(AbilityCost::Blight { count: 1 }.is_payable_for_spell(
-            &scenario.state,
-            P0,
-            ObjectId(0)
-        ));
+        assert!(AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(1)
+        }
+        .is_payable_for_spell(&scenario.state, P0, ObjectId(0)));
         // CR 701.68b: N > 1 no longer requires N creatures — all N counters go on
         // the single chosen creature, so one controlled creature suffices.
-        assert!(AbilityCost::Blight { count: 2 }.is_payable_for_spell(
-            &scenario.state,
-            P0,
-            ObjectId(0)
-        ));
-        assert!(AbilityCost::Blight { count: 3 }.is_payable_for_spell(
-            &scenario.state,
-            P0,
-            ObjectId(0)
-        ));
+        assert!(AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(2)
+        }
+        .is_payable_for_spell(&scenario.state, P0, ObjectId(0)));
+        assert!(AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(3)
+        }
+        .is_payable_for_spell(&scenario.state, P0, ObjectId(0)));
     }
 
     fn chosen_hand_discard(filter: Option<TargetFilter>) -> AbilityCost {

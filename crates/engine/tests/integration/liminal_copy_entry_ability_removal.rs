@@ -711,6 +711,7 @@ fn drive_carried(
             | WaitingFor::UnlessPayment { .. }
             | WaitingFor::UnlessPaymentChooseCost { .. }
             | WaitingFor::WardDiscardChoice { .. }
+            | WaitingFor::UnlessBlightChoice { .. }
             | WaitingFor::WardSacrificeChoice { .. }
             | WaitingFor::UnlessBounceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }

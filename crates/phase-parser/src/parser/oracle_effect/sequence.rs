@@ -6,9 +6,10 @@ use nom::combinator::{
     all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::separated_list1;
-use nom::sequence::{pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
+use super::super::oracle_cost::parse_fixed_blight;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::enters_under::{
@@ -178,19 +179,27 @@ fn strip_search_result_subject(lower: &str) -> &str {
 }
 
 fn is_search_result_reveal_clause(lower: &str) -> bool {
-    all_consuming((
+    search_result_reveal_number(lower).is_some()
+}
+
+pub(super) fn search_result_reveal_number(lower: &str) -> Option<AnaphorNumber> {
+    all_consuming(delimited(
         tag::<_, _, OracleError<'_>>("reveal "),
         alt((
-            tag("that card"),
-            tag("those cards"),
-            tag("the card"),
-            tag("them"),
-            tag("it"),
+            value(
+                AnaphorNumber::Singular,
+                alt((tag("that card"), tag("the card"), tag("it"))),
+            ),
+            value(
+                AnaphorNumber::Plural,
+                alt((tag("those cards"), tag("them"))),
+            ),
         )),
         opt(tag(".")),
     ))
     .parse(lower.trim())
-    .is_ok()
+    .ok()
+    .map(|(_, number)| number)
 }
 
 /// CR 701.23a + CR 406.3: compose the optional continuation connector, the
@@ -224,14 +233,31 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
     .map(|(_, face_down)| face_down)
 }
 
-fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
+#[derive(Clone, Copy)]
+pub(super) enum SearchResultReferent {
+    ThatCard,
+    It,
+    Them,
+    ThoseCards,
+}
+
+fn parse_search_result_referent(input: &str) -> OracleResult<'_, SearchResultReferent> {
     alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
+        value(SearchResultReferent::ThatCard, tag("that card ")),
+        value(SearchResultReferent::It, tag("it ")),
+        value(SearchResultReferent::Them, tag("them ")),
+        value(SearchResultReferent::ThoseCards, tag("those cards ")),
     ))
     .parse(input)
+}
+
+pub(super) fn parse_put_into_your_hand_prefix(
+    input: &str,
+) -> OracleResult<'_, SearchResultReferent> {
+    let (input, _) = tag("put ").parse(input)?;
+    let (input, referent) = parse_search_result_referent(input)?;
+    let (input, _) = tag("into your hand").parse(input)?;
+    Ok((input, referent))
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -4020,6 +4046,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // trailing space; keep it in the bare-and splitter instead of letting the
     // Draw parser swallow it as an ignored tail.
     .or(value((), tag("proliferate")))
+    // CR 608.2c + CR 701.68a: Sinister Gnarlbark's draw and Blight are
+    // distinct instructions. Confirm the number ends at a word boundary.
+    .or(value(
+        (),
+        terminated(
+            parse_fixed_blight,
+            peek(alt((
+                value((), multispace1),
+                value((), one_of(".,;")),
+                value((), eof),
+            ))),
+        ),
+    ))
     // CR 701.47a + CR 608.2c: "you lose 1 life and amass Zombies 1"
     // (Dreadhorde Invasion — issue #5341) is two independent instructions.
     // Without this arm the LoseLife half greedily swallows the whole chunk and

@@ -19,6 +19,7 @@ use crate::types::casting_costs::{
     CostReductionAnalysis, CostReductionCoverage, CostReductionElection, CostReductionEntry,
     CostReductionOutcome, ManaCarrier, ReductionProvenance, SettledTail,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent};
 use crate::types::game_state::{
     AbilityActivationRecord, ActivationPhyrexianIntent, ActivationShardChoice,
@@ -3991,10 +3992,11 @@ pub(crate) fn pending_phyrexian_route_is_payable_for(
         Some(spell_object),
         payment_context.as_ref(),
     );
-    let permissions = super::static_abilities::build_cost_permission_context(
+    let permissions = super::static_abilities::build_cost_permission_context_for_payment(
         state,
         player,
         mana_spend_permission,
+        payment_context.as_ref(),
     );
     let phyrexian_count = match cost {
         ManaCost::Cost { shards, .. } => shards
@@ -5785,7 +5787,7 @@ pub(super) fn player_mana_spend_permission_for_payment(
     // re-derive activation-source filters against the activating permanent, and
     // spell costs fall through to spell-class and exile-cast permission checks.
     match ctx {
-        Some(PaymentContext::Effect) => {
+        Some(PaymentContext::Effect | PaymentContext::SpecialAction(SpecialAction::Suspend)) => {
             super::static_abilities::player_board_wide_mana_spend_permission(state, player)
         }
         Some(PaymentContext::Activation { .. }) => match source_id {
@@ -13412,6 +13414,47 @@ pub(super) fn recompute_pending_mana_total_with(
         ctx,
         &CollectedCastCosts::default(),
     )
+}
+
+/// CR 601.2b-f: Replicate is declared before targets. Price the best
+/// possible target-dependent discounts here; settlement prices chosen targets.
+pub(super) fn replicate_mana_total_with_unchosen_targets(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    ctx: &CostFinalizeContext,
+) -> Option<ManaCost> {
+    if !target_dependent_cost_reduction_present(
+        state,
+        player,
+        pending.object_id,
+        pending.casting_variant,
+    ) {
+        return None;
+    }
+    let view = SpellCostView::for_variant(
+        state,
+        player,
+        pending.object_id,
+        Some(pending.casting_variant),
+    );
+    let modifiers =
+        CollectedCostModifiers::collect_on_view(&view, None, pending.casting_permission_index, ctx);
+    let discounts = collect_target_dependent_cost_modifiers(&view, SpellCostTargets::Any)
+        .into_iter()
+        .filter(|modifier| !modifier.is_raise)
+        .collect();
+    let collected = CollectedCastCosts::seeded(
+        modifiers.with_target_dependent(discounts),
+        CollectedCostFloors::collect_target_independent(&view),
+    );
+    Some(recompute_pending_mana_total_using(
+        &view,
+        pending,
+        pending.ability.chosen_x,
+        ctx,
+        &collected,
+    ))
 }
 
 /// CR 601.2f: as [`recompute_pending_mana_total_with`], reading its board inputs
@@ -21765,6 +21808,24 @@ fn continue_with_prepared(
     prepared: PreparedSpellCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2e + CR 701.68a: even the minimum Blight X needs a controlled
+    // creature. Refuse the proposal before publishing a stack entry.
+    if state
+        .objects
+        .get(&prepared.object_id)
+        .and_then(|object| object.additional_cost.as_ref())
+        .is_some_and(|cost| {
+            matches!(
+                cost,
+                AdditionalCost::Required(cost)
+                    if !casting_costs::bounded_blight_x_can_be_paid(state, player, cost, 0)
+            )
+        })
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "No creature to blight".to_string(),
+        ));
+    }
     // Permanent spells with no spell ability skip modal/targeting/effect resolution
     // and proceed directly to cost payment — unless they are Auras (which target
     // via the Enchant keyword) or mutating creature spells (CR 702.140a: a vanilla
@@ -22130,7 +22191,19 @@ fn continue_with_prepared(
         .ability_def
         .as_ref()
         .and_then(|a| a.distribute.clone());
-    if ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref()) {
+    let bounded_blight = state
+        .objects
+        .get(&prepared.object_id)
+        .is_some_and(|object| {
+            let Some(AdditionalCost::Required(cost)) = &object.additional_cost else {
+                return false;
+            };
+            casting_costs::bounded_blight_cost_max(state, player, prepared.object_id, cost)
+                .is_some()
+        });
+    if bounded_blight
+        || ability_target_legality_needs_chosen_x(&resolved, prepared_distribute.as_ref())
+    {
         if let Some(required_cost) =
             casting_costs::required_additional_cost_can_declare_x(state, player, prepared.object_id)
         {
@@ -23506,7 +23579,7 @@ fn can_feasibly_pay_harmonize_mana_cost_with_probe(
 /// spell's total cost between its caster and one chosen other player. Candidate
 /// feasibility must therefore preserve a cast that neither player can pay alone
 /// when some concrete helper contribution leaves both shares payable.
-fn can_feasibly_pay_mana_cost_with_assist(
+pub(crate) fn can_feasibly_pay_mana_cost_with_assist(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
@@ -24176,11 +24249,25 @@ fn target_dependent_reduction_makes_payable(
     // With clean layers the live state is authoritative, so the common
     // no-reduction case is decided without the flush clone.
     let layers_dirty = state.layers_dirty.is_dirty();
-    if !layers_dirty && !target_dependent_cost_reduction_present(state, player, prepared) {
+    if !layers_dirty
+        && !target_dependent_cost_reduction_present(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_variant,
+        )
+    {
         return false;
     }
     with_flushed_cast_state(state, player, probe, |flushed| {
-        if layers_dirty && !target_dependent_cost_reduction_present(flushed, player, prepared) {
+        if layers_dirty
+            && !target_dependent_cost_reduction_present(
+                flushed,
+                player,
+                prepared.object_id,
+                prepared.casting_variant,
+            )
+        {
             return false;
         }
         let resolved = build_resolved_from_def(ability_def, prepared.object_id, player);
@@ -24402,10 +24489,10 @@ fn target_pricing_chains(
 fn target_dependent_cost_reduction_present(
     state: &GameState,
     player: PlayerId,
-    prepared: &PreparedSpellCast,
+    spell_id: ObjectId,
+    variant: CastingVariant,
 ) -> bool {
-    let spell_id = prepared.object_id;
-    let view = SpellCostView::for_variant(state, player, spell_id, Some(prepared.casting_variant));
+    let view = SpellCostView::for_variant(state, player, spell_id, Some(variant));
 
     let Some(spell) = state.objects.get(&spell_id) else {
         return false;
@@ -24526,9 +24613,9 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
 ) -> bool {
     let life_budget_before_tap = match options.phyrexian_life_budget {
         ProbeLifeBudget::AfterAutoTap => None,
-        ProbeLifeBudget::BeforeAutoTap => Some(super::life_costs::max_phyrexian_life_payments(
-            simulated, player,
-        )),
+        ProbeLifeBudget::BeforeAutoTap => Some(
+            super::life_costs::max_phyrexian_life_payments_for_payment(simulated, player, ctx),
+        ),
     };
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_cached(
@@ -24566,10 +24653,11 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
     // payment-time permissions (`mana_spend_permission`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
-    let mut permissions = super::static_abilities::build_cost_permission_context(
+    let mut permissions = super::static_abilities::build_cost_permission_context_for_payment(
         simulated,
         player,
         mana_spend_permission,
+        ctx,
     );
     if let Some(max_life) = life_budget_before_tap {
         permissions.max_life = max_life;
@@ -25480,10 +25568,11 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
 
     let mana_spend_permission =
         player_mana_spend_permission_for_payment(simulated, player, Some(source_id), ctx);
-    let permissions = super::static_abilities::build_cost_permission_context(
+    let permissions = super::static_abilities::build_cost_permission_context_for_payment(
         simulated,
         player,
         mana_spend_permission,
+        ctx,
     );
     can_pay_with_tap_payment_mode(
         simulated,
@@ -26018,6 +26107,87 @@ fn has_exact_filter_land_payment_witness(
     }
 }
 
+/// CR 601.2g-h + CR 107.6: A creature held for a spell cost can produce mana
+/// by tapping and then paying its own untap cost before the spell is paid.
+/// Walk both real activations and leave all reservations published for the
+/// residual affordability check.
+fn has_held_tap_untap_payment_witness(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    const HELD_TAP_UNTAP_PROBE_BUDGET: usize = 8;
+
+    use super::mana_abilities::ManaActivationPurpose;
+    use super::mana_sources::{has_tap_component, has_untap_component, mana_source_selections};
+
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return false;
+    };
+    let held: std::collections::BTreeSet<_> = pending
+        .deferred_tap_ids()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.abilities.iter().any(|ability| {
+                    super::mana_abilities::is_mana_ability(ability)
+                        && has_untap_component(&ability.cost)
+                })
+            })
+        })
+        .collect();
+    if held.is_empty() {
+        return false;
+    }
+
+    let mut scratch = state.clone();
+    scratch.waiting_for = WaitingFor::Priority { player };
+    let selection_has_cost =
+        |probe: &GameState,
+         selection: &ManaSourceSelection,
+         has_component: fn(&Option<AbilityCost>) -> bool| {
+            selection
+                .ability_index
+                .and_then(|index| {
+                    probe.objects[&selection.source.object_id]
+                        .abilities
+                        .get(index)
+                })
+                .is_some_and(|ability| has_component(&ability.cost))
+        };
+    mana_source_selections(&scratch, player, ManaActivationPurpose::Explicit)
+        .into_iter()
+        .filter(|selection| {
+            held.contains(&selection.source.object_id)
+                && selection_has_cost(&scratch, selection, has_tap_component)
+        })
+        .take(HELD_TAP_UNTAP_PROBE_BUDGET)
+        .any(|tap| {
+            exact_mana_ability_successors(scratch.clone(), player, &tap)
+                .into_iter()
+                .any(|tapped| {
+                    mana_source_selections(&tapped, player, ManaActivationPurpose::Explicit)
+                        .into_iter()
+                        .filter(|selection| {
+                            selection.source == tap.source
+                                && selection_has_cost(&tapped, selection, has_untap_component)
+                        })
+                        .take(HELD_TAP_UNTAP_PROBE_BUDGET)
+                        .any(|untap| {
+                            exact_mana_ability_successors(tapped.clone(), player, &untap)
+                                .into_iter()
+                                .any(|untapped| {
+                                    untapped.objects.get(&untap.source.object_id).is_some_and(
+                                        |object| !object.tapped && object.zone == Zone::Battlefield,
+                                    ) && can_pay_cost_after_auto_tap_with_probe(
+                                        &untapped, player, source_id, cost, None,
+                                    )
+                                })
+                        })
+                })
+        })
+}
+
 fn can_feasibly_pay_mana_cost_without_x_with_probe(
     state: &GameState,
     player: PlayerId,
@@ -26152,7 +26322,9 @@ fn manual_mana_payment_route(
     // the narrow producer -> filter-land route by executing both abilities on
     // a clone through their normal reducer actions and exact choice prompts.
     if let Some(sid) = source_id {
-        if has_exact_filter_land_payment_witness(state, player, sid, cost, probe) {
+        if has_held_tap_untap_payment_witness(state, player, sid, cost)
+            || has_exact_filter_land_payment_witness(state, player, sid, cost, probe)
+        {
             return ManualPaymentRoute::Feasible;
         }
     }
@@ -27281,6 +27453,7 @@ pub(super) fn pay_ability_mana_cost_excluding_with_parent(
         sub_cost_demand,
         None,
         parent,
+        false,
     )
 }
 
@@ -27298,6 +27471,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding_and_resume(
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     resume: &ManaAbilityResume,
+    manual: bool,
 ) -> Result<ManaCostPayment<()>, EngineError> {
     pay_ability_mana_cost_with_choices_excluding_and_parent(
         state,
@@ -27311,6 +27485,7 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding_and_resume(
         sub_cost_demand,
         Some(resume),
         None,
+        manual,
     )
 }
 
@@ -27327,6 +27502,7 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     resume: Option<&ManaAbilityResume>,
     parent: Option<&ManaAbilityCostParent>,
+    manual: bool,
 ) -> Result<ManaCostPayment<()>, EngineError> {
     super::layers::flush_layers(state);
 
@@ -27351,6 +27527,7 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
         sub_cost_demand,
         resume,
         parent,
+        manual && activation_context.is_suspend(),
     )?;
     consume_waterbend_tap_markers(state, player, source_id, waterbend_taps)?;
 
@@ -27368,7 +27545,11 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
     let spent_units = match &payment {
         ManaCostPayment::Paid(units) | ManaCostPayment::Paused { value: units, .. } => units,
     };
-    if let Some(obj) = state.objects.get_mut(&source_id) {
+    if let Some(obj) = state
+        .objects
+        .get_mut(&source_id)
+        .filter(|_| !activation_context.is_suspend())
+    {
         obj.mana_spent_to_activate = spent_units.iter().map(|unit| unit.color).collect();
     }
 
@@ -27807,6 +27988,7 @@ fn auto_tap_and_pay_cost(
         None,
         resume,
         None,
+        false,
     )
 }
 
@@ -27823,13 +28005,31 @@ fn auto_tap_and_pay_cost_excluding(
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     resume: Option<&ManaAbilityResume>,
     parent: Option<&ManaAbilityCostParent>,
+    pool_only: bool,
 ) -> Result<ManaCostPayment<Vec<crate::types::mana::ManaUnit>>, EngineError> {
     let events_before = events.len();
+    let suspended = matches!(
+        ctx,
+        Some(PaymentContext::SpecialAction(SpecialAction::Suspend))
+    )
+    .then(|| ObjectIncarnationRef {
+        object_id: source_id,
+        incarnation: state.objects[&source_id].incarnation,
+    });
     let life_colors = super::static_abilities::player_life_payment_colors(state, player);
-    let tap_cost = phyrexian_choices.map_or_else(
-        || cost.clone(),
-        |choices| mana_payment::mana_cost_for_phyrexian_choices(cost, choices, life_colors),
-    );
+    let tap_cost = match (pool_only, phyrexian_choices) {
+        (true, _) => ManaCost::NoCost,
+        (false, None) => cost.clone(),
+        (false, Some(choices)) => {
+            mana_payment::mana_cost_for_phyrexian_choices(cost, choices, life_colors)
+        }
+    };
+    // The finalizer takes the pending root before selecting Auto sources.
+    if suspended.is_some() {
+        state.players[player.0 as usize]
+            .probe_held_cards
+            .push(source_id);
+    }
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_and_resume(
         state,
         player,
@@ -27842,6 +28042,9 @@ fn auto_tap_and_pay_cost_excluding(
         resume,
         parent,
     );
+    if suspended.is_some() {
+        state.players[player.0 as usize].probe_held_cards.pop();
+    }
     if mana_ability_cost_payment_is_paused(state) {
         return Err(EngineError::InvalidAction(
             "Mana payment is awaiting a replacement choice".to_string(),
@@ -27858,6 +28061,9 @@ fn auto_tap_and_pay_cost_excluding(
     // suspension in the exact outer payment, or in this activation's own
     // suspended cost cursor when the payment is a nested mana sub-cost.
     settle_pre_spend_echoes(state, player, events, events_before, resume, parent)?;
+    if suspended.is_some_and(|source| !suspend_source_is_live(state, player, source)) {
+        return Err(casting_costs::abandoned_cast_finalization_error());
+    }
 
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle payment-time permissions
     // (`mana_spend_permission`, `max_life`, `life_colors`) once for the cast — K'rrik-style
@@ -27865,7 +28071,12 @@ fn auto_tap_and_pay_cost_excluding(
     let permissions = {
         let mana_spend_permission =
             player_mana_spend_permission_for_payment(state, player, Some(source_id), ctx);
-        super::static_abilities::build_cost_permission_context(state, player, mana_spend_permission)
+        super::static_abilities::build_cost_permission_context_for_payment(
+            state,
+            player,
+            mana_spend_permission,
+            ctx,
+        )
     };
     {
         let player_data = state
@@ -27946,7 +28157,14 @@ fn auto_tap_and_pay_cost_excluding(
         player,
         &life_amounts,
         events,
-        super::life_costs::pay_life_as_cast_or_activation_cost,
+        if matches!(
+            ctx,
+            Some(PaymentContext::SpecialAction(SpecialAction::Suspend))
+        ) {
+            super::life_costs::pay_life_as_cost
+        } else {
+            super::life_costs::pay_life_as_cast_or_activation_cost
+        },
     )?;
 
     Ok(match remaining_life_payments {
@@ -28016,24 +28234,37 @@ pub(super) fn mana_ability_cost_payment_is_paused(state: &GameState) -> bool {
     )
 }
 
-/// Owned backing for one exact activated-ability payment context. All payment
-/// routes construct this through [`activation_payment_context`] so they use the
-/// live source, actual ability index, tag, and color-payment rider together.
-pub(super) struct ActivationPaymentContext {
-    source_types: Vec<String>,
-    source_subtypes: Vec<String>,
-    ability_tag: Option<AbilityTag>,
-    mana_color_constraint: ActivationManaColorConstraint,
+/// Owned backing for payment announced through an indexed ability.
+pub(super) enum ActivationPaymentContext {
+    Ability {
+        source_types: Vec<String>,
+        source_subtypes: Vec<String>,
+        ability_tag: Option<AbilityTag>,
+        mana_color_constraint: ActivationManaColorConstraint,
+    },
+    SpecialAction(SpecialAction),
 }
 
 impl ActivationPaymentContext {
     pub(super) fn as_payment_context(&self) -> PaymentContext<'_> {
-        PaymentContext::Activation {
-            source_types: &self.source_types,
-            source_subtypes: &self.source_subtypes,
-            ability_tag: self.ability_tag,
-            mana_color_constraint: self.mana_color_constraint,
+        match self {
+            Self::Ability {
+                source_types,
+                source_subtypes,
+                ability_tag,
+                mana_color_constraint,
+            } => PaymentContext::Activation {
+                source_types,
+                source_subtypes,
+                ability_tag: *ability_tag,
+                mana_color_constraint: *mana_color_constraint,
+            },
+            Self::SpecialAction(action) => PaymentContext::SpecialAction(*action),
         }
+    }
+
+    fn is_suspend(&self) -> bool {
+        matches!(self, Self::SpecialAction(SpecialAction::Suspend))
     }
 }
 
@@ -28049,39 +28280,38 @@ pub(super) fn activation_payment_context(
     ability_index: Option<usize>,
 ) -> ActivationPaymentContext {
     let Some(source) = state.objects.get(&source_id) else {
-        return ActivationPaymentContext {
+        return ActivationPaymentContext::Ability {
             source_types: Vec::new(),
             source_subtypes: Vec::new(),
             ability_tag: None,
             mana_color_constraint: ActivationManaColorConstraint::Impossible,
         };
     };
-    let source_types = object_type_names(source);
-    let source_subtypes = source.card_types.subtypes.clone();
     // Use the same effective-ability lookup as activation itself: runtime-granted
     // cycling, graveyard, plot, Ninjutsu-family, and equip abilities live after
     // the printed `obj.abilities` slice but retain their enumerated indices.
-    let Some(ability) =
-        ability_index.and_then(|index| activation_ability_definition(state, source_id, index))
-    else {
-        return ActivationPaymentContext {
-            source_types,
-            source_subtypes,
-            ability_tag: None,
-            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
-        };
-    };
-    let mana_color_constraint = match ability.activation_mana_payment_restriction {
+    let ability =
+        ability_index.and_then(|index| activation_ability_definition(state, source_id, index));
+    if ability
+        .as_ref()
+        .is_some_and(|ability| is_suspend_special_action(Some(source), ability))
+    {
+        return ActivationPaymentContext::SpecialAction(SpecialAction::Suspend);
+    }
+    let mana_color_constraint = match ability
+        .as_ref()
+        .and_then(|ability| ability.activation_mana_payment_restriction)
+    {
         None => ActivationManaColorConstraint::Unrestricted,
         Some(ActivationManaPaymentRestriction::OnlySourceChosenColor) => source
             .chosen_color()
             .map(ActivationManaColorConstraint::Only)
             .unwrap_or(ActivationManaColorConstraint::Impossible),
     };
-    ActivationPaymentContext {
-        source_types,
-        source_subtypes,
-        ability_tag: ability.ability_tag,
+    ActivationPaymentContext::Ability {
+        source_types: object_type_names(source),
+        source_subtypes: source.card_types.subtypes.clone(),
+        ability_tag: ability.and_then(|ability| ability.ability_tag),
         mana_color_constraint,
     }
 }
@@ -29015,9 +29245,12 @@ pub(crate) fn is_spell_being_cast(state: &GameState, object_id: ObjectId) -> boo
 /// chosen to pay any other cost; it hasn't been paid yet (mana abilities are
 /// activated before costs are paid), so it is still in its zone for everything
 /// that only reads it. Consulted beside [`is_spell_being_cast`] by the hand and
-/// graveyard cost-fodder enumerations. False on every live state.
+/// graveyard cost-fodder enumerations, including the live Suspend reservation.
 pub(crate) fn is_held_by_payment_probe(state: &GameState, object_id: ObjectId) -> bool {
-    state
+    state.pending_cast.as_deref().is_some_and(|pending| {
+        pending.object_id == object_id
+            && reserved_suspend_card(state, pending.ability.controller) == Some(object_id)
+    }) || state
         .players
         .iter()
         .any(|player| player.probe_held_cards.contains(&object_id))
@@ -29449,6 +29682,11 @@ fn activation_cost_passes_early_affordability_gate(
     payment_mode: CastPaymentMode,
 ) -> bool {
     let life = ActivationLifeWindow::for_payment_mode(player, source_id, payment_mode);
+    let index = Some(ability_index);
+    if activation_payment_context(state, source_id, index).is_suspend() {
+        return payment_mode_pays_mana_manually(payment_mode)
+            || can_pay_ability_cost_now(state, player, source_id, cost, index, &life);
+    }
     if let Some(locked) =
         super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
     {
@@ -29765,6 +30003,20 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
     cost: &AbilityCost,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    tap_creature_cost_candidates(state, player, source, granting_object, cost, filter)
+        .into_iter()
+        .filter(|id| !state.objects[id].tapped)
+        .collect()
+}
+
+pub(super) fn tap_creature_cost_candidates(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    cost: &AbilityCost,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
     // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
     // activated ability).
     let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
@@ -29780,7 +30032,6 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
             }
             state.objects.get(&id).is_some_and(|obj| {
                 obj.controller == player
-                    && !obj.tapped
                     && super::filter::matches_target_filter(state, id, filter, &ctx)
             })
         })
@@ -30582,6 +30833,13 @@ pub(crate) fn can_pay_ability_cost_now(
     if super::un_actions::cost_requires_unavailable_speech(state, player, cost) {
         return false;
     }
+    if activation_payment_context(state, source_id, ability_index).is_suspend() {
+        let mana = activation_mana_component(cost);
+        let held = [(source_id, ReservedUse::Present)];
+        return CardHoldScratch::new(state.clone()).probe_holding(&held, |state| {
+            can_pay_ability_mana_cost_after_auto_tap(state, player, source_id, ability_index, &mana)
+        });
+    }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
         super::costs::can_pay(
@@ -31290,7 +31548,8 @@ pub(crate) fn activation_offer_payment_mode(
     ) {
         return Some(CastPaymentMode::Auto);
     }
-    (manual_activation_life_retry_possible(state, player, source_id, ability_index)
+    ((activation_payment_context(state, source_id, Some(ability_index)).is_suspend()
+        || manual_activation_life_retry_possible(state, player, source_id, ability_index))
         && matches!(
             activation_verdict(
                 state,
@@ -31373,6 +31632,18 @@ pub(crate) fn activation_verdict(
     else {
         return ActivationVerdict::Illegal;
     };
+    let suspend = is_suspend_special_action(Some(obj), &ability_def);
+    if suspend && query == ActivationQuery::Legality && payment_mode == CastPaymentMode::Manual {
+        return handle_activate_ability_with_payment_mode(
+            &mut state.clone(),
+            player,
+            source_id,
+            ability_index,
+            payment_mode,
+            &mut Vec::new(),
+        )
+        .map_or(ActivationVerdict::Illegal, |_| ActivationVerdict::Legal);
+    }
     if let Some(base_cost) = ability_def.cost.take() {
         ability_def.cost = Some(activation_cost_with_alternative_keyword_costs(
             state,
@@ -31404,7 +31675,7 @@ pub(crate) fn activation_verdict(
     // Pithing-Needle / City-of-Solitude / Damping-Matrix-class static while
     // `handle_activate_ability` still permits it). Plot's timing is enforced by
     // AsSorcery in check_activation_restrictions below, outside this guard.
-    if !is_plot_special_action(&ability_def) {
+    if !suspend && !is_plot_special_action(&ability_def) {
         // CR 602.5 + CR 603.2a: Consult active CantBeActivated statics — a player can't
         // begin to activate an ability that's prohibited from being activated. Note this
         // only affects activated abilities (CR 603.2a: triggered abilities are unaffected
@@ -31873,7 +32144,20 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
         // CR 601.2g + CR 118.13a: the manual route never decides a Phyrexian
         // symbol here: it was announced before the lock, and its payment is
         // selected after the opportunity.
-        return enter_manual_activation_mana_payment(state, player, events).map(Some);
+        let waiting = enter_manual_activation_mana_payment(state, player, events)?;
+        if activation_context.is_suspend()
+            && matches!(waiting, WaitingFor::ManaPayment { player: payer, .. } if player == payer)
+        {
+            use crate::ai_support::TargetedCastVerdict;
+            let mut scratch = state.clone();
+            scratch.waiting_for = waiting.clone();
+            if TargetedCastVerdict::for_suspend(&scratch) == TargetedCastVerdict::NotFound {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot pay Suspend cost".into(),
+                ));
+            }
+        }
+        return Ok(Some(waiting));
     }
     let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
@@ -32934,7 +33218,8 @@ fn activate_with_cost_carrier(
     // enforced separately by ActivationRestriction::AsSorcery via
     // check_activation_restrictions (below), which stays outside this guard — so
     // skipping these gates loses no timing protection.
-    if !is_plot_special_action(&ability_def) {
+    let suspend = is_suspend_special_action(state.objects.get(&source_id), &ability_def);
+    if !suspend && !is_plot_special_action(&ability_def) {
         // CR 602.5 + CR 603.2a: Reject activation if any CantBeActivated static
         // prohibits the player from activating this permanent's activated abilities.
         // CR 605.1a: The exemption gate (Pithing Needle's "unless they're mana
@@ -34303,6 +34588,10 @@ fn activate_with_cost_carrier(
         );
     }
 
+    if let Some(waiting) = finish_suspend(state, player, &resolved, carrier.as_deref(), events) {
+        return Ok(waiting);
+    }
+
     // CR 702.170b + CR 116.2k: Exiling a card using its plot ability is a
     // SPECIAL ACTION that doesn't use the stack. The self-exile cost paid above
     // already moved the card to exile (face up — CR 702.170 has no face-down
@@ -35396,7 +35685,9 @@ pub(crate) fn collect_activation_cost_modifiers(
     // plot anyway — the synthesized plot ability carries no `ability_tag`
     // (active_keyword == None) — so skipping the whole collection is equivalent to
     // skipping just the "activated" arm, and clearer.
-    if !is_plot_special_action(ability_def) {
+    if !is_plot_special_action(ability_def)
+        && !is_suspend_special_action(state.objects.get(&source_id), ability_def)
+    {
         collect_static_activated_ability_cost_modifiers(
             state,
             ability_def,
@@ -38283,6 +38574,152 @@ pub(super) fn effect_is_plot_grant(effect: &Effect) -> bool {
 /// gate the CR 702.170b special-action intercept in `handle_activate_ability`.
 pub(super) fn is_plot_special_action(ability_def: &AbilityDefinition) -> bool {
     effect_is_plot_grant(&ability_def.effect)
+}
+
+/// CR 702.62a: match the selected hand action against the printed count and cost.
+fn suspend_descriptor_count(
+    effect: &Effect,
+    cost: &AbilityCost,
+    keywords: &[Keyword],
+) -> Option<u32> {
+    let Effect::PutCounter {
+        counter_type: CounterType::Time,
+        count: QuantityExpr::Fixed { value },
+        target: TargetFilter::SelfRef,
+    } = effect
+    else {
+        return None;
+    };
+    let count = u32::try_from(*value).ok().filter(|count| *count > 0)?;
+    let AbilityCost::Composite { costs } = cost else {
+        return None;
+    };
+    let [AbilityCost::Mana { cost }, AbilityCost::Exile {
+        count: 1,
+        zone: Some(Zone::Hand),
+        filter: Some(TargetFilter::SelfRef),
+    }] = costs.as_slice()
+    else {
+        return None;
+    };
+    keywords
+        .iter()
+        .any(|keyword| {
+            matches!(keyword, Keyword::Suspend { count: printed, cost: mana }
+                if *printed == count && cost == mana
+            )
+        })
+        .then_some(count)
+}
+
+fn is_suspend_special_action(source: Option<&GameObject>, ability: &AbilityDefinition) -> bool {
+    let Some(source) = source.filter(|object| object.zone == Zone::Hand) else {
+        return false;
+    };
+    ability.kind == AbilityKind::Activated
+        && ability.activation_zone == Some(Zone::Hand)
+        && ability
+            .activation_restrictions
+            .contains(&crate::types::ability::ActivationRestriction::MatchesCardCastTiming)
+        && ability.cost.as_ref().is_some_and(|cost| {
+            suspend_descriptor_count(&ability.effect, cost, &source.keywords).is_some()
+        })
+}
+
+fn announced_suspend(
+    ability: &ResolvedAbility,
+    snapshot: Option<&ActivationCostSnapshot>,
+    player: PlayerId,
+) -> Option<(ObjectIncarnationRef, u32)> {
+    let record = ability.activation_record.as_ref()?;
+    if record.source_zone != Zone::Hand
+        || record.activator != player
+        || record.source != ability.source_id
+        || ability.controller != player
+    {
+        return None;
+    }
+    let cost = match &record.activation_cost {
+        BoundActivationCost::Cost(cost) => cost.as_ref(),
+        BoundActivationCost::Unknown => &snapshot?.base_cost,
+        BoundActivationCost::Costless => return None,
+    };
+    let count = suspend_descriptor_count(&ability.effect, cost, &record.source_lki.keywords)?;
+    let source = ObjectIncarnationRef {
+        object_id: record.source,
+        incarnation: ability.announced_source_incarnation?,
+    };
+    Some((source, count))
+}
+
+pub(crate) fn pending_suspend(
+    pending: &PendingCast,
+    player: PlayerId,
+) -> Option<ObjectIncarnationRef> {
+    pending.activation_ability_index?;
+    let (source, _) = announced_suspend(
+        &pending.ability,
+        pending.activation_cost_snapshot.as_deref(),
+        player,
+    )?;
+    (source.object_id == pending.object_id).then_some(source)
+}
+
+pub(crate) fn suspend_source_is_live(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+) -> bool {
+    state.objects.get(&source.object_id).is_some_and(|object| {
+        object.incarnation == source.incarnation
+            && state.object_in_players_zone(object, Zone::Hand, player)
+    })
+}
+
+pub(super) fn reserved_suspend_card(state: &GameState, player: PlayerId) -> Option<ObjectId> {
+    let source = pending_suspend(state.pending_cast.as_deref()?, player)?;
+    suspend_source_is_live(state, player, source).then_some(source.object_id)
+}
+
+/// CR 400.7 + CR 118.11: follow the paid Hand departure to its immediate destination.
+pub(crate) fn suspend_cost_destination(
+    state: &GameState,
+    source: ObjectIncarnationRef,
+) -> Option<Zone> {
+    let record = state.incarnation_departure_record(source)?;
+    let object = state.objects.get(&source.object_id)?;
+    (record.from_zone == Some(Zone::Hand)
+        && record.departure.is_moved()
+        && record.to_zone == object.zone
+        && source.incarnation.checked_add(1) == Some(object.incarnation)
+        && (object.zone != Zone::Exile || !object.face_down))
+        .then_some(object.zone)
+}
+
+pub(super) fn finish_suspend(
+    state: &mut GameState,
+    player: PlayerId,
+    ability: &ResolvedAbility,
+    snapshot: Option<&ActivationCostSnapshot>,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    let (source, count) = announced_suspend(ability, snapshot, player)?;
+    // CR 116.2f + CR 702.62a: place the counters as part of the special action.
+    if suspend_cost_destination(state, source) == Some(Zone::Exile)
+        && !super::effects::counters::add_counter_with_replacement(
+            state,
+            player,
+            source.object_id,
+            CounterType::Time,
+            count,
+            crate::types::proposed_event::CounterCause::Other,
+            events,
+        )
+    {
+        return Some(state.waiting_for.clone());
+    }
+    priority::clear_priority_passes(state);
+    Some(WaitingFor::Priority { player })
 }
 
 /// CR 116.2 + CR 118.7a: Apply a special-action cost reduction to the mana

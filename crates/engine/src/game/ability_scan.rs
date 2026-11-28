@@ -5328,6 +5328,9 @@ fn scan_trigger_definition(
         // CR 509.3e: the blocker-count threshold's blocker filter is an event
         // matcher like `valid_target` (scanned below); `minimum` is a literal.
         blocker_count,
+        // CR 508.3a: later declarations derive their ordinals from this turn's
+        // exact attack history, so the matcher can observe its growth.
+        attack_declaration_ordinal,
 
         // ---- read-free: the Room-half (door) STAMP — a matcher key like the
         //      filters above, at its most inert end. `RoomDoor` is a fieldless two-variant
@@ -5425,7 +5428,11 @@ fn scan_trigger_definition(
         ));
     }
     // CR 603.2 event matchers — context rationale in the destructure above.
-    let mut matcher = Axes::NONE;
+    let mut matcher = if attack_declaration_ordinal.is_some() {
+        Axes::history_of(HistoryMember::AttackerDeclarationsThisTurn)
+    } else {
+        Axes::NONE
+    };
     for f in [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
@@ -5653,7 +5660,9 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes<'_> {
             kicker_cost: _,
             min_count: _,
         } => Axes::NONE,
-        TriggerCondition::SourceIsAttacking => Axes::NONE,
+        TriggerCondition::SourceIsAttacking { player } => player
+            .as_ref()
+            .map_or(Axes::NONE, |player| scan_player_filter(player, mode)),
         TriggerCondition::CastVariantPaid { variant: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
         }
@@ -7940,6 +7949,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         AbilityCost::PayLife { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PayEnergy { amount } => scan_quantity_expr(amount, mode),
         AbilityCost::PaySpeed { amount } => scan_quantity_expr(amount, mode),
+        AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::AnnouncedX { maximum },
+        } => scan_quantity_expr(maximum, mode),
         AbilityCost::Discard {
             count,
             filter: _,
@@ -7981,7 +7993,9 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes<'_> {
         | AbilityCost::UnattachFrom { .. }
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
+        | AbilityCost::Blight {
+            count: crate::types::ability::BlightCount::Fixed(_),
+        }
         | AbilityCost::Behold { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
@@ -8329,6 +8343,7 @@ fn scan_ward_cost(cost: &WardCost, mode: ScanMode) -> Axes<'_> {
         | WardCost::PayLifeEqualToPower
         | WardCost::Discard { filter: None, .. }
         | WardCost::Waterbend(_)
+        | WardCost::Blight(_)
         | WardCost::GetPlayerCounters { .. } => Axes::NONE,
     }
 }

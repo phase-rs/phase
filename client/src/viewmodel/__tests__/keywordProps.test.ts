@@ -50,6 +50,23 @@ describe("getKeywordName", () => {
   });
 });
 
+describe("Replicate keyword payloads", () => {
+  it("renders the legacy mana cost and both typed non-mana costs", () => {
+    expect(getKeywordDetail({ Replicate: { type: "Cost", shards: ["Red"], generic: 1 } }))
+      .toBe("{1}{R}");
+    expect(getKeywordDetail({ Replicate: { type: "PayEnergy", amount: 3 } }))
+      .toBe("Pay 3 energy");
+    expect(getKeywordDetail({
+      Replicate: {
+        type: "TapOne",
+        tap_display: { type: "ControlledSubtype", subtype: "Horror" },
+      },
+    })).toBe("Tap an untapped Horror you control");
+    expect(getKeywordDetail({ Replicate: { type: "TapOne", tap_display: { type: "Creature" } } }))
+      .toBe("Tap an untapped creature");
+  });
+});
+
 describe("getKeywordDetail", () => {
   it("returns null for simple keywords", () => {
     expect(getKeywordDetail("Flying")).toBeNull();

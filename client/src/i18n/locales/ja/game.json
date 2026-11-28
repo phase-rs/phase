@@ -408,6 +408,9 @@
       "single": "{{action}}パーマネント1つ",
       "exactCount_one": "{{action}}パーマネント{{count}}つ",
       "exactCount_other": "{{action}}パーマネント{{count}}つ",
+      "protectedObject": "{{object}}を守るために支払う",
+      "blightCounters_one": "あなたがコントロールするクリーチャー1体の上に-1/-1カウンターを1個置く",
+      "blightCounters_other": "あなたがコントロールするクリーチャー1体の上に-1/-1カウンターを{{count}}個置く",
       "rangeCount_one": "{{action}}パーマネント{{min}}〜{{count}}個",
       "rangeCount_other": "{{action}}パーマネント{{min}}〜{{count}}個",
       "upToCount_one": "{{action}}パーマネント最大{{count}}個",
@@ -1323,6 +1326,7 @@
       "onlyForSpellColor": "{{color}}の呪文にのみ使用可能。",
       "onlyForSpellFromZone": "呪文の使用条件：{{polarity}} {{zone}}。",
       "cannotCastSpellFromZone": "{{zone}}から呪文を唱えるためには使用できません。",
+      "cannotCastSpellsOutsideType": "{{spellType}}でない呪文を唱えるためには使用できません。",
       "onlyForFaceDownSpell": "裏向きの呪文にのみ使用可能。",
       "onlyForAny": "次のいずれかの用途にのみ使用可能：{{restrictions}}",
       "onlyForSpecialAction": "特別な処理「{{action}}」にのみ使用可能。",
@@ -1380,6 +1384,8 @@
         "Ticket": "チケット"
       },
       "generic": "コスト",
+      "blight": "枯死 {{count}}",
+      "blightBoundedX": "枯死 X (あなたがコントロールするクリーチャーのタフネスの最大値まで)",
       "pay": "{{cost}}を支払う",
       "draw": "カードを1枚引く",
       "drawCount_one": "カードを{{count}}枚引く",
@@ -2215,6 +2221,14 @@
     "attachments": "{{names}}がついている"
   },
   "optionalCost": {
+    "replicate": {
+      "title": "複製コストを支払いますか？",
+      "again": "複製コストをもう一度支払いますか？（支払い済み：{{times}}回）",
+      "decline": "完了",
+      "tapSubtype": "あなたがコントロールするアンタップ状態の{{subtype}}１体をタップする",
+      "tapCreature": "アンタップ状態のクリーチャー１体をタップする",
+      "payEnergy": "エネルギーを{{amount}}点支払う"
+    },
     "gift": {
       "title": "贈り物を約束しますか？",
       "pay": "{{gift}}を約束",

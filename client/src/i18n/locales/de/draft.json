@@ -675,6 +675,7 @@
     "connection": "Verbindungsfehler",
     "incompatible": "Dieser Draft ist mit deiner Protokollversion nicht kompatibel.",
     "unreadable": "Dieser gespeicherte Draft kann nicht gelesen und daher nicht fortgesetzt werden.",
+    "recoverySave": "Die Wiederherstellungsdaten des Drafts konnten nicht gespeichert werden",
     "retry": "Erneut verbinden"
   },
   "winston": {

@@ -138,7 +138,7 @@ vi.mock("../../adapter/p2p-draft-host", async (importOriginal) => {
 });
 
 vi.mock("../../adapter/p2p-draft-guest", async () => {
-  const persistence = await import("../../services/draftPersistence");
+  const { withActiveDraftPointer } = await import("../../services/draftPersistence");
   return {
     P2PDraftGuest: vi.fn().mockImplementation(function (
       _peer: unknown,
@@ -146,14 +146,25 @@ vi.mock("../../adapter/p2p-draft-guest", async () => {
       _conn: unknown,
       connection: { roomCode?: string; displayName?: string },
     ) {
+      let listener: ((event: unknown) => void) | null = null;
       const instance = {
-        onEvent: () => () => {},
+        onEvent: (l: (event: unknown) => void) => {
+          listener = l;
+          return () => { listener = null; };
+        },
+        // Like the real guest, hand the committed pointer to the lifecycle
+        // owner, which publishes it, inside the recovery-pointer transaction.
         initialize: vi.fn(async () => {
-          persistence.saveActiveDraftGuest({
-            roomCode: connection?.roomCode ?? "GGGGG",
-            displayName: connection?.displayName ?? "G",
-            hostPeerId,
-          });
+          await withActiveDraftPointer((recovery) => listener?.({
+            type: "recoveryCommitted",
+            pointer: {
+              roomCode: connection?.roomCode ?? "GGGGG",
+              displayName: connection?.displayName ?? "G",
+              hostPeerId,
+              capabilityId: `capability-${hostPeerId}`,
+            },
+            recovery,
+          }));
         }),
         leave: vi.fn(async () => {}),
         dispose: vi.fn(),
@@ -479,7 +490,7 @@ describe("leave(false) of a host finishes ending it when a newer session takes t
     await vi.waitFor(() => expect(probe.gameTerminateEntered).toBe(1));
     await expectParked(leaving);
 
-    // No route abort: X is still `activeHostAdapter` when B's own `hostDraft`
+    // No route abort: X is still the installed host when B's own `hostDraft`
     // call detaches it directly (`hostDraft`'s own entry, not `abortOwner`).
     const hostTerm = hold("host");
     probe.hostRoomCodes.push("DDBBB");
@@ -510,7 +521,7 @@ describe("leave(false) of a host finishes ending it when a newer session takes t
     // X never reaches "opened": its own `P2PDraftHost.initialize()` is parked,
     // then rejects, so this is `hostDraft`'s own initialization-failure
     // `finally` -- not `leave`'s direct dispose and not a route abort -- that
-    // first nulls `activeHostAdapter`/`activeHostPersistenceId` for X.
+    // first detaches X as the installed host.
     probe.hostRoomCodes.push("XXAAA");
     const initGate = gate();
     probe.hostInitializeGate = initGate.promise.then(() => {

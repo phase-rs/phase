@@ -75,22 +75,40 @@ import {
   type DraftPodGuestEvent,
   type DraftPodGuestStatus,
 } from "../adapter/draftPodGuestAdapter";
-import type { DraftGuestRecoveryFailure } from "../adapter/p2p-draft-guest";
+import type { DraftGuestRecoveryFailure, DraftGuestRecoveryPointer } from "../adapter/p2p-draft-guest";
 import {
+  ServerDraftAdapter,
+  type CreateDraftSettings,
+  type ServerDraftAdapterEvent,
+} from "../adapter/server-draft-adapter";
+import {
+  canonicalNativeDraftEndpoint,
   clearActiveDraftPodFor,
   clearActiveDraftGuest,
   clearActiveDraftGuestIfCurrent,
   clearDraftSettlementOutbox,
+  clearNativeDraftCapability,
+  clearUnusableNativeDraft,
+  inspectActiveNativeDraft,
   loadDraftIntergameCommands,
   loadActiveDraftPod,
   inspectActiveDraftGuest,
   loadDraftGuestSession,
   loadDraftSettlementOutbox,
+  loadNativeDraftCapability,
+  sameActiveDraftGuestCapture,
   saveActiveDraftPod,
   saveDraftIntergameCommands,
   saveDraftSettlementOutbox,
+  saveNativeDraftCapability,
+  withActiveDraftPointer,
+  type ActiveDraftGuestMetaCapture,
   type ActiveDraftPodMeta,
   type ActiveDraftPodPhase,
+  type ActiveDraftPointerTxn,
+  type ActiveNativeDraftPointer,
+  type NativeDraftCapabilityHold,
+  type NativeDraftRepublication,
 } from "../services/draftPersistence";
 import { getEffectiveOffline } from "./connectivityStore";
 import { assertNever } from "../utils/assertNever";
@@ -120,6 +138,9 @@ import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 
 export type DraftRole = "host" | "guest";
 
+/** Which transport carries the published session: a P2P pod or a server-hosted draft. */
+export type DraftTransport = "p2p" | "native";
+
 export const DRAFT_OFFLINE_ERROR = "offline.startUnavailable";
 /** The pod store's error key for a saved pod the draft engine refuses. */
 export const DRAFT_RECOVERY_INCOMPATIBLE_ERROR = "podError.incompatible";
@@ -127,6 +148,8 @@ export const DRAFT_RECOVERY_INCOMPATIBLE_ERROR = "podError.incompatible";
 export const DRAFT_RECOVERY_CONNECTION_ERROR = "podError.connection";
 /** The pod store's error key for a saved pod the draft engine cannot read. */
 export const DRAFT_RECOVERY_UNREADABLE_ERROR = "podError.unreadable";
+/** The pod store's error key for a native seat whose private record could not be written. */
+export const DRAFT_RECOVERY_SAVE_ERROR = "podError.recoverySave";
 
 export type GuestDraftResumeOutcome = "resumed" | "absent" | "invalid" | "failed" | "offline" | "superseded";
 
@@ -180,6 +203,14 @@ export type DraftSessionOpenOutcome =
  * `error`, and the store keeps none of the attempt's state.
  */
 export type DraftJoinFailureReport = "store" | "caller";
+
+/**
+ * How a native resume settled. Only `"resumed"` writes the store; a refusal's
+ * code travels in the outcome, never through published state.
+ */
+export type NativeDraftResumeOutcome =
+  | { readonly status: "resumed" | "absent" | "invalid" | "offline" | "superseded" }
+  | { readonly status: "failed"; readonly error: string | null; readonly code?: Draft27CompatibilityError["code"] };
 
 /**
  * The pod SESSION's phase.
@@ -319,6 +350,8 @@ export interface PairingInfo {
 
 interface MultiplayerDraftState {
   role: DraftRole | null;
+  /** The installed owner's transport; null while no session is published. */
+  transport: DraftTransport | null;
   phase: MultiplayerDraftPhase;
   roomCode: string | null;
   /** Existing host-lifecycle identity; never infer ownership from room code. */
@@ -434,10 +467,37 @@ interface MultiplayerDraftActions {
   /** Guest: join an existing draft pod by room code. */
   joinDraft: (
     config: DraftPodGuestConfig,
-    options?: { failureReport?: DraftJoinFailureReport },
+    options?: {
+      failureReport?: DraftJoinFailureReport;
+      /** The stored pointer a reconnect's seat stands on; null for a new seat. */
+      standsOn?: ActiveDraftGuestMetaCapture | null;
+    },
   ) => Promise<DraftSessionOpenOutcome>;
   /** Reconnect exclusively through the persisted capability, never `draft_join`. */
   resumeDraft: (options?: { routeToken?: number; signal?: AbortSignal }) => Promise<GuestDraftResumeOutcome>;
+  /**
+   * Server-hosted draft: create a pod on `endpoint`. `signal` ends the attempt
+   * before its install and the owner after it.
+   */
+  createNativeDraft: (options: {
+    endpoint: string;
+    settings: CreateDraftSettings;
+    signal?: AbortSignal;
+  }) => Promise<DraftSessionOpenOutcome>;
+  /** Server-hosted draft: join the pod `draftCode` on `endpoint`; `signal` as for create. */
+  joinNativeDraft: (options: {
+    endpoint: string;
+    draftCode: string;
+    displayName: string;
+    password?: string;
+    signal?: AbortSignal;
+  }) => Promise<DraftSessionOpenOutcome>;
+  /**
+   * Server-hosted draft: reclaim the seat the stored native capability names.
+   * Provisional until one synchronous handoff; `signal` ends it before the
+   * handoff and the resumed owner after it.
+   */
+  resumeNativeDraft: (options?: { signal?: AbortSignal }) => Promise<NativeDraftResumeOutcome>;
   /** Host: start the draft once the pod is ready. */
   startDraft: (botFillEmptySeats?: boolean) => Promise<void>;
   /** Both: submit a pick. */
@@ -474,7 +534,8 @@ interface MultiplayerDraftActions {
   /** Host: resume the draft. */
   requestResume: () => void;
   /** Both: tear down the connection and reset state. Lifecycle callers retain
-   * recovery; an explicit leave revokes it only after host acknowledgement. */
+   * recovery; an explicit leave revokes it only after host acknowledgement.
+   * It moves the draft owner generation as it begins, before any await. */
   leave: (preserveRecovery?: boolean) => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
@@ -544,15 +605,67 @@ interface MultiplayerDraftActions {
 
 // ── Module-level adapter refs ──────────────────────────────────────────
 
-let activeHostAdapter: DraftPodHostAdapter | null = null;
-let activeGuestAdapter: DraftPodGuestAdapter | null = null;
-let activeHostEventUnsub: (() => void) | null = null;
-let activeGuestEventUnsub: (() => void) | null = null;
-let activeHostAbort: AbortController | null = null;
+/** What an installed owner holds beside its adapter, for as long as it is installed. */
+interface OwnerLifetime {
+  /** The adapter's lifecycle signal; aborted when this owner is detached. */
+  readonly controller: AbortController;
+  /** The draft lifecycle this owner's install began. */
+  readonly generation: number;
+  /** Ends the event gate, which delivers only while this owner is installed. */
+  readonly unsubscribe: () => void;
+  /** The route signal whose abort ends this owner, and its listener. */
+  readonly route: { readonly signal: AbortSignal; readonly listener: () => void } | null;
+}
+
+/** The tab's one installed draft owner. Each install is a new object, so identity says whether it is still installed. */
+type InstalledDraftOwner =
+  | {
+    readonly role: "host";
+    readonly adapter: DraftPodHostAdapter;
+    readonly persistenceId: string | null;
+    readonly lifetime: OwnerLifetime;
+  }
+  | {
+    readonly role: "guest";
+    readonly adapter: DraftPodGuestAdapter;
+    readonly lifetime: OwnerLifetime;
+    /**
+     * The stored pointer this seat's recovery stands on: its resume's captured
+     * locator, then each pointer it publishes; null for a new seat until its
+     * welcome's pointer is stored.
+     */
+    standsOn: ActiveDraftGuestMetaCapture | null;
+  }
+  | {
+    readonly role: "native";
+    readonly adapter: ServerDraftAdapter;
+    /** The side of the server-hosted draft this seat took: its creator hosts. */
+    readonly participant: DraftRole;
+    readonly lifetime: OwnerLifetime;
+    /** Set once, by the installed owner, when its private record commits. */
+    capability: NativeDraftCapabilityHold | null;
+  };
+
+type InstalledGuestOwner = Extract<InstalledDraftOwner, { readonly role: "guest" }>;
+
+/** Written non-null only by `installDraftOwner`, and null only by `detachInstalledDraftOwner`. */
+let installedDraftOwner: InstalledDraftOwner | null = null;
+
+function installedHost(): DraftPodHostAdapter | null {
+  const owner = installedDraftOwner;
+  return owner?.role === "host" ? owner.adapter : null;
+}
+
+function installedGuest(): DraftPodGuestAdapter | null {
+  const owner = installedDraftOwner;
+  return owner?.role === "guest" ? owner.adapter : null;
+}
+
 /**
  * The Commander launch currently bringing its room up.
  *
- * Sits beside `activeHostAbort` because it is the same shape: a module-local
+ * Sits beside the installed owner's lifetime controller because it is the same
+ * shape: a module-local
  * `AbortController` that discriminates a deliberate teardown from a failure.
  * `hostDraft` (below) is the complete precedent — it already carries all three
  * parts used here: the module-local controller, a deliberately silent catch for
@@ -619,6 +732,29 @@ function settleOnAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> 
 }
 
 /**
+ * Settles as `wait` does, or resolves as soon as `replaced` aborts: a leave
+ * whose owner a successor took over has nothing left to wait for, and the
+ * wait's later rejection is dropped rather than reported against the successor.
+ */
+function settleUnlessReplaced(wait: Promise<void>, replaced: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const onReplaced = () => resolve();
+    if (replaced.aborted) resolve();
+    else replaced.addEventListener("abort", onReplaced, { once: true });
+    wait.then(
+      () => {
+        replaced.removeEventListener("abort", onReplaced);
+        resolve();
+      },
+      (error: unknown) => {
+        replaced.removeEventListener("abort", onReplaced);
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
  * THE single authority for abandoning a Commander bring-up still in flight.
  *
  * Both handles above are module-local and are released ONLY by their owner's
@@ -660,11 +796,95 @@ function abandonCommanderBringUp(): Promise<void> {
   return handle.teardown;
 }
 
-let activeGuestAbort: AbortController | null = null;
-let activeHostRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
-let activeGuestRouteAbortListener: { signal: AbortSignal; listener: () => void } | null = null;
-let activeHostPersistenceId: string | null = null;
+/**
+ * A setup, join or recovery attempt that has not installed an owner. Only these
+ * are replaceable while an owner is installed: a later attempt or `leave`
+ * aborts the controller, and the attempt's own currency checks read it.
+ */
+interface ProvisionalDraftOwner {
+  readonly controller: AbortController;
+}
+const provisionalDraftOwners = new Set<ProvisionalDraftOwner>();
+
+/** Registers an attempt where its work begins. It supersedes nobody. */
+function registerProvisionalOwner(): ProvisionalDraftOwner {
+  const provisional: ProvisionalDraftOwner = { controller: new AbortController() };
+  provisionalDraftOwners.add(provisional);
+  return provisional;
+}
+
+/** Supersedes every registered attempt but `self`; called where an attempt begins to act. Never touches the installed owner. */
+function supersedeOtherProvisionalOwners(self: ProvisionalDraftOwner): void {
+  for (const provisional of [...provisionalDraftOwners]) {
+    if (provisional === self) continue;
+    provisionalDraftOwners.delete(provisional);
+    provisional.controller.abort();
+  }
+}
+
+/** For an attempt whose registration and first action coincide. */
+function beginProvisionalOwner(): ProvisionalDraftOwner {
+  const provisional = registerProvisionalOwner();
+  supersedeOtherProvisionalOwners(provisional);
+  return provisional;
+}
+
+/** Supersedes every registered attempt. */
+function supersedeProvisionalOwners(): void {
+  for (const provisional of [...provisionalDraftOwners]) {
+    provisionalDraftOwners.delete(provisional);
+    provisional.controller.abort();
+  }
+}
+
+/** Supersession always aborts, so a settled attempt stays current for its own later checks. */
+function isCurrentProvisional(provisional: ProvisionalDraftOwner): boolean {
+  return !provisional.controller.signal.aborted;
+}
+
+function settleProvisional(provisional: ProvisionalDraftOwner): void {
+  provisionalDraftOwners.delete(provisional);
+}
+
+/**
+ * Why the installed owner's succession moved: a successor's start or handoff
+ * replaced it, or it ended with no successor (its route, a failed restore, a
+ * leave with nothing installed).
+ */
+type DraftOwnerSuccession = "replaced" | "ended";
 let draftAdapterEpoch = 0;
+/** Aborted, then renewed, whenever a successor replaces the owner, so a `leave` still waiting for it settles. */
+let ownerReplaced = new AbortController();
+/**
+ * The generation a pod-page exit compares. Only an owner's install (the
+ * retirement a successor's start or handoff performs included), a leave and a
+ * reset move it, so nothing a session publishes reads as a change of owner.
+ */
+let draftOwnerGeneration = 0;
+
+/** The current {@link draftOwnerGeneration}, which a pod-page exit reads once its leave has begun and again once that leave has settled. */
+export function currentDraftOwnerGeneration(): number {
+  return draftOwnerGeneration;
+}
+
+function advanceDraftAdapterEpoch(succession: DraftOwnerSuccession): number {
+  draftAdapterEpoch += 1;
+  switch (succession) {
+    case "replaced": {
+      const replaced = ownerReplaced;
+      ownerReplaced = new AbortController();
+      // Before the abort that settles a waiting leave, so its exit sees the move.
+      draftOwnerGeneration += 1;
+      replaced.abort();
+      break;
+    }
+    case "ended":
+      break;
+    default:
+      assertNever(succession);
+  }
+  return draftAdapterEpoch;
+}
 let resumeGuestDraftAttempt: {
   routeToken: number;
   signal: AbortSignal | undefined;
@@ -680,6 +900,8 @@ const hostAdapterTeardowns = new WeakMap<DraftPodHostAdapter, Promise<void>>();
  */
 const leftHostAdapters = new WeakMap<DraftPodHostAdapter, string | null>();
 const disposedGuestAdapters = new WeakSet<DraftPodGuestAdapter>();
+/** A native adapter is disposed once: a leave disposes it in its wait and a successor's retire again. */
+const disposedNativeAdapters = new WeakSet<ServerDraftAdapter>();
 const retainedDraftSessionTeardowns = new Map<string, Promise<void>>();
 let activeMatchController: GameLoopController | null = null;
 const intergameControllers = new Map<string, IntergameCommandController>();
@@ -758,8 +980,16 @@ function mergeSuggestedVirtualBasics(
 }
 
 function activeWorkspaceAdapter(): DraftPodHostAdapter | DraftPodGuestAdapter | null {
-  const role = useMultiplayerDraftStore.getState().role;
-  return role === "host" ? activeHostAdapter : role === "guest" ? activeGuestAdapter : null;
+  const owner = installedDraftOwner;
+  if (!owner || owner.role !== useMultiplayerDraftStore.getState().role) return null;
+  switch (owner.role) {
+    case "host":
+      return owner.adapter;
+    case "guest":
+      return owner.adapter;
+    default:
+      return assertNever(owner);
+  }
 }
 
 function publishWorkspace(workspace: DraftWorkspaceState): Promise<void> {
@@ -885,11 +1115,11 @@ async function performPick(request: MultiplayerPickRequest): Promise<DraftPickOu
 
   try {
     let acknowledgedView: DraftPlayerView | null;
-    if (state.role === "host" && activeHostAdapter === adapter) {
+    if (state.role === "host" && installedHost() === adapter) {
       acknowledgedView = request.kind === "draft-effect"
         ? await adapter.submitPickWithDraftEffect(request.effectCardInstanceId, [...request.instanceIds])
         : await adapter.submitPick([...request.instanceIds]);
-    } else if (state.role === "guest" && activeGuestAdapter === adapter) {
+    } else if (state.role === "guest" && installedGuest() === adapter) {
       const acknowledgement = new Promise<DraftPlayerView | null>((resolve) => {
         pendingGuestPick = { generation, resolve };
       });
@@ -1073,9 +1303,9 @@ async function performSharedStackDecision(
 
   try {
     let acknowledgedView: DraftPlayerView | null;
-    if (state.role === "host" && activeHostAdapter === adapter) {
+    if (state.role === "host" && installedHost() === adapter) {
       acknowledgedView = await adapter.submitSharedStackDecision(pile, decision);
-    } else if (state.role === "guest" && activeGuestAdapter === adapter) {
+    } else if (state.role === "guest" && installedGuest() === adapter) {
       // The host answers with `draft_pick_ack`, which the guest adapter emits
       // as `pickAcknowledged` — the same correlation slot a pick uses, because
       // the exclusive token makes at most one of the two outstanding.
@@ -1136,37 +1366,37 @@ async function performSharedStackDecision(
   }
 }
 
-interface DetachedDraftAdapters {
-  host: DraftPodHostAdapter | null;
-  guest: DraftPodGuestAdapter | null;
-  hostPersistenceId: string | null;
-}
-
-function detachDraftAdapters(): DetachedDraftAdapters {
+/**
+ * Detaches the installed owner, if any, and returns it for
+ * `disposeDetachedOwner`. It writes no state.
+ */
+function detachInstalledDraftOwner(): InstalledDraftOwner | null {
   // The pod session ends here, so its in-flight bring-ups end with it.
   abandonMatchStart();
   void abandonCommanderBringUp();
-  const detached = {
-    host: activeHostAdapter,
-    guest: activeGuestAdapter,
-    hostPersistenceId: activeHostPersistenceId,
-  };
-  activeHostAdapter = null;
-  activeGuestAdapter = null;
-  activeHostPersistenceId = null;
-  activeHostAbort?.abort();
-  activeGuestAbort?.abort();
-  activeHostRouteAbortListener?.signal.removeEventListener("abort", activeHostRouteAbortListener.listener);
-  activeGuestRouteAbortListener?.signal.removeEventListener("abort", activeGuestRouteAbortListener.listener);
-  activeHostAbort = null;
-  activeGuestAbort = null;
-  activeHostRouteAbortListener = null;
-  activeGuestRouteAbortListener = null;
-  activeHostEventUnsub?.();
-  activeGuestEventUnsub?.();
-  activeHostEventUnsub = null;
-  activeGuestEventUnsub = null;
+  const detached = installedDraftOwner;
+  installedDraftOwner = null;
+  if (detached) {
+    const { controller, route, unsubscribe } = detached.lifetime;
+    controller.abort();
+    route?.signal.removeEventListener("abort", route.listener);
+    unsubscribe();
+  }
   return detached;
+}
+
+/** The persistence id whose next owner waits for this detached owner's teardown. */
+function detachedPersistenceId(detached: InstalledDraftOwner | null): string | null {
+  if (!detached) return null;
+  switch (detached.role) {
+    case "host":
+      return detached.persistenceId;
+    case "guest":
+    case "native":
+      return null;
+    default:
+      return assertNever(detached);
+  }
 }
 
 /**
@@ -1215,14 +1445,57 @@ async function disposeGuestAdapter(adapter: DraftPodGuestAdapter, preserveRecove
   await adapter.dispose({ preserveRecovery });
 }
 
-async function disposeDetachedDraftAdapters(
-  detached: DetachedDraftAdapters,
+/** Disposes a native adapter once; its dispose is synchronous and sends nothing. */
+function disposeNativeAdapter(adapter: ServerDraftAdapter): Promise<void> {
+  if (!disposedNativeAdapters.has(adapter)) {
+    disposedNativeAdapters.add(adapter);
+    adapter.dispose();
+  }
+  return Promise.resolve();
+}
+
+/** Settles once the detached owner's teardown has, whatever its outcome; at once for none. */
+async function disposeDetachedOwner(
+  detached: InstalledDraftOwner | null,
   preserveSession: boolean,
 ): Promise<void> {
-  await Promise.allSettled([
-    ...(detached.host ? [disposeHostAdapter(detached.host, preserveSession)] : []),
-    ...(detached.guest ? [disposeGuestAdapter(detached.guest, preserveSession)] : []),
-  ]);
+  await Promise.allSettled(detached ? [disposeOwnerAdapter(detached, preserveSession)] : []);
+}
+
+function disposeOwnerAdapter(owner: InstalledDraftOwner, preserveSession: boolean): Promise<void> {
+  switch (owner.role) {
+    case "host":
+      return disposeHostAdapter(owner.adapter, preserveSession);
+    case "guest":
+      return disposeGuestAdapter(owner.adapter, preserveSession);
+    case "native":
+      return disposeNativeAdapter(owner.adapter);
+    default:
+      return assertNever(owner);
+  }
+}
+
+/**
+ * What a leave of `owner` waits for: a host's teardown, or a guest's
+ * host-acknowledged leave. A guest whose own failure detached it while the
+ * leave was ending its bring-ups is not installed, and leaves nothing to wait for.
+ * A native seat has no leave message: its leave is its adapter's dispose and,
+ * for a leave that keeps no recovery, its capability's exact clear.
+ */
+function leaveWait(owner: InstalledDraftOwner | null, preserveRecovery: boolean): Promise<void> | null {
+  if (!owner) return null;
+  switch (owner.role) {
+    case "host":
+      return disposeHostAdapter(owner.adapter, preserveRecovery);
+    case "guest":
+      return installedDraftOwner === owner ? owner.adapter.dispose({ preserveRecovery }) : null;
+    case "native":
+      if (installedDraftOwner !== owner) return null;
+      void disposeNativeAdapter(owner.adapter);
+      return !preserveRecovery && owner.capability ? clearNativeDraftCapability(owner.capability) : null;
+    default:
+      return assertNever(owner);
+  }
 }
 
 /** Retains teardown after the active adapter ref has been detached on route abort. */
@@ -1468,11 +1741,13 @@ async function retryDraftSettlement(launch: DraftMatchLaunch, role: DraftRole): 
   if (launch.binding.matchAuthoritySeat !== launch.localSeat) return;
   const settlement = await loadDraftSettlementOutbox(launch.binding);
   if (!settlement) return;
-  if (role === "host" && activeHostAdapter) {
-    await activeHostAdapter.submitMatchSettlement(settlement);
+  const host = installedHost();
+  const guest = installedGuest();
+  if (role === "host" && host) {
+    await host.submitMatchSettlement(settlement);
     await clearDraftSettlementOutbox(launch.binding);
-  } else if (role === "guest" && activeGuestAdapter) {
-    activeGuestAdapter.sendMatchSettlement(settlement);
+  } else if (role === "guest" && guest) {
+    guest.sendMatchSettlement(settlement);
   }
 }
 
@@ -1694,6 +1969,7 @@ function disposeCapturedMatchRuntime(adapter: unknown, controller: GameLoopContr
 
 const initialState: MultiplayerDraftState = {
   role: null,
+  transport: null,
   phase: "idle",
   roomCode: null,
   hostPersistenceId: null,
@@ -1744,73 +2020,94 @@ function replaceDraftSession(set: SetFn, next: Partial<MultiplayerDraftState>): 
   set({ ...initialState, ...next });
 }
 
-/** The adapter a host start, a recovery's commit or a guest join installs. */
+/** The adapter a host start, a recovery's commit, a guest join or a native start or handoff installs. */
 type DraftOwnerInstall =
   | { readonly role: "host"; readonly adapter: DraftPodHostAdapter; readonly persistenceId: string | null }
-  | { readonly role: "guest"; readonly adapter: DraftPodGuestAdapter };
-
-interface InstalledDraftOwner {
-  readonly controller: AbortController;
-  readonly generation: number;
-  /** The route-abort listener, for a caller that removes it once superseded. */
-  readonly abortOwner: () => void;
-}
-
-/** Whether `owner` still holds its role's adapter slot in the epoch that installed it. */
-function isInstalledDraftOwner(owner: DraftOwnerInstall, epoch: number): boolean {
-  if (epoch !== draftAdapterEpoch) return false;
-  switch (owner.role) {
-    case "host":
-      return activeHostAdapter === owner.adapter;
-    case "guest":
-      return activeGuestAdapter === owner.adapter;
-    default:
-      return assertNever(owner);
+  | {
+    readonly role: "guest";
+    readonly adapter: DraftPodGuestAdapter;
+    readonly standsOn: ActiveDraftGuestMetaCapture | null;
   }
-}
+  | {
+    readonly role: "native";
+    readonly adapter: ServerDraftAdapter;
+    readonly participant: DraftRole;
+    readonly capability: NativeDraftCapabilityHold | null;
+  };
 
 /**
  * The one step that installs the tab's draft owner, for a host start, a
  * recovery's commit and a guest join alike. The caller has already advanced
- * `draftAdapterEpoch` to `epoch` and detached the previous owner. It begins
- * the owner's lifecycle, takes the owner slots, delivers the adapter's events
- * only while this owner is installed, ends the owner when `routeSignal`
- * aborts, and publishes its connecting session. It contains no await.
+ * `draftAdapterEpoch` and detached the previous owner. It begins the owner's
+ * lifecycle, makes it the installed owner, delivers the adapter's events only
+ * while this owner is installed, ends the owner when `routeSignal` aborts, and
+ * publishes its connecting session. It contains no await.
  */
 function installDraftOwner(
   set: SetFn,
-  owner: DraftOwnerInstall,
-  epoch: number,
+  install: DraftOwnerInstall,
   routeSignal: AbortSignal | undefined,
 ): InstalledDraftOwner {
   const generation = beginDraftLifecycle();
+  draftOwnerGeneration += 1;
   const controller = new AbortController();
 
+  // The route's end ends this owner, and is not a successor: a leave still
+  // waiting for it keeps waiting.
   const abortOwner = () => {
     controller.abort();
-    if (!isInstalledDraftOwner(owner, epoch)) return;
-    ++draftAdapterEpoch;
-    const detached = detachDraftAdapters();
-    const teardown = disposeDetachedDraftAdapters(detached, true);
-    retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
+    if (installedDraftOwner !== owner) return;
+    advanceDraftAdapterEpoch("ended");
+    const detached = detachInstalledDraftOwner();
+    const teardown = disposeDetachedOwner(detached, true);
+    retainDraftSessionTeardown(detachedPersistenceId(detached), teardown);
     void teardown;
     set(initialState);
   };
+  const route = routeSignal ? { signal: routeSignal, listener: abortOwner } : null;
 
-  switch (owner.role) {
-    case "host":
-      activeHostAdapter = owner.adapter;
-      activeHostAbort = controller;
-      activeHostPersistenceId = owner.persistenceId;
-      activeHostEventUnsub = owner.adapter.onEvent((event) => {
-        if (generation === lifecycleGeneration && isInstalledDraftOwner(owner, epoch)) {
+  let owner: InstalledDraftOwner;
+  switch (install.role) {
+    case "host": {
+      const unsubscribe = install.adapter.onEvent((event) => {
+        if (generation === lifecycleGeneration && installedDraftOwner === owner) {
           handleHostEvent(event, set);
         }
       });
-      routeSignal?.addEventListener("abort", abortOwner, { once: true });
-      if (routeSignal) activeHostRouteAbortListener = { signal: routeSignal, listener: abortOwner };
+      owner = { ...install, lifetime: { controller, generation, unsubscribe, route } };
+      break;
+    }
+    case "guest": {
+      // The listener runs only on a later event, after `guest` is initialized.
+      const unsubscribe = install.adapter.onEvent((event) => {
+        if (generation === lifecycleGeneration && installedDraftOwner === guest) {
+          handleGuestEvent(event, set, guest);
+        }
+      });
+      const guest: InstalledGuestOwner = { ...install, lifetime: { controller, generation, unsubscribe, route } };
+      owner = guest;
+      break;
+    }
+    case "native": {
+      const unsubscribe = install.adapter.onEvent((event) => {
+        if (generation === lifecycleGeneration && installedDraftOwner === owner) {
+          handleNativeEvent(event, set);
+        }
+      });
+      owner = { ...install, lifetime: { controller, generation, unsubscribe, route } };
+      break;
+    }
+    default:
+      return assertNever(install);
+  }
+  installedDraftOwner = owner;
+  routeSignal?.addEventListener("abort", abortOwner, { once: true });
+
+  switch (owner.role) {
+    case "host":
       replaceDraftSession(set, {
         role: "host",
+        transport: "p2p",
         phase: "connecting",
         hostPersistenceId: owner.persistenceId,
         seatIndex: 0,
@@ -1818,22 +2115,206 @@ function installDraftOwner(
       });
       break;
     case "guest":
-      activeGuestAdapter = owner.adapter;
-      activeGuestAbort = controller;
-      activeGuestEventUnsub = owner.adapter.onEvent((event) => {
-        if (generation === lifecycleGeneration && isInstalledDraftOwner(owner, epoch)) {
-          handleGuestEvent(event, set);
-        }
+      replaceDraftSession(set, {
+        role: "guest",
+        transport: "p2p",
+        phase: "connecting",
+        interactionGeneration: generation,
       });
-      routeSignal?.addEventListener("abort", abortOwner, { once: true });
-      if (routeSignal) activeGuestRouteAbortListener = { signal: routeSignal, listener: abortOwner };
-      replaceDraftSession(set, { role: "guest", phase: "connecting", interactionGeneration: generation });
+      break;
+    case "native":
+      // The participant's role keeps the held-session predicates true for a
+      // native seat; no workspace, pick or host path reaches its adapter,
+      // since each compares the owner's `role` with this one.
+      replaceDraftSession(set, {
+        role: owner.participant,
+        transport: "native",
+        phase: "connecting",
+        draftCode: owner.capability?.draftCode ?? null,
+        interactionGeneration: generation,
+      });
       break;
     default:
       assertNever(owner);
   }
 
-  return { controller, generation, abortOwner };
+  return owner;
+}
+
+/**
+ * What a native resume's step inside the recovery-pointer transaction did:
+ * acted on nothing because the attempt ended or went offline while it
+ * waited, failed to write, was refused by another writer's pointer, or
+ * published and handed off to `owner`.
+ */
+type NativeResumeStep =
+  | { readonly kind: "superseded" }
+  | { readonly kind: "offline" }
+  | { readonly kind: "writeFailed" }
+  | { readonly kind: "refused"; readonly settled: Promise<void> }
+  | {
+    readonly kind: "published";
+    readonly settled: Promise<void>;
+    readonly owner: InstalledDraftOwner;
+    readonly epoch: number;
+  };
+
+/** What a native create or join asks the server for. */
+type NativeDraftStart =
+  | { readonly kind: "create"; readonly endpoint: string; readonly settings: CreateDraftSettings }
+  | {
+    readonly kind: "join";
+    readonly endpoint: string;
+    readonly draftCode: string;
+    readonly displayName: string;
+    readonly password?: string;
+  };
+
+/**
+ * A native create or join, retire-first as `joinDraft`: it retires the
+ * installed owner, installs the native one, and publishes the seat's pointer
+ * only after the seat's private record commits and while it is still the
+ * installed owner.
+ */
+async function openNativeOwner(
+  set: SetFn,
+  get: () => MultiplayerDraftState,
+  start: NativeDraftStart,
+  signal: AbortSignal | undefined,
+): Promise<DraftSessionOpenOutcome> {
+  // A call already cancelled, or a refused endpoint, registers, retires, builds and writes nothing.
+  if (signal?.aborted) return { status: "superseded" };
+  const endpoint = canonicalNativeDraftEndpoint(start.endpoint);
+  if (endpoint === null) return { status: "failed", error: null };
+  if (getEffectiveOffline()) {
+    set({ error: DRAFT_OFFLINE_ERROR });
+    return { status: "failed", error: DRAFT_OFFLINE_ERROR };
+  }
+  // Its first action retires the installed owner, so it ends every other
+  // pending attempt as it registers.
+  const provisional = beginProvisionalOwner();
+  const epoch = advanceDraftAdapterEpoch("replaced");
+  // A reset ends the lifecycle this start waits in, and supersedes no attempt.
+  const waitingGeneration = lifecycleGeneration;
+  const previous = detachInstalledDraftOwner();
+  const previousTeardown = disposeDetachedOwner(previous, true);
+  retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+  try {
+    if (previous) await previousTeardown;
+  } finally {
+    settleProvisional(provisional);
+  }
+  // A successor, a leave or a reset owns the session published now or next.
+  if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
+  if (!isCurrentProvisional(provisional) || signal?.aborted) {
+    // A recovery, a leave or its route ended this start after it retired its
+    // predecessor: no owner is installed, so that session must not stay published.
+    replaceDraftSession(set, {});
+    return { status: "superseded" };
+  }
+  if (getEffectiveOffline()) {
+    replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
+    return { status: "failed", error: DRAFT_OFFLINE_ERROR };
+  }
+
+  const participant: DraftRole = start.kind === "create" ? "host" : "guest";
+  const adapter = new ServerDraftAdapter(endpoint);
+  const owner = installDraftOwner(set, { role: "native", adapter, participant, capability: null }, signal);
+  // A reset ends the owner's lifecycle without detaching it.
+  const isCurrentOwner = () => installedDraftOwner === owner
+    && epoch === draftAdapterEpoch
+    && owner.lifetime.generation === lifecycleGeneration;
+  let written: NativeDraftCapabilityHold | null = null;
+  try {
+    if (start.kind === "create") {
+      await adapter.createDraft(start.settings);
+    } else {
+      // A join's admitted view arrives only as its result.
+      const view = await adapter.joinDraft(start.draftCode, start.displayName, start.password);
+      if (isCurrentOwner()) installEventView(view);
+    }
+    if (!isCurrentOwner()) {
+      void disposeNativeAdapter(adapter);
+      return { status: "superseded" };
+    }
+    const credential = adapter.credential;
+    if (!credential) throw new Error(DRAFT_RECOVERY_CONNECTION_ERROR);
+    set({ draftCode: credential.draftCode, seatIndex: credential.seatIndex });
+    const hold: NativeDraftCapabilityHold = {
+      capabilityId: crypto.randomUUID(),
+      endpoint,
+      draftCode: credential.draftCode,
+      playerToken: credential.playerToken,
+    };
+    written = hold;
+    let pointer: ActiveNativeDraftPointer;
+    try {
+      pointer = await saveNativeDraftCapability({
+        capabilityId: hold.capabilityId,
+        endpoint,
+        draftCode: credential.draftCode,
+        playerToken: credential.playerToken,
+        seatIndex: credential.seatIndex,
+        participant,
+      });
+    } catch {
+      throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+    }
+    if (!isCurrentOwner()) {
+      // Ended while its private record was being written: that record is
+      // nobody's now, and no pointer leads to it.
+      await clearNativeDraftCapability(hold);
+      void disposeNativeAdapter(adapter);
+      return { status: "superseded" };
+    }
+    if (owner.role === "native") owner.capability = hold;
+    // Publishing over a predecessor's native pointer removes the record it
+    // named. The publication waits for the recovery-pointer transaction, so its
+    // first act is to recheck that this owner is still installed.
+    let published: Promise<void> | null;
+    try {
+      const transaction = await withActiveDraftPointer((txn) => isCurrentOwner() ? txn.publishNative(pointer) : null);
+      // A step whose result could not be recorded has written the
+      // predecessor's pointer back: it fails like one that could not run.
+      if (transaction.status !== "committed") throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+      published = transaction.value;
+    } catch {
+      throw new Error(DRAFT_RECOVERY_SAVE_ERROR);
+    }
+    if (published === null) {
+      // Ended while it waited for the transaction: its record is nobody's
+      // now, and no pointer leads to it.
+      await clearNativeDraftCapability(hold);
+      void disposeNativeAdapter(adapter);
+      return { status: "superseded" };
+    }
+    await published;
+    // A successor may have started while that removal was pending.
+    if (!isCurrentOwner()) return { status: "superseded" };
+    return { status: "opened" };
+  } catch (error) {
+    if (!isCurrentOwner()) {
+      void disposeNativeAdapter(adapter);
+      if (written) await clearNativeDraftCapability(written);
+      return { status: "superseded" };
+    }
+    // Its own failure is not a successor: nothing advances the epoch, so a
+    // leave still waiting keeps waiting.
+    const { guestRecoveryFailure } = get();
+    detachInstalledDraftOwner();
+    void disposeNativeAdapter(adapter);
+    if (written) await clearNativeDraftCapability(written);
+    if (epoch !== draftAdapterEpoch || owner.lifetime.generation !== lifecycleGeneration) {
+      return { status: "superseded" };
+    }
+    const message = getEffectiveOffline()
+      ? DRAFT_OFFLINE_ERROR
+      : error instanceof Error ? error.message : String(error);
+    replaceDraftSession(set, { error: message, guestRecoveryFailure });
+    return error instanceof Draft27IncompatibilityError
+      ? { status: "failed", error: message, code: error.code }
+      : { status: "failed", error: message };
+  }
 }
 
 /**
@@ -1920,118 +2401,187 @@ export const useMultiplayerDraftStore = create<
     if (attempt.config.signal?.aborted) return "aborted";
     if (getEffectiveOffline()) return "offline";
 
-    // The check runs before anything is detached, so a typed refusal, or a
-    // check that cannot answer, leaves an installed owner untouched.
-    let preflight: Awaited<ReturnType<typeof preflightDraftPodHostRecovery>>;
+    // Provisional from here: a leave or a later attempt supersedes it. It
+    // supersedes other attempts only once it begins to act, below.
+    const provisionalOwner = registerProvisionalOwner();
+    const isCurrentRecovery = () => attempt.isCurrent() && isCurrentProvisional(provisionalOwner);
     try {
-      preflight = await preflightDraftPodHostRecovery(attempt.config.recovery);
-    } catch {
-      if (!attempt.isCurrent()) return "superseded";
+      // The check runs before anything is detached, so a typed refusal, or a
+      // check that cannot answer, leaves an installed owner untouched.
+      let preflight: Awaited<ReturnType<typeof preflightDraftPodHostRecovery>>;
+      try {
+        preflight = await preflightDraftPodHostRecovery(attempt.config.recovery);
+      } catch {
+        if (!isCurrentRecovery()) return "superseded";
+        if (attempt.config.signal?.aborted) return "aborted";
+        return "initializationFailure";
+      }
+      switch (preflight.type) {
+        case "admitted":
+          break;
+        case "incompatible":
+          return "incompatible";
+        case "unreadable":
+          return "unreadable";
+        default:
+          return assertNever(preflight);
+      }
+      if (!isCurrentRecovery()) return "superseded";
       if (attempt.config.signal?.aborted) return "aborted";
-      return "initializationFailure";
-    }
-    switch (preflight.type) {
-      case "admitted":
-        break;
-      case "incompatible":
-        return "incompatible";
-      case "unreadable":
-        return "unreadable";
-      default:
-        return assertNever(preflight);
-    }
-    if (!attempt.isCurrent()) return "superseded";
-    if (attempt.config.signal?.aborted) return "aborted";
 
-    // Exact persistence identity, rather than room-code coincidence, is the
-    // only already-resumed owner. A same-code replacement still runs through
-    // the captured lifecycle protocol.
-    if (activeHostAdapter && activeHostPersistenceId === attempt.config.persistenceId) {
-      return "resumed";
-    }
-
-    // Recovery must not borrow `hostDraft`: that normal new-host path
-    // intentionally detaches its predecessor before it allocates its next
-    // adapter.  Keep B local through its allocation. The one synchronous
-    // ownership handoff below comes before B restores a saved draft session
-    // or, when the record carries none, after B has initialized.
-    const provisional = new DraftPodHostAdapter();
-    const bufferedEvents: DraftPodHostEvent[] = [];
-    const stopBuffering = provisional.onEvent((event) => bufferedEvents.push(event));
-    const disposeProvisional = async () => {
-      stopBuffering();
-      await disposeHostAdapter(provisional, true);
-    };
-    // An attempt abandoned before its handover ends B at once, which closes any
-    // peer B has open, and the next attempt for this saved pod waits for that.
-    const abandonProvisional = () => {
-      retainDraftSessionTeardown(attempt.config.persistenceId ?? null, disposeProvisional());
-    };
-    attempt.config.signal?.addEventListener("abort", abandonProvisional, { once: true });
-
-    // The fenced commit: detach the installed owner, install B through the
-    // shared install step (which binds B to the route signal and publishes its
-    // session), then deliver its buffered events. It contains no await.
-    let committedEpoch: number | null = null;
-    const commit = (): { owner: AbortController; previousTeardown: Promise<void> } => {
-      attempt.config.signal?.removeEventListener("abort", abandonProvisional);
-      stopBuffering();
-      const epoch = ++draftAdapterEpoch;
-      committedEpoch = epoch;
-      const previous = detachDraftAdapters();
-      const { controller } = installDraftOwner(
-        set,
-        { role: "host", adapter: provisional, persistenceId: attempt.config.persistenceId ?? null },
-        epoch,
-        attempt.routeSignal,
-      );
-      attempt.onCommitted?.();
-      // The wrapper emitted only into the private buffer while B was
-      // provisional. Deliver those events only after the fenced install.
-      for (const event of bufferedEvents) handleHostEvent(event, set);
-
-      const previousTeardown = disposeDetachedDraftAdapters(previous, true);
-      retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
-      return { owner: controller, previousTeardown };
-    };
-
-    // Called by B's initialization before its first write to the draft
-    // engine session: the attempt's last checks, the commit, then the retired
-    // owner's teardown, which closes its persistence and drains its saves.
-    const handover = async (): Promise<AbortSignal> => {
-      if (attempt.config.signal?.aborted || !attempt.isCurrent() || getEffectiveOffline()) {
-        throw new Error("Draft pod host recovery ended before its handover");
+      // Exact persistence identity, rather than room-code coincidence, is the
+      // only already-resumed owner. A same-code replacement still runs through
+      // the captured lifecycle protocol.
+      const installed = installedDraftOwner;
+      if (installed?.role === "host" && installed.persistenceId === attempt.config.persistenceId) {
+        return "resumed";
       }
-      const { owner, previousTeardown } = commit();
-      await previousTeardown;
-      return owner.signal;
-    };
 
-    // After the handover the retired owner is not reinstated. A restore that
-    // fails ends B as well, with its saved session kept.
-    const endCommittedRecovery = async () => {
-      if (activeHostAdapter === provisional && committedEpoch === draftAdapterEpoch) {
-        ++draftAdapterEpoch;
-        const detached = detachDraftAdapters();
-        set(initialState);
-        const teardown = disposeDetachedDraftAdapters(detached, true);
-        retainDraftSessionTeardown(detached.hostPersistenceId, teardown);
-        await teardown;
-      } else {
+      // The recovery begins to act here: it allocates the host that will
+      // replace the installed owner, so other pending attempts end.
+      supersedeOtherProvisionalOwners(provisionalOwner);
+
+      // Recovery must not borrow `hostDraft`: that normal new-host path
+      // intentionally detaches its predecessor before it allocates its next
+      // adapter.  Keep B local through its allocation. The one synchronous
+      // ownership handoff below comes before B restores a saved draft session
+      // or, when the record carries none, after B has initialized.
+      const provisional = new DraftPodHostAdapter();
+      const bufferedEvents: DraftPodHostEvent[] = [];
+      const stopBuffering = provisional.onEvent((event) => bufferedEvents.push(event));
+      const disposeProvisional = async () => {
+        stopBuffering();
         await disposeHostAdapter(provisional, true);
-      }
-    };
+      };
+      // An attempt abandoned before its handover ends B at once, which closes any
+      // peer B has open, and the next attempt for this saved pod waits for that.
+      // Either its caller's signal or its supersession abandons it.
+      const stopAbandonListeners = () => {
+        attempt.config.signal?.removeEventListener("abort", abandonProvisional);
+        provisionalOwner.controller.signal.removeEventListener("abort", abandonProvisional);
+      };
+      const abandonProvisional = () => {
+        stopAbandonListeners();
+        retainDraftSessionTeardown(attempt.config.persistenceId ?? null, disposeProvisional());
+      };
+      attempt.config.signal?.addEventListener("abort", abandonProvisional, { once: true });
+      provisionalOwner.controller.signal.addEventListener("abort", abandonProvisional, { once: true });
 
-    try {
-      // A retained teardown belongs to an earlier, already-detached owner or an
-      // abandoned attempt of this exact persistence source. Waiting for it does
-      // not touch live A; it only prevents B from racing that peer's release.
-      await claimDraftSessionOwner(attempt.config.persistenceId);
+      // The fenced commit: detach the installed owner, install B through the
+      // shared install step (which binds B to the route signal and publishes its
+      // session), then deliver its buffered events. It contains no await.
+      let committedEpoch: number | null = null;
+      let committedGeneration: number | null = null;
+      const commit = (): { owner: AbortController; previousTeardown: Promise<void> } => {
+        stopAbandonListeners();
+        stopBuffering();
+        settleProvisional(provisionalOwner);
+        const epoch = advanceDraftAdapterEpoch("replaced");
+        committedEpoch = epoch;
+        const previous = detachInstalledDraftOwner();
+        const owner = installDraftOwner(
+          set,
+          { role: "host", adapter: provisional, persistenceId: attempt.config.persistenceId ?? null },
+          attempt.routeSignal,
+        );
+        committedGeneration = owner.lifetime.generation;
+        attempt.onCommitted?.();
+        // The wrapper emitted only into the private buffer while B was
+        // provisional. Deliver those events only after the fenced install.
+        for (const event of bufferedEvents) handleHostEvent(event, set);
+
+        const previousTeardown = disposeDetachedOwner(previous, true);
+        retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+        return { owner: owner.lifetime.controller, previousTeardown };
+      };
+
+      // Called by B's initialization before its first write to the draft
+      // engine session: the attempt's last checks, the commit, then the retired
+      // owner's teardown, which closes its persistence and drains its saves.
+      const handover = async (): Promise<AbortSignal> => {
+        if (attempt.config.signal?.aborted || !isCurrentRecovery() || getEffectiveOffline()) {
+          throw new Error("Draft pod host recovery ended before its handover");
+        }
+        const { owner, previousTeardown } = commit();
+        await previousTeardown;
+        return owner.signal;
+      };
+
+      // After the handover the retired owner is not reinstated. A restore that
+      // fails ends B as well, with its saved session kept. That ends B with no
+      // successor, so a leave still waiting for B keeps waiting. A reset that
+      // ended B's lifecycle has published its own state, so B is only disposed.
+      const endCommittedRecovery = async () => {
+        if (
+          installedHost() === provisional &&
+          committedEpoch === draftAdapterEpoch &&
+          committedGeneration === lifecycleGeneration
+        ) {
+          advanceDraftAdapterEpoch("ended");
+          const detached = detachInstalledDraftOwner();
+          set(initialState);
+          const teardown = disposeDetachedOwner(detached, true);
+          retainDraftSessionTeardown(detachedPersistenceId(detached), teardown);
+          await teardown;
+        } else {
+          await disposeHostAdapter(provisional, true);
+        }
+      };
+
+      try {
+        // A retained teardown belongs to an earlier, already-detached owner or an
+        // abandoned attempt of this exact persistence source. Waiting for it does
+        // not touch live A; it only prevents B from racing that peer's release.
+        await claimDraftSessionOwner(attempt.config.persistenceId);
+        if (attempt.config.signal?.aborted) {
+          await disposeProvisional();
+          return "aborted";
+        }
+        if (!isCurrentRecovery()) {
+          await disposeProvisional();
+          return "superseded";
+        }
+        if (getEffectiveOffline()) {
+          await disposeProvisional();
+          return "offline";
+        }
+        await provisional.initialize({
+          ...attempt.config,
+          recovery: attempt.config.recovery
+            ? { ...attempt.config.recovery, isCurrent: isCurrentRecovery, handover }
+            : undefined,
+        });
+      } catch (error) {
+        // Read as the failure lands: a reset, a leave or a successor that has
+        // ended B's lifecycle owns what the store shows.
+        const lifecycleEnded = committedGeneration !== null && committedGeneration !== lifecycleGeneration;
+        if (committedEpoch === null) await disposeProvisional();
+        else await endCommittedRecovery();
+        if (error instanceof Draft27IncompatibilityError) return "incompatible";
+        if (error instanceof UnreadableSavedDraftError) return "unreadable";
+        if (attempt.config.signal?.aborted) return "aborted";
+        if (lifecycleEnded || !isCurrentRecovery()) return "superseded";
+        if (getEffectiveOffline()) return "offline";
+        return "initializationFailure";
+      }
+
+      // B committed at its handover and has initialized. It is resumed unless
+      // its route, a later replacement or a reset has already ended it.
+      if (committedEpoch !== null) {
+        return installedHost() === provisional && committedGeneration === lifecycleGeneration
+          ? "resumed"
+          : "superseded";
+      }
+
+      // A record without a draft session commits here. Every B non-commit
+      // outcome leaves A and its listener, durable source, credentials, outbox,
+      // and last admitted state untouched.  In particular, no await occurs after
+      // the final successful check and before the detach / install transition.
       if (attempt.config.signal?.aborted) {
         await disposeProvisional();
         return "aborted";
       }
-      if (!attempt.isCurrent()) {
+      if (!isCurrentRecovery()) {
         await disposeProvisional();
         return "superseded";
       }
@@ -2039,62 +2589,44 @@ export const useMultiplayerDraftStore = create<
         await disposeProvisional();
         return "offline";
       }
-      await provisional.initialize({
-        ...attempt.config,
-        recovery: attempt.config.recovery
-          ? { ...attempt.config.recovery, isCurrent: attempt.isCurrent, handover }
-          : undefined,
-      });
-    } catch (error) {
-      if (committedEpoch === null) await disposeProvisional();
-      else await endCommittedRecovery();
-      if (error instanceof Draft27IncompatibilityError) return "incompatible";
-      if (error instanceof UnreadableSavedDraftError) return "unreadable";
-      if (attempt.config.signal?.aborted) return "aborted";
-      if (!attempt.isCurrent()) return "superseded";
-      if (getEffectiveOffline()) return "offline";
-      return "initializationFailure";
-    }
 
-    // B committed at its handover and has initialized. It is resumed unless
-    // its route or a later replacement has already ended it.
-    if (committedEpoch !== null) {
-      return activeHostAdapter === provisional ? "resumed" : "superseded";
+      void commit().previousTeardown;
+      return "resumed";
+    } finally {
+      settleProvisional(provisionalOwner);
     }
-
-    // A record without a draft session commits here. Every B non-commit
-    // outcome leaves A and its listener, durable source, credentials, outbox,
-    // and last admitted state untouched.  In particular, no await occurs after
-    // the final successful check and before the detach / install transition.
-    if (attempt.config.signal?.aborted) {
-      await disposeProvisional();
-      return "aborted";
-    }
-    if (!attempt.isCurrent()) {
-      await disposeProvisional();
-      return "superseded";
-    }
-    if (getEffectiveOffline()) {
-      await disposeProvisional();
-      return "offline";
-    }
-
-    void commit().previousTeardown;
-    return "resumed";
   },
 
   hostDraft: async (config) => {
+    // A call already cancelled retires and writes nothing.
+    if (config.signal?.aborted) return { status: "superseded" };
     if (getEffectiveOffline()) {
       set({ error: DRAFT_OFFLINE_ERROR });
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
     }
-    const epoch = ++draftAdapterEpoch;
-    const previous = detachDraftAdapters();
-    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
-    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
-    if (previous.host || previous.guest) await previousTeardown;
-    if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
-    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    // Its first action retires the installed owner, so it ends every other
+    // pending attempt as it registers.
+    const provisional = beginProvisionalOwner();
+    const epoch = advanceDraftAdapterEpoch("replaced");
+    // A reset ends the lifecycle this start waits in, and supersedes no attempt.
+    const waitingGeneration = lifecycleGeneration;
+    const previous = detachInstalledDraftOwner();
+    const previousTeardown = disposeDetachedOwner(previous, true);
+    retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+    try {
+      if (previous) await previousTeardown;
+      if (config.persistenceId) await claimDraftSessionOwner(config.persistenceId);
+    } finally {
+      settleProvisional(provisional);
+    }
+    // A successor, a leave or a reset owns the session published now or next.
+    if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
+    if (!isCurrentProvisional(provisional)) {
+      // A recovery superseded this start after it retired its predecessor, so
+      // no owner is installed and the predecessor's session must not stay published.
+      replaceDraftSession(set, {});
+      return { status: "superseded" };
+    }
     if (config.signal?.aborted) {
       // No newer call has started, so the session this call ended must not stay published.
       replaceDraftSession(set, {});
@@ -2109,18 +2641,21 @@ export const useMultiplayerDraftStore = create<
     }
 
     const adapter = new DraftPodHostAdapter();
-    const { controller, generation, abortOwner } = installDraftOwner(
+    const owner = installDraftOwner(
       set,
       { role: "host", adapter, persistenceId: config.persistenceId ?? null },
-      epoch,
       config.signal,
     );
+    const { controller, generation } = owner.lifetime;
+    const isCurrentOwner = () => installedDraftOwner === owner
+      && epoch === draftAdapterEpoch
+      && generation === lifecycleGeneration;
 
     let initialized = false;
     try {
       await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
       initialized = true;
-      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) return { status: "superseded" };
+      if (!isCurrentOwner()) return { status: "superseded" };
       if (config.persistenceId) {
         const view = get().view;
         const phase = view ? activePhaseForDraftView(view) ?? "lobby" : "lobby";
@@ -2142,11 +2677,11 @@ export const useMultiplayerDraftStore = create<
       // The adapter reports the error while it is current. A late failure is
       // deliberately silent: its event gate was detached by the new owner.
     } finally {
-      if (activeHostAdapter !== adapter || epoch !== draftAdapterEpoch) {
-        config.signal?.removeEventListener("abort", abortOwner);
+      if (!isCurrentOwner()) {
+        owner.lifetime.route?.signal.removeEventListener("abort", owner.lifetime.route.listener);
         await disposeHostAdapter(adapter, true);
       } else if (!initialized || adapter.status === "error") {
-        detachDraftAdapters();
+        detachInstalledDraftOwner();
         await disposeHostAdapter(adapter, true);
         if (epoch === draftAdapterEpoch && generation === lifecycleGeneration && getEffectiveOffline()) {
           replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
@@ -2157,7 +2692,9 @@ export const useMultiplayerDraftStore = create<
     return { status: "failed", error: get().error };
   },
 
-  joinDraft: async (config, { failureReport = "store" } = {}) => {
+  joinDraft: async (config, { failureReport = "store", standsOn = null } = {}) => {
+    // A call already cancelled retires and writes nothing.
+    if (config.signal?.aborted) return { status: "superseded" };
     if (getEffectiveOffline()) {
       if (failureReport === "store") set({ error: DRAFT_OFFLINE_ERROR });
       return { status: "failed", error: DRAFT_OFFLINE_ERROR };
@@ -2173,12 +2710,26 @@ export const useMultiplayerDraftStore = create<
         ? { status: "failed", error, code: guestRecoveryFailure.code }
         : { status: "failed", error };
     };
-    const epoch = ++draftAdapterEpoch;
-    const previous = detachDraftAdapters();
-    const previousTeardown = disposeDetachedDraftAdapters(previous, true);
-    retainDraftSessionTeardown(previous.hostPersistenceId, previousTeardown);
-    if (previous.host || previous.guest) await previousTeardown;
-    if (epoch !== draftAdapterEpoch) return { status: "superseded" };
+    // Every caller's join, a guest resume's included, retires the installed
+    // owner first, so it ends every other pending attempt as it registers.
+    const provisional = beginProvisionalOwner();
+    const epoch = advanceDraftAdapterEpoch("replaced");
+    // See hostDraft: a reset ends the lifecycle this join waits in.
+    const waitingGeneration = lifecycleGeneration;
+    const previous = detachInstalledDraftOwner();
+    const previousTeardown = disposeDetachedOwner(previous, true);
+    retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+    try {
+      if (previous) await previousTeardown;
+    } finally {
+      settleProvisional(provisional);
+    }
+    if (epoch !== draftAdapterEpoch || waitingGeneration !== lifecycleGeneration) return { status: "superseded" };
+    if (!isCurrentProvisional(provisional)) {
+      // See hostDraft: a recovery superseded this join after it retired its predecessor.
+      replaceDraftSession(set, {});
+      return { status: "superseded" };
+    }
     if (config.signal?.aborted) {
       // No newer call has started, so the session this call ended must not stay published.
       replaceDraftSession(set, {});
@@ -2193,26 +2744,25 @@ export const useMultiplayerDraftStore = create<
     }
 
     const adapter = new DraftPodGuestAdapter();
-    const { controller, generation, abortOwner } = installDraftOwner(
-      set,
-      { role: "guest", adapter },
-      epoch,
-      config.signal,
-    );
+    const owner = installDraftOwner(set, { role: "guest", adapter, standsOn }, config.signal);
+    const { controller, generation } = owner.lifetime;
+    const isCurrentOwner = () => installedDraftOwner === owner
+      && epoch === draftAdapterEpoch
+      && generation === lifecycleGeneration;
 
     let initialized = false;
     try {
       await adapter.initialize({ ...config, signal: lifecycleSignal(controller) });
       initialized = true;
-      if (activeGuestAdapter === adapter && epoch === draftAdapterEpoch) return { status: "opened" };
+      if (isCurrentOwner()) return { status: "opened" };
     } catch {
       // See hostDraft: only the current owner is allowed to project errors.
     } finally {
-      if (activeGuestAdapter !== adapter || epoch !== draftAdapterEpoch) {
-        config.signal?.removeEventListener("abort", abortOwner);
+      if (!isCurrentOwner()) {
+        owner.lifetime.route?.signal.removeEventListener("abort", owner.lifetime.route.listener);
         await disposeGuestAdapter(adapter);
       } else if (!initialized || adapter.status === "error") {
-        detachDraftAdapters();
+        detachInstalledDraftOwner();
         await disposeGuestAdapter(adapter);
         if (epoch === draftAdapterEpoch && generation === lifecycleGeneration && getEffectiveOffline()) {
           replaceDraftSession(set, { error: DRAFT_OFFLINE_ERROR });
@@ -2252,65 +2802,72 @@ export const useMultiplayerDraftStore = create<
       const active = inspectActiveDraftGuest();
       if (active.type === "absent") return "absent";
       if (active.type === "invalid") {
-        if (active.capture) clearActiveDraftGuestIfCurrent(active.capture);
-        else clearActiveDraftGuest();
+        if (active.capture) await clearActiveDraftGuestIfCurrent(active.capture);
+        else await clearActiveDraftGuest();
         return "invalid";
       }
       const { meta: locator, capture } = active;
       const startingEpoch = draftAdapterEpoch;
       const locatorIsCurrent = () => {
         const current = inspectActiveDraftGuest();
-        return current.type === "present"
-          && current.capture.roomCode === capture.roomCode
-          && current.capture.displayName === capture.displayName
-          && current.capture.hostPeerId === capture.hostPeerId
-          && current.capture.timestamp === capture.timestamp;
+        return current.type === "present" && sameActiveDraftGuestCapture(current.capture, capture);
       };
-        let session: Awaited<ReturnType<typeof loadDraftGuestSession>>;
+      // Provisional while it reads its seat: a leave or a later attempt
+      // supersedes it. It supersedes nobody itself; its join does, on entry.
+      const provisional = registerProvisionalOwner();
+      const isCurrentResume = () => isCurrent() && isCurrentProvisional(provisional);
       try {
-        session = await loadDraftGuestSession(locator.hostPeerId, locator);
-      } catch {
-        if (!isCurrent() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
+        let session: Awaited<ReturnType<typeof loadDraftGuestSession>>;
+        try {
+          session = await loadDraftGuestSession(locator.hostPeerId, locator);
+        } catch {
+          if (!isCurrentResume() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
+          if (getEffectiveOffline()) {
+            set({ error: DRAFT_OFFLINE_ERROR });
+            return "offline";
+          }
+          return "failed";
+        }
+        if (!isCurrentResume() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
         if (getEffectiveOffline()) {
           set({ error: DRAFT_OFFLINE_ERROR });
           return "offline";
         }
-        return "failed";
-      }
-      if (!isCurrent() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
-      if (getEffectiveOffline()) {
-        set({ error: DRAFT_OFFLINE_ERROR });
-        return "offline";
-      }
-      if (!session) {
-        clearActiveDraftGuestIfCurrent(capture);
-        return "invalid";
-      }
+        if (!session) {
+          await clearActiveDraftGuestIfCurrent(capture);
+          return "invalid";
+        }
 
-      if (!isCurrent() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
-      if (getEffectiveOffline()) {
-        set({ error: DRAFT_OFFLINE_ERROR });
-        return "offline";
+        if (!isCurrentResume() || draftAdapterEpoch !== startingEpoch || !locatorIsCurrent()) return "superseded";
+        if (getEffectiveOffline()) {
+          set({ error: DRAFT_OFFLINE_ERROR });
+          return "offline";
+        }
+        // Handed to its join, which registers and sweeps on entry, with no
+        // await between this settle and that registration.
+        settleProvisional(provisional);
+        const joined = await get().joinDraft({
+          kind: "reconnect",
+          roomCode: locator.roomCode,
+          displayName: locator.displayName,
+          hostPeerId: locator.hostPeerId,
+          draftToken: session.draftToken,
+          signal: options.signal,
+        }, { standsOn: capture });
+        if (!isCurrentResume() || joined.status === "superseded") return "superseded";
+        if (joined.status === "opened") return "resumed";
+        if (getEffectiveOffline()) {
+          set({ error: DRAFT_OFFLINE_ERROR });
+          return "offline";
+        }
+        if (get().guestRecoveryFailure?.kind === "invalid") {
+          await clearActiveDraftGuestIfCurrent(capture);
+          return "invalid";
+        }
+        return "failed";
+      } finally {
+        settleProvisional(provisional);
       }
-      const joined = await get().joinDraft({
-        kind: "reconnect",
-        roomCode: locator.roomCode,
-        displayName: locator.displayName,
-        hostPeerId: locator.hostPeerId,
-        draftToken: session.draftToken,
-        signal: options.signal,
-      });
-      if (!isCurrent() || joined.status === "superseded") return "superseded";
-      if (joined.status === "opened") return "resumed";
-      if (getEffectiveOffline()) {
-        set({ error: DRAFT_OFFLINE_ERROR });
-        return "offline";
-      }
-      if (get().guestRecoveryFailure?.kind === "invalid") {
-        clearActiveDraftGuestIfCurrent(capture);
-        return "invalid";
-      }
-      return "failed";
     })();
     resumeGuestDraftAttempt = attempt;
     try {
@@ -2320,13 +2877,231 @@ export const useMultiplayerDraftStore = create<
     }
   },
 
+  createNativeDraft: ({ endpoint, settings, signal }) =>
+    openNativeOwner(set, get, { kind: "create", endpoint, settings }, signal),
+
+  joinNativeDraft: ({ endpoint, draftCode, displayName, password, signal }) =>
+    openNativeOwner(set, get, { kind: "join", endpoint, draftCode, displayName, password }, signal),
+
+  resumeNativeDraft: async ({ signal } = {}) => {
+    if (signal?.aborted) return { status: "superseded" };
+    if (getEffectiveOffline()) return { status: "offline" };
+    const active = inspectActiveNativeDraft();
+    if (active.type === "absent") return { status: "absent" };
+    if (active.type === "invalid") {
+      await clearUnusableNativeDraft(active.capture);
+      return { status: "invalid" };
+    }
+    const { pointer, capture } = active;
+    // A live session of this capability is never rebuilt. One whose socket
+    // closed, or whose view was refused, is resumed: the handoff retires it.
+    const held = installedDraftOwner;
+    if (held?.role === "native" && held.capability?.capabilityId === pointer.capabilityId
+      && isMultiplayerDraftPodLive(get())) {
+      return { status: "resumed" };
+    }
+
+    // Provisional until its handoff: a leave or a later attempt supersedes it.
+    // It supersedes other attempts only once it begins to act, below.
+    const provisional = registerProvisionalOwner();
+    const isCurrentResume = () => isCurrentProvisional(provisional) && !signal?.aborted;
+    try {
+      const loaded = await loadNativeDraftCapability(pointer);
+      if (!isCurrentResume()) return { status: "superseded" };
+      switch (loaded.type) {
+        case "present":
+          break;
+        case "readFailure":
+          return { status: "failed", error: null };
+        case "absent":
+        case "invalid":
+        case "mismatch":
+          await clearUnusableNativeDraft(capture);
+          return { status: "invalid" };
+        default:
+          return assertNever(loaded);
+      }
+      if (getEffectiveOffline()) return { status: "offline" };
+      const { record } = loaded;
+
+      // It begins to act: it builds the adapter that will replace the
+      // installed owner, so other pending attempts end. The buffer is in place
+      // before anything is sent, so the handoff delivers what the adapter
+      // reported before it.
+      supersedeOtherProvisionalOwners(provisional);
+      const adapter = new ServerDraftAdapter(record.endpoint);
+      const buffered: ServerDraftAdapterEvent[] = [];
+      const stopBuffering = adapter.onEvent((event) => buffered.push(event));
+      let abandoned = false;
+      const stopAbandonListeners = () => {
+        signal?.removeEventListener("abort", abandon);
+        provisional.controller.signal.removeEventListener("abort", abandon);
+      };
+      // An attempt ended before its handoff ends its adapter at once, and the
+      // reconnect still pending on it with it.
+      const abandon = () => {
+        stopAbandonListeners();
+        if (abandoned) return;
+        abandoned = true;
+        stopBuffering();
+        buffered.length = 0;
+        void disposeNativeAdapter(adapter);
+      };
+      signal?.addEventListener("abort", abandon, { once: true });
+      provisional.controller.signal.addEventListener("abort", abandon, { once: true });
+
+      try {
+        await adapter.reconnectDraft({
+          draftCode: record.draftCode,
+          playerToken: record.playerToken,
+          seatIndex: record.seatIndex,
+        });
+      } catch (error) {
+        // Nothing it buffered is delivered and nothing is written: whatever
+        // is installed stays as it was, and so does the capability.
+        abandon();
+        if (!isCurrentResume()) return { status: "superseded" };
+        if (getEffectiveOffline()) return { status: "offline" };
+        const message = error instanceof Error ? error.message : String(error);
+        return error instanceof Draft27IncompatibilityError
+          ? { status: "failed", error: message, code: error.code }
+          : { status: "failed", error: message };
+      }
+      if (!isCurrentResume()) {
+        abandon();
+        return { status: "superseded" };
+      }
+      if (getEffectiveOffline()) {
+        abandon();
+        return { status: "offline" };
+      }
+
+      // A resumed seat's record restarts its age, as the P2P guest rewrites
+      // its record at each reconnect acknowledgement.
+      let refreshed: ActiveNativeDraftPointer;
+      try {
+        refreshed = await saveNativeDraftCapability({
+          capabilityId: record.capabilityId,
+          endpoint: record.endpoint,
+          draftCode: record.draftCode,
+          playerToken: record.playerToken,
+          seatIndex: record.seatIndex,
+          participant: record.participant,
+        });
+      } catch {
+        // A later attempt that superseded this one owns what the page shows.
+        abandon();
+        if (!isCurrentResume()) return { status: "superseded" };
+        if (getEffectiveOffline()) return { status: "offline" };
+        return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
+      }
+      if (!isCurrentResume()) {
+        abandon();
+        return { status: "superseded" };
+      }
+      if (getEffectiveOffline()) {
+        abandon();
+        return { status: "offline" };
+      }
+
+      // The pointer goes first, and only over the pointer this resume read: a
+      // pointer another writer stored meanwhile, and its record, stay, and so
+      // does the installed owner. The comparison, the write and the handoff
+      // run in one synchronous body under the cross-tab recovery-pointer
+      // transaction: retire the installed owner and start its teardown,
+      // install this one, deliver what it buffered. The body contains no
+      // await, so another tab's publication lands wholly before the
+      // comparison or wholly after the handoff; after it, the resume awaits
+      // only the removal the publication returned.
+      const transaction = await withActiveDraftPointer((txn): NativeResumeStep => {
+        // The lock wait can be long: an attempt ended or taken offline
+        // meanwhile acts on nothing.
+        if (!isCurrentResume()) return { kind: "superseded" };
+        if (getEffectiveOffline()) return { kind: "offline" };
+        let published: NativeDraftRepublication;
+        try {
+          published = txn.republishNative(capture, refreshed);
+        } catch {
+          return { kind: "writeFailed" };
+        }
+        if (published.status === "superseded") return { kind: "refused", settled: published.settled };
+        stopAbandonListeners();
+        stopBuffering();
+        settleProvisional(provisional);
+        const epoch = advanceDraftAdapterEpoch("replaced");
+        const previous = detachInstalledDraftOwner();
+        const previousTeardown = disposeDetachedOwner(previous, true);
+        retainDraftSessionTeardown(detachedPersistenceId(previous), previousTeardown);
+        void previousTeardown;
+        const owner = installDraftOwner(set, {
+          role: "native",
+          adapter,
+          participant: record.participant,
+          capability: {
+            capabilityId: record.capabilityId,
+            endpoint: record.endpoint,
+            draftCode: record.draftCode,
+            playerToken: record.playerToken,
+          },
+        }, signal);
+        set({ seatIndex: record.seatIndex });
+        for (const event of buffered) handleNativeEvent(event, set);
+        return { kind: "published", settled: published.settled, owner, epoch };
+      });
+      if (transaction.status === "skipped") {
+        // Nothing was compared, written or retired.
+        abandon();
+        if (!isCurrentResume()) return { status: "superseded" };
+        if (getEffectiveOffline()) return { status: "offline" };
+        return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
+      }
+      // A step whose result could not be recorded wrote back the pointer this
+      // resume read, which names the same seat; only its published arm changes
+      // the pointer, and that arm has handed off, so it goes on as resumed.
+      const step = transaction.value;
+      switch (step.kind) {
+        case "superseded":
+          abandon();
+          return { status: "superseded" };
+        case "offline":
+          abandon();
+          return { status: "offline" };
+        case "writeFailed":
+          abandon();
+          return { status: "failed", error: DRAFT_RECOVERY_SAVE_ERROR };
+        case "refused":
+          abandon();
+          await step.settled;
+          return { status: "superseded" };
+        case "published":
+          break;
+        default:
+          return assertNever(step);
+      }
+      const { owner, epoch } = step;
+      await step.settled;
+      // A successor, a leave or a reset owns the session published now.
+      if (
+        installedDraftOwner !== owner
+        || epoch !== draftAdapterEpoch
+        || owner.lifetime.generation !== lifecycleGeneration
+      ) {
+        return { status: "superseded" };
+      }
+      return { status: "resumed" };
+    } finally {
+      settleProvisional(provisional);
+    }
+  },
+
   startDraft: async (botFillEmptySeats = true) => {
-    if (!activeHostAdapter) return;
+    const host = installedHost();
+    if (!host) return;
     if (getEffectiveOffline()) {
       set({ error: DRAFT_OFFLINE_ERROR });
       return;
     }
-    await activeHostAdapter.startDraft(botFillEmptySeats);
+    await host.startDraft(botFillEmptySeats);
   },
 
   submitPick: (cardInstanceId, destination = "deck", placementHint) => performPick({
@@ -2387,7 +3162,7 @@ export const useMultiplayerDraftStore = create<
     const state = get();
     const { role, view, workspaceState } = state;
     if (!view || !workspaceState || view.status !== "Deckbuilding") return;
-    const adapter = role === "host" ? activeHostAdapter : role === "guest" ? activeGuestAdapter : null;
+    const adapter = role === "host" ? installedHost() : role === "guest" ? installedGuest() : null;
     if (!adapter) return;
     const generation = lifecycleGeneration;
     const revision = workspaceRevision;
@@ -2399,7 +3174,7 @@ export const useMultiplayerDraftStore = create<
         && current.view === view
         && current.view?.status === "Deckbuilding"
         && current.workspaceState === workspaceState
-        && (role === "host" ? activeHostAdapter : activeGuestAdapter) === adapter;
+        && (role === "host" ? installedHost() : installedGuest()) === adapter;
     };
 
     try {
@@ -2482,10 +3257,12 @@ export const useMultiplayerDraftStore = create<
     const workspace = reconcileWorkspaceState(workspaceState, view.pool);
     const partition = projectWorkspacePartition(workspace, view.pool);
 
-    if (role === "host" && activeHostAdapter) {
+    const host = installedHost();
+    const guest = installedGuest();
+    if (role === "host" && host) {
       const nextView = companion
-        ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
-        : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+        ? await host.submitDeck(partition.mainDeck, commanders, companion)
+        : await host.submitDeck(partition.mainDeck, commanders);
       recordAcceptedSubmission({
         view,
         nextView,
@@ -2495,11 +3272,11 @@ export const useMultiplayerDraftStore = create<
         commanders,
         companion,
       });
-    } else if (role === "guest" && activeGuestAdapter) {
+    } else if (role === "guest" && guest) {
       if (companion) {
-        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+        await guest.submitDeck(partition.mainDeck, commanders, companion);
       } else {
-        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+        await guest.submitDeck(partition.mainDeck, commanders);
       }
       recordAcceptedSubmission({
         view,
@@ -2513,29 +3290,27 @@ export const useMultiplayerDraftStore = create<
   },
 
   kickPlayer: (seat, reason) => {
-    if (!activeHostAdapter) return;
-    activeHostAdapter.kickPlayer(seat, reason);
+    installedHost()?.kickPlayer(seat, reason);
   },
 
   requestPause: () => {
-    if (!activeHostAdapter) return;
-    activeHostAdapter.requestPause();
+    installedHost()?.requestPause();
   },
 
   requestResume: () => {
-    if (!activeHostAdapter) return;
-    activeHostAdapter.requestResume();
+    installedHost()?.requestResume();
   },
 
   launchCommanderGame: async (navigate) => {
     const { role, view, seatIndex, roomCode } = get();
+    const hostAdapter = installedHost();
     if (
       role !== "host" ||
       !view ||
       view.launch_capability !== "CommanderMultiplayer" ||
       view.status !== "Complete" ||
       seatIndex === null ||
-      !activeHostAdapter
+      !hostAdapter
     ) {
       return;
     }
@@ -2569,7 +3344,7 @@ export const useMultiplayerDraftStore = create<
       // where nobody is live and there is nothing to send.
       let payload: DraftMatchDeckPayload;
       try {
-        payload = await activeHostAdapter.podCommanderDeckPayload(view, seatIndex);
+        payload = await hostAdapter.podCommanderDeckPayload(view, seatIndex);
       } catch (err) {
         // A refusal from draft-wasm reaches here: `get_bot_deck_inner` returns
         // `Err` when it cannot judge a bot deck's legality (no card database)
@@ -2592,7 +3367,6 @@ export const useMultiplayerDraftStore = create<
       return;
     }
 
-    const hostAdapter = activeHostAdapter;
     const localSeat = seatIndex;
     const gameId = crypto.randomUUID();
     // PER-LAUNCH, never a stable derivation of the pod's own code. A stable
@@ -2881,7 +3655,7 @@ export const useMultiplayerDraftStore = create<
 
   joinCommanderGame: async (navigate) => {
     const launch = get().commanderLaunch;
-    if (!launch || !activeGuestAdapter) return;
+    if (!launch || !installedGuest()) return;
     // A second press opens a SECOND `joinRoom`, which the host answers with the
     // NEXT waiting seat — kicking a later human "Lobby full" and firing
     // `roomFull` on a ghost seat. Claimed before the first `await`, because the
@@ -3211,8 +3985,9 @@ export const useMultiplayerDraftStore = create<
                 : score.p1_wins > score.p0_wins
                   ? matchPairing.localSeat
                   : null; // draw
-              if (activeHostAdapter) {
-                activeHostAdapter.handleMatchBetweenGames(
+              const host = installedHost();
+              if (host) {
+                host.handleMatchBetweenGames(
                   matchPairing.matchId,
                   gameNumber,
                   score,
@@ -3221,7 +3996,7 @@ export const useMultiplayerDraftStore = create<
                   matchPairing.opponentSeat,
                 );
               } else {
-                activeGuestAdapter?.handleMatchBetweenGames(
+                installedGuest()?.handleMatchBetweenGames(
                   matchPairing.matchId,
                   gameNumber,
                   score,
@@ -3380,11 +4155,13 @@ export const useMultiplayerDraftStore = create<
         winnerSeat,
       };
       await saveDraftSettlementOutbox(settlement);
-      if (role === "host" && activeHostAdapter) {
-        await activeHostAdapter.submitMatchSettlement(settlement);
+      const host = installedHost();
+      const guest = installedGuest();
+      if (role === "host" && host) {
+        await host.submitMatchSettlement(settlement);
         await clearDraftSettlementOutbox(matchPairing.binding);
-      } else if (role === "guest" && activeGuestAdapter) {
-        activeGuestAdapter.sendMatchSettlement(settlement);
+      } else if (role === "guest" && guest) {
+        guest.sendMatchSettlement(settlement);
       }
     })();
   },
@@ -3408,18 +4185,21 @@ export const useMultiplayerDraftStore = create<
   },
 
   advanceRound: () => {
-    if (!activeHostAdapter) return;
-    void activeHostAdapter.advanceRound();
+    const host = installedHost();
+    if (!host) return;
+    void host.advanceRound();
   },
 
   overrideMatchResult: (matchId, winnerSeat) => {
-    if (!activeHostAdapter) return;
-    void activeHostAdapter.overrideMatchResult(matchId, winnerSeat);
+    const host = installedHost();
+    if (!host) return;
+    void host.overrideMatchResult(matchId, winnerSeat);
   },
 
   replaceSeatWithBot: (seat) => {
-    if (!activeHostAdapter) return;
-    void activeHostAdapter.replaceSeatWithBot(seat);
+    const host = installedHost();
+    if (!host) return;
+    void host.replaceSeatWithBot(seat);
   },
 
   submitSideboard: (matchId, mainDeck, sideboard) => {
@@ -3464,8 +4244,8 @@ export const useMultiplayerDraftStore = create<
       seat: state.seatIndex, payload, launchPayload: launch, launchDigest: draftIntergameDigest(launch),
     });
     await saveDraftIntergameCommands(launch.matchId, controller.snapshot());
-    if (state.role === "host") activeHostAdapter?.submitAuthorized(state.seatIndex, command);
-    else activeGuestAdapter?.submitAuthorized(command);
+    if (state.role === "host") installedHost()?.submitAuthorized(state.seatIndex, command);
+    else installedGuest()?.submitAuthorized(command);
     if (payload.type === "SubmitSideboard") set({ sideboardSubmitted: true });
   },
 
@@ -3507,9 +4287,9 @@ export const useMultiplayerDraftStore = create<
     if (!receipted) return;
     await saveDraftIntergameCommands(command.matchId, controller.snapshot());
     if (state.role === "host") {
-      activeHostAdapter?.submitAuthorized(state.seatIndex!, receipted);
+      installedHost()?.submitAuthorized(state.seatIndex!, receipted);
     } else {
-      activeGuestAdapter?.acknowledgeAuthorized(commandAcknowledgement(receipted), receipted.receiptId!);
+      installedGuest()?.acknowledgeAuthorized(commandAcknowledgement(receipted), receipted.receiptId!);
     }
   },
 
@@ -3554,21 +4334,30 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async (preserveRecovery = false) => {
-    // With nothing installed, this new epoch supersedes a start that has no
-    // adapter yet: one waiting for its predecessor's teardown, or a guest
-    // resume reading its seat.
-    if (!activeHostAdapter && !activeGuestAdapter) ++draftAdapterEpoch;
+    // Moved as the leave begins, before any await, so an exit reads its own
+    // leave's generation right after calling it.
+    draftOwnerGeneration += 1;
+    // Then, before any read or await: every attempt that has not installed an
+    // owner ends here, whether it is still reading, allocating or waiting for
+    // its predecessor's teardown. The installed owner is this leave's own.
+    supersedeProvisionalOwners();
+    // With nothing installed, this new epoch also supersedes a start that has
+    // already retired its predecessor and is waiting for its teardown.
+    if (!installedDraftOwner) advanceDraftAdapterEpoch("ended");
     // Fenced against a newer `hostDraft`/`joinDraft` that opened while this
     // call was awaiting: each `await` below can run long enough (the
     // Commander termination flush; the guest leave-ack, up to
     // `LEAVE_ACK_TIMEOUT_MS`) for a replacement session to already be live by
     // the time it returns, and a stale `leave` must not tear that one down.
     const epoch = draftAdapterEpoch;
+    // A successor's start or handoff aborts this, settling the wait below: the
+    // left owner is no longer this tab's to wait for.
+    const replaced = ownerReplaced.signal;
     // Taken before any await, so a newer session or a route abort that
     // detaches this host while `leave` waits still ends it
     // (`tearDownHostAdapter`).
-    const host = activeHostAdapter;
-    if (host && !preserveRecovery) leftHostAdapters.set(host, activeHostPersistenceId);
+    const owner = installedDraftOwner;
+    if (owner?.role === "host" && !preserveRecovery) leftHostAdapters.set(owner.adapter, owner.persistenceId);
     // Captured before any await, for `disposeCapturedMatchRuntime` on the
     // early-return arms below: exactly the match runtime THIS call's own
     // session owns right now, before a newer `hostDraft`/`joinDraft` can have
@@ -3591,20 +4380,12 @@ export const useMultiplayerDraftStore = create<
       return;
     }
 
-    const guest = activeGuestAdapter;
-
     // An explicit guest leave is host-acknowledged. Until that completes, the
     // live adapter remains the recovery owner; tearing down the lifecycle here
     // would discard the session that must reconnect after a dropped ACK.
-    if (host) {
-      await disposeHostAdapter(host, preserveRecovery);
-      if (epoch !== draftAdapterEpoch) {
-        disposeCapturedMatchRuntime(ownedMatchAdapter, ownedMatchController);
-        return;
-      }
-    }
-    if (guest) {
-      await guest.dispose({ preserveRecovery });
+    const wait = leaveWait(owner, preserveRecovery);
+    if (wait) {
+      await settleUnlessReplaced(wait, replaced);
       if (epoch !== draftAdapterEpoch) {
         disposeCapturedMatchRuntime(ownedMatchAdapter, ownedMatchController);
         return;
@@ -3615,16 +4396,12 @@ export const useMultiplayerDraftStore = create<
     // The pod session has now ended, so its game transport can follow it.
     disposeMatchAdapter(set);
 
-    if (activeHostAdapter === host) {
-      activeHostAdapter = null;
-    }
-    if (activeGuestAdapter === guest) {
-      activeGuestAdapter = null;
-    }
+    if (owner && installedDraftOwner === owner) detachInstalledDraftOwner();
     replaceDraftSession(set, { interactionGeneration: lifecycleGeneration });
   },
 
   reset: () => {
+    draftOwnerGeneration += 1;
     beginDraftLifecycle();
     disposeMatchAdapter(set);
     replaceDraftSession(set, { interactionGeneration: lifecycleGeneration });
@@ -3916,8 +4693,53 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
   }
 }
 
-function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
+/**
+ * Publishes a guest seat's committed pointer through the capability of the
+ * recovery-pointer transaction the committing guest holds. A new seat's
+ * welcome is an explicit open and writes over whatever is stored; what it
+ * wrote becomes the seat's standing pointer only when it is the pointer
+ * actually stored. Every later commit writes only over the pointer the seat
+ * stands on. If the step's result cannot be recorded and its write is
+ * reverted, the seat goes back to standing on the pointer it stood on before.
+ */
+function publishGuestRecoveryPointer(
+  owner: InstalledGuestOwner,
+  pointer: DraftGuestRecoveryPointer,
+  recovery: ActiveDraftPointerTxn,
+): void {
+  const standsOn = owner.standsOn;
+  if (standsOn === null) {
+    // A native pointer it replaces takes its record with it.
+    void recovery.publishGuest(pointer);
+    const stored = inspectActiveDraftGuest();
+    if (
+      stored.type === "present"
+      && stored.capture.hostPeerId === pointer.hostPeerId
+      && stored.capture.capabilityId === pointer.capabilityId
+    ) {
+      owner.standsOn = stored.capture;
+    }
+  } else {
+    const written = recovery.republishGuest(standsOn, pointer);
+    if (written !== null) owner.standsOn = written;
+  }
+  const standing = owner.standsOn;
+  if (standing !== standsOn) {
+    recovery.onReverted(() => {
+      if (owner.standsOn === standing) owner.standsOn = standsOn;
+    });
+  }
+}
+
+function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn, owner: InstalledGuestOwner): void {
   switch (event.type) {
+    case "recoveryCommitted":
+      // This event reaches only the installed owner, so a superseded or ended
+      // owner publishes nothing, and the write runs in the commit's own
+      // continuation, inside the recovery-pointer transaction the committing
+      // guest holds.
+      publishGuestRecoveryPointer(owner, event.pointer, event.recovery);
+      break;
     case "workspaceRestored":
       restoredWorkspace = {
         generation: lifecycleGeneration,
@@ -4059,5 +4881,47 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       });
       break;
     }
+  }
+}
+
+/**
+ * A native owner's adapter events. Native picks, decisions, deck submission
+ * and match play do not run through this store, so their events write nothing.
+ */
+function handleNativeEvent(event: ServerDraftAdapterEvent, set: SetFn): void {
+  switch (event.type) {
+    case "waitingForPlayers":
+      set({ phase: "lobby" });
+      break;
+    case "draftViewUpdated":
+      installEventView(event.view);
+      break;
+    case "incompatible":
+      set({
+        phase: "error",
+        error: event.failure.message,
+        guestRecoveryFailure: { kind: "incompatible", message: event.failure.message, code: event.failure.code },
+      });
+      break;
+    case "disconnected":
+      set({ phase: "error" });
+      break;
+    case "error":
+      set({ error: event.message });
+      break;
+    case "serverHello":
+    case "matchStarting":
+    case "timerSync":
+    case "draftOver":
+    case "draftActionRejected":
+    case "gameStateUpdated":
+    case "gameOver":
+    case "opponentDisconnected":
+    case "opponentReconnected":
+    case "actionPendingChanged":
+    case "reconnected":
+      break;
+    default:
+      assertNever(event);
   }
 }
