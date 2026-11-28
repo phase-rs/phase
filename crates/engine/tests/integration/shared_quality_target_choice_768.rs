@@ -5,6 +5,9 @@ use std::collections::BTreeSet;
 use engine::ai_support::{candidate_actions, legal_actions};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{
+    Effect, FilterProp, SharedQuality, SharedQualityRelation, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -326,12 +329,42 @@ fn prismatic_wardrobe_rejects_a_target_with_no_clothing_reference() {
         .with_color(vec![ManaColor::Red])
         .id();
     let mut runner = build(scenario, &[ManaType::White]);
+
+    // Reach guard: one target (no multi-target declaration) whose filter
+    // carries the reference-free "doesn't share a color" relation.
+    let ability = &runner.state().objects[&spell].abilities[0];
+    assert!(ability.multi_target.is_none());
+    let Effect::Destroy {
+        target: TargetFilter::Typed(filter),
+        ..
+    } = ability.effect.as_ref()
+    else {
+        panic!(
+            "Wardrobe destroys one typed target, got {:?}",
+            ability.effect
+        );
+    };
+    assert!(filter.properties.iter().any(|prop| matches!(
+        prop,
+        FilterProp::SharesQuality {
+            quality: SharedQuality::Color,
+            reference: None,
+            relation: SharedQualityRelation::DoesNotShare,
+        }
+    )));
+
+    // A single target has no group to compare, so the unresolved relation
+    // admits nothing: the spell isn't offered, and naming the Goblin fails.
+    assert!(!legal_actions(runner.state()).iter().any(|action| matches!(
+        action,
+        GameAction::CastSpell { object_id, .. } if *object_id == spell
+    )));
     let card_id = runner.state().objects[&spell].card_id;
     assert!(runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
-            targets: vec![],
+            targets: vec![victim],
             payment_mode: CastPaymentMode::Auto,
         })
         .is_err());
